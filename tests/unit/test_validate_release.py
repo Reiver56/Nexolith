@@ -61,6 +61,20 @@ def test_validate_release_rejects_unreleased_changelog(tmp_path: Path) -> None:
         validate_release("v1.2.3", tmp_path)
 
 
+def test_validate_release_rejects_compact_release_date(tmp_path: Path) -> None:
+    write_release_files(tmp_path, status="20260731")
+
+    with pytest.raises(ReleaseValidationError, match="must use an ISO release date"):
+        validate_release("v1.2.3", tmp_path)
+
+
+def test_validate_release_rejects_nonexistent_release_date(tmp_path: Path) -> None:
+    write_release_files(tmp_path, status="2026-02-30")
+
+    with pytest.raises(ReleaseValidationError, match="must use an ISO release date"):
+        validate_release("v1.2.3", tmp_path)
+
+
 def test_validate_release_rejects_incomplete_distribution_set(tmp_path: Path) -> None:
     write_release_files(tmp_path)
     dist_dir = tmp_path / "dist"
