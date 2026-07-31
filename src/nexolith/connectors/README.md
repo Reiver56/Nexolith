@@ -3,6 +3,7 @@
 Connectors translate external data to and from Nexolith's `Rows` representation. CSV and SQL
 implementations are constructed through the connector registry.
 
-New connectors should implement the source or destination protocol, raise domain exceptions, close
-resources deterministically, and never include credentials or complete connection URLs in errors
-or logs. Real PostgreSQL coverage lives in `tests/integration/test_postgresql.py`.
+New connectors should implement the source or destination protocol, wrap expected I/O or driver
+failures in `ConnectorError` with exception chaining, and close resources deterministically.
+Public errors and logs must never include usernames, credentials, complete connection URLs, or raw
+driver diagnostics. Real PostgreSQL coverage lives in `tests/integration/test_postgresql.py`.

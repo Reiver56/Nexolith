@@ -42,11 +42,19 @@ def _resolve_environment(value: Any) -> Any:
 
 def load_pipeline(path: Path) -> PipelineConfig:
     if not path.is_file():
-        raise ConfigurationError(f"Pipeline file not found: {path}")
+        raise ConfigurationError(f"Pipeline file not found: {path}. Check the path and try again.")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigurationError(
+            f"Could not read pipeline file: {path}. Check file permissions."
+        ) from exc
+    try:
+        document = yaml.safe_load(content)
     except yaml.YAMLError as exc:
-        raise ConfigurationError(f"Invalid YAML in {path}: {exc}") from exc
+        mark = getattr(exc, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ConfigurationError(f"Invalid YAML in {path}{location}.") from exc
     if not isinstance(document, dict):
         raise ConfigurationError("Pipeline YAML must contain a mapping at its root")
     try:

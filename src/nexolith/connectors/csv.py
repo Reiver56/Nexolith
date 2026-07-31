@@ -15,7 +15,9 @@ class CsvSource:
             with self.path.open(newline="", encoding=self.encoding) as handle:
                 return [dict(row) for row in csv.DictReader(handle)]
         except (OSError, csv.Error) as exc:
-            raise ConnectorError(f"Could not read CSV file '{self.path}': {exc}") from exc
+            raise ConnectorError(
+                f"Could not read CSV file '{self.path}'. Check the path and permissions."
+            ) from exc
 
 
 class CsvDestination:
@@ -34,5 +36,7 @@ class CsvDestination:
                 writer.writeheader()
                 writer.writerows(rows)
         except (OSError, csv.Error) as exc:
-            raise ConnectorError(f"Could not write CSV file '{self.path}': {exc}") from exc
+            raise ConnectorError(
+                f"Could not write CSV file '{self.path}'. Check the path and permissions."
+            ) from exc
         return len(rows)
