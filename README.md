@@ -101,13 +101,16 @@ troubleshooting, and suggested next steps.
 
 ```text
 nexolith --version
+nexolith diagnostics
 nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
 ```
 
-`validate` parses YAML, resolves environment variables, and validates all configuration
-without reading or writing data. `run` executes the ordered pipeline and prints status,
-duration, row counts, and an error when applicable.
+`diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
+information without exposing environment variables, usernames, hostnames, filesystem paths, or
+connection details. `validate` parses YAML, resolves environment variables, and validates all
+configuration without reading or writing data. `run` executes the ordered pipeline and prints
+status, duration, row counts, and an error when applicable.
 
 ### Error handling and exit codes
 
