@@ -15,13 +15,16 @@ from nexolith.cli.interactive import (
     HELP,
     NO_PIPELINE,
     SPLASH,
+    InteractiveApplication,
     InteractiveCommand,
     InteractiveSession,
     parse_command,
     render_prompt,
 )
 from nexolith.config.models import PipelineConfig
-from nexolith.exceptions import ConfigurationError
+from nexolith.events import EventSink
+from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
+from nexolith.models import ExecutionResult
 
 runner = CliRunner()
 type InputStep = str | BaseException | Callable[[], str]
@@ -55,11 +58,28 @@ destination:
     )
 
 
+def write_executable_pipeline(path: Path, source: Path, destination: Path) -> None:
+    source.write_text("id,status\n1,ready\n2,done\n", encoding="utf-8")
+    path.write_text(
+        f"""
+name: interactive-run
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {destination.as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+
 def run_session(
     commands: list[InputStep],
     *,
     context: SessionContext | None = None,
-    application: PipelineApplication | None = None,
+    application: InteractiveApplication | None = None,
 ) -> tuple[InteractiveSession, ScriptedInput, list[str]]:
     reader = ScriptedInput(commands)
     output: list[str] = []
@@ -93,8 +113,8 @@ def test_help_lists_only_available_commands() -> None:
     assert "/open" in result.output
     assert "/clear" in result.output
     assert "/exit" in result.output
-    assert "/run" not in result.output
-    assert "/validate" not in result.output
+    assert "/run" in result.output
+    assert "/validate" in result.output
 
 
 def test_open_valid_pipeline_and_show_context(tmp_path: Path) -> None:
@@ -247,5 +267,186 @@ def test_command_parser_has_small_explicit_contract() -> None:
     assert parse_command("/open").kind is InteractiveCommand.OPEN
     assert parse_command("/open pipeline with spaces.yaml").text == "pipeline with spaces.yaml"
     assert parse_command("/clear").kind is InteractiveCommand.CLEAR
+    assert parse_command("/validate").kind is InteractiveCommand.VALIDATE
+    assert parse_command("/run").kind is InteractiveCommand.RUN
     assert parse_command("/exit").kind is InteractiveCommand.EXIT
     assert parse_command("validate").kind is InteractiveCommand.UNKNOWN
+
+
+class RecordingApplication:
+    def __init__(self) -> None:
+        self.validated_paths: list[Path] = []
+        self.run_paths: list[Path] = []
+        self.validation_error: BaseException | None = None
+        self.run_error: BaseException | None = None
+
+    def validate_pipeline(
+        self, path: Path, *, event_sink: EventSink | None = None
+    ) -> PipelineConfig:
+        self.validated_paths.append(path)
+        if self.validation_error is not None:
+            raise self.validation_error
+        return PipelineConfig.model_validate(
+            {
+                "name": "recorded",
+                "source": {"type": "csv", "path": "input.csv"},
+                "destination": {"type": "csv", "path": "output.csv"},
+            }
+        )
+
+    def run_pipeline(self, path: Path, *, event_sink: EventSink | None = None) -> ExecutionResult:
+        self.run_paths.append(path)
+        if self.run_error is not None:
+            raise self.run_error
+        result = ExecutionResult(pipeline_name="recorded")
+        result.start()
+        result.rows_read = 1
+        result.succeed(1)
+        return result
+
+
+def selected_context(path: Path) -> SessionContext:
+    return SessionContext(SelectedPipeline(Path(path.name), path.resolve()))
+
+
+def test_validate_and_run_require_active_pipeline() -> None:
+    _, _, output = run_session(["/validate", "/run", "/exit"])
+
+    assert output.count("No pipeline is currently open. Use /open <path> first.") == 2
+    assert output[-1] == GOODBYE
+
+
+def test_validate_and_run_use_resolved_path(tmp_path: Path) -> None:
+    pipeline = tmp_path / "selected.yaml"
+    application = RecordingApplication()
+    context = selected_context(pipeline)
+
+    _, _, output = run_session(
+        ["/validate", "/run", "/exit"],
+        context=context,
+        application=application,
+    )
+
+    assert application.validated_paths == [pipeline.resolve()]
+    assert application.run_paths == [pipeline.resolve()]
+    assert any(line.startswith("Status: succeeded") for line in output)
+
+
+@pytest.mark.parametrize("operation", ["/validate", "/run"])
+def test_keyboard_interrupt_returns_to_prompt(tmp_path: Path, operation: str) -> None:
+    pipeline = tmp_path / "selected.yaml"
+    application = RecordingApplication()
+    if operation == "/validate":
+        application.validation_error = KeyboardInterrupt()
+        expected = "Validation interrupted."
+    else:
+        application.run_error = KeyboardInterrupt()
+        expected = "Execution interrupted."
+
+    _, reader, output = run_session(
+        [operation, "/help", "/exit"],
+        context=selected_context(pipeline),
+        application=application,
+    )
+
+    assert expected in output
+    assert HELP in output
+    assert output[-1] == GOODBYE
+    assert len(reader.prompts) == 3
+    assert "Traceback" not in "\n".join(output)
+
+
+def test_execution_error_is_redacted_and_session_remains_usable(tmp_path: Path) -> None:
+    secret = "nxl38-recognizable-secret"
+    application = RecordingApplication()
+    error = ExecutionError(f"failed with {secret}")
+    error.__cause__ = ConnectorError(f"connector leaked {secret}")
+    application.run_error = error
+
+    session, _, output = run_session(
+        ["/run", "/open", "/exit"],
+        context=selected_context(tmp_path / "selected.yaml"),
+        application=application,
+    )
+
+    rendered = "\n".join(output)
+    assert session.context.pipeline is not None
+    assert "Error [connector]" in rendered
+    assert secret not in rendered
+    assert "Traceback" not in rendered
+    assert "Current pipeline:" in rendered
+
+
+def test_real_validate_and_run_render_ordered_events_and_metrics(tmp_path: Path) -> None:
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_executable_pipeline(pipeline, source, destination)
+
+    _, _, output = run_session([f"/open {pipeline}", "/validate", "/run", "/exit"])
+
+    expected = [
+        "Loading pipeline...",
+        "Pipeline valid.",
+        "Loading pipeline...",
+        "Pipeline loaded.",
+        "Starting execution...",
+        "Extracting...",
+        "Extraction completed: 2 rows read.",
+        "Transforming...",
+        "Transformations completed: 2 rows ready.",
+        "Writing...",
+        "Write completed: 2 rows written.",
+        "Pipeline completed.",
+    ]
+    cursor = 0
+    for line in expected:
+        cursor = output.index(line, cursor) + 1
+    rendered = "\n".join(output)
+    assert "Status: succeeded" in rendered
+    assert "Rows read: 2" in rendered
+    assert "Rows written: 2" in rendered
+    assert "Duration: " in rendered
+    assert destination.is_file()
+
+
+@pytest.mark.parametrize("operation", ["/validate", "/run"])
+@pytest.mark.parametrize("change", ["invalid", "deleted"])
+def test_operation_reloads_changed_pipeline_and_preserves_context(
+    tmp_path: Path, operation: str, change: str
+) -> None:
+    pipeline = tmp_path / "pipeline.yaml"
+    write_pipeline(pipeline)
+
+    def change_pipeline() -> str:
+        if change == "invalid":
+            pipeline.write_text("name: [", encoding="utf-8")
+        else:
+            pipeline.unlink()
+        return operation
+
+    session, _, output = run_session([f"/open {pipeline}", change_pipeline, "/open", "/exit"])
+
+    rendered = "\n".join(output)
+    assert session.context.pipeline is not None
+    assert "Error [configuration]" in rendered
+    assert "Current pipeline:" in rendered
+    assert "Traceback" not in rendered
+
+
+def test_real_run_failure_is_redacted_and_session_remains_usable(tmp_path: Path) -> None:
+    pipeline = tmp_path / "pipeline.yaml"
+    missing_source = tmp_path / "private-user-password.csv"
+    destination = tmp_path / "output.csv"
+    write_executable_pipeline(pipeline, missing_source, destination)
+    missing_source.unlink()
+
+    session, _, output = run_session([f"/open {pipeline}", "/run", "/help", "/exit"])
+
+    rendered = "\n".join(output)
+    assert session.context.pipeline is not None
+    assert "Pipeline failed during extraction." in rendered
+    assert "Error [connector]" in rendered
+    assert "private-user-password" not in rendered
+    assert HELP in output
+    assert "Traceback" not in rendered

@@ -4,7 +4,10 @@
 events, exception propagation, and isolation from CLI presentation dependencies.
 `test_interactive_cli.py` covers the Nexo splash, command loop, help, exit, empty and unknown input,
 EOF, keyboard interruption, pipeline selection and replacement, contextual prompts, safe context
-clearing, changed or missing files, and multi-command sessions without a real terminal.
+clearing, changed or missing files, validation, service-free execution, real result metrics, safe
+failure recovery, and multi-command sessions without a real terminal. `test_interactive_events.py`
+checks the complete event-to-text mapping, incremental output, forward compatibility, and renderer
+failure isolation.
 
 These tests cover configuration loading, transformations, runner state, and CLI behavior without
 external services. Keep them fast, deterministic, and independent of execution order.

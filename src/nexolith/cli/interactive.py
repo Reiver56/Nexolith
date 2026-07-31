@@ -1,13 +1,19 @@
 """Minimal, testable interactive CLI session."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Protocol
 
 from nexolith.application import PipelineApplication
 from nexolith.cli.context import SelectedPipeline, SessionContext
-from nexolith.exceptions import ConfigurationError
+from nexolith.cli.errors import error_category
+from nexolith.cli.event_renderer import InteractiveEventRenderer
+from nexolith.cli.interactive_types import InputReader, OutputWriter
+from nexolith.config import PipelineConfig
+from nexolith.events import EventSink
+from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
+from nexolith.models import ExecutionResult
 
 DEFAULT_PROMPT = "nexolith> "
 SPLASH = "Nexo - Nexolith interactive session\nType /help for available commands."
@@ -17,14 +23,13 @@ HELP = (
     "  /open <path>  Open or replace the current pipeline.\n"
     "  /open  Show the current pipeline.\n"
     "  /clear  Clear the current pipeline.\n"
+    "  /validate  Validate the current pipeline.\n"
+    "  /run  Run the current pipeline.\n"
     "  /exit  Exit the interactive session.\n"
-    "Interactive validation and execution are not available yet."
+    "Operations use the pipeline currently shown in the prompt."
 )
 GOODBYE = "Goodbye."
 NO_PIPELINE = "No pipeline is currently open."
-
-InputReader = Callable[[str], str]
-OutputWriter = Callable[[str], None]
 
 
 class InteractiveCommand(StrEnum):
@@ -32,6 +37,8 @@ class InteractiveCommand(StrEnum):
     HELP = "help"
     OPEN = "open"
     CLEAR = "clear"
+    VALIDATE = "validate"
+    RUN = "run"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -57,6 +64,10 @@ def parse_command(value: str) -> ParsedCommand:
             return ParsedCommand(InteractiveCommand.OPEN, parts[1])
     if command == "/clear":
         return ParsedCommand(InteractiveCommand.CLEAR)
+    if command == "/validate":
+        return ParsedCommand(InteractiveCommand.VALIDATE)
+    if command == "/run":
+        return ParsedCommand(InteractiveCommand.RUN)
     if command == "/exit":
         return ParsedCommand(InteractiveCommand.EXIT)
     return ParsedCommand(InteractiveCommand.UNKNOWN, command)
@@ -97,8 +108,18 @@ def _safe_prompt_label(filename: str) -> str:
     return safe if len(safe) <= 32 else f"{safe[:29]}..."
 
 
+class InteractiveApplication(Protocol):
+    def validate_pipeline(
+        self, path: Path, *, event_sink: EventSink | None = None
+    ) -> PipelineConfig: ...
+
+    def run_pipeline(
+        self, path: Path, *, event_sink: EventSink | None = None
+    ) -> ExecutionResult: ...
+
+
 class InteractiveSession:
-    """Read and dispatch the intentionally small NXL-36 command set."""
+    """Read and dispatch the intentionally small interactive command set."""
 
     def __init__(
         self,
@@ -106,7 +127,7 @@ class InteractiveSession:
         input_reader: InputReader | None = None,
         output_writer: OutputWriter | None = None,
         context: SessionContext | None = None,
-        application: PipelineApplication | None = None,
+        application: InteractiveApplication | None = None,
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
@@ -133,6 +154,12 @@ class InteractiveSession:
                 continue
             if command.kind is InteractiveCommand.CLEAR:
                 self._clear_pipeline()
+                continue
+            if command.kind is InteractiveCommand.VALIDATE:
+                self._validate_pipeline()
+                continue
+            if command.kind is InteractiveCommand.RUN:
+                self._run_pipeline()
                 continue
             if command.kind is InteractiveCommand.EXIT:
                 self._write(GOODBYE)
@@ -163,6 +190,61 @@ class InteractiveSession:
             self._write("Pipeline context cleared.")
         else:
             self._write(NO_PIPELINE)
+
+    def _validate_pipeline(self) -> None:
+        pipeline = self._require_pipeline()
+        if pipeline is None:
+            return
+        renderer = InteractiveEventRenderer(self._write)
+        try:
+            self._application.validate_pipeline(pipeline.resolved_path, event_sink=renderer)
+        except KeyboardInterrupt:
+            self._write("Validation interrupted.")
+        except ConfigurationError as error:
+            self._write(_render_operation_error(error, pipeline))
+
+    def _run_pipeline(self) -> None:
+        pipeline = self._require_pipeline()
+        if pipeline is None:
+            return
+        renderer = InteractiveEventRenderer(self._write)
+        try:
+            result = self._application.run_pipeline(pipeline.resolved_path, event_sink=renderer)
+        except KeyboardInterrupt:
+            self._write("Execution interrupted.")
+        except (ConfigurationError, ExecutionError) as error:
+            self._write(_render_operation_error(error, pipeline))
+        else:
+            self._write(_render_execution_result(result))
+
+    def _require_pipeline(self) -> SelectedPipeline | None:
+        if self.context.pipeline is None:
+            self._write("No pipeline is currently open. Use /open <path> first.")
+        return self.context.pipeline
+
+
+def _render_operation_error(error: NexolithError, pipeline: SelectedPipeline) -> str:
+    category = error_category(error)
+    if isinstance(error, ConfigurationError):
+        message = str(error).replace(str(pipeline.resolved_path), str(pipeline.requested_path))
+    elif category == "connector":
+        message = "Pipeline execution failed in a connector. Check the source or destination."
+    elif category == "transformation":
+        message = "Pipeline execution failed during transformations."
+    else:
+        message = "Pipeline execution failed."
+    return f"Error [{category}]: {message}"
+
+
+def _render_execution_result(result: ExecutionResult) -> str:
+    lines = [
+        f"Status: {result.status.value}",
+        f"Rows read: {result.rows_read}",
+        f"Rows written: {result.rows_written}",
+    ]
+    if result.duration_seconds is not None:
+        lines.append(f"Duration: {result.duration_seconds:.3f}s")
+    return "\n".join(lines)
 
 
 def run_interactive_session() -> None:

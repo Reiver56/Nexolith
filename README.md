@@ -127,10 +127,12 @@ nexolith run path/to/pipeline.yaml
 
 Running `nexolith` without a subcommand opens the minimal Nexo interactive session. Use `/help` to
 list its currently available commands, `/open <path>` to select or replace a valid pipeline,
-`/open` to show the current selection, `/clear` to remove it, and `/exit` to leave. The selected
-filename appears in the prompt and the context lasts only for the current process. Interactive
-validation and execution are not available yet; pipeline operations remain available through the
-established non-interactive `validate` and `run` commands.
+`/validate` and `/run` to operate on it, `/open` to show the current selection, `/clear` to remove
+it, and `/exit` to leave. The selected filename appears in the prompt and the context lasts only
+for the current process. Validation and execution report observable pipeline phases as plain text;
+successful runs finish with the real status, row counts, and duration. Expected failures keep the
+session usable, and `Ctrl+C` returns to the prompt after interrupting the current synchronous
+operation.
 
 `diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
 information without exposing environment variables, usernames, hostnames, filesystem paths, or

@@ -15,8 +15,16 @@ deleted after opening. `/clear` removes the active context. The prompt shows onl
 filename, for example `nexolith [orders.yaml]> `, and bounds unusual or long names. Context lasts
 only for the current interactive process.
 
-Interactive validation and execution, live event output, progress rendering, persistent history,
-and completion are deliberately reserved for later stories.
+`/validate` reloads and validates the selected pipeline. `/run` reloads and executes it through the
+shared application layer. Both commands render plain-text lifecycle events as they arrive; a run
+reports loading, extraction, transformation, writing, and completion phases, followed by the real
+status, row counts, and duration returned by the runner. The renderer uses no synthetic percentage
+or timing estimates.
+
+Expected operation failures are reported without a traceback or sensitive connector details, and
+the selected pipeline remains available for correction and retry. `Ctrl+C` during validation or a
+run interrupts that synchronous operation and returns to the prompt; Nexolith starts no background
+work. Persistent history, completion, progress bars, and live Rich rendering remain out of scope.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
 and `nexolith --version`.

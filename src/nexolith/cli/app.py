@@ -11,14 +11,9 @@ from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
+from nexolith.cli.errors import render_error
 from nexolith.cli.interactive import run_interactive_session
-from nexolith.exceptions import (
-    ConfigurationError,
-    ConnectorError,
-    ExecutionError,
-    NexolithError,
-    TransformationError,
-)
+from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 
 app = typer.Typer(
@@ -33,19 +28,8 @@ class ExitCode(IntEnum):
     EXECUTION_ERROR = 3
 
 
-def _error_category(error: NexolithError) -> str:
-    cause = error.__cause__ if isinstance(error, ExecutionError) else error
-    if isinstance(cause, ConfigurationError):
-        return "configuration"
-    if isinstance(cause, ConnectorError):
-        return "connector"
-    if isinstance(cause, TransformationError):
-        return "transformation"
-    return "execution"
-
-
-def _show_error(error: NexolithError) -> None:
-    typer.echo(f"Error [{_error_category(error)}]: {error}", err=True)
+def _show_error(error: ConfigurationError | ExecutionError) -> None:
+    typer.echo(render_error(error), err=True)
 
 
 def version_callback(value: bool) -> None:
