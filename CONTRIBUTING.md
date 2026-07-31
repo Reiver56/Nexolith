@@ -4,7 +4,7 @@ Thank you for helping make Nexolith better.
 
 ## Set up the project
 
-Fork and clone the repository, then install Python 3.12+, uv, and the development
+Fork and clone the repository, then install Python 3.12, 3.13, or 3.14, uv, and the development
 dependencies:
 
 ```bash

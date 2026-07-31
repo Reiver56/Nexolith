@@ -29,3 +29,52 @@ jobs:
         run: uv run mypy src
       - name: Test
         run: uv run pytest
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Install build Python
+        run: uv python install 3.12
+      - name: Build wheel and source distribution
+        run: uv build --python 3.12
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  install:
+    name: Install / Python ${{ matrix.python-version }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - name: Install built wheel
+        run: python -m pip install --disable-pip-version-check dist/*.whl
+      - name: Verify package import
+        run: python -c "import nexolith; print(nexolith.__version__)"
+      - name: Verify version output
+        run: nexolith --version
+      - name: Validate service-free pipeline
+        run: nexolith validate examples/pipelines/completed_orders.yaml
+      - name: Run service-free pipeline
+        run: nexolith run examples/pipelines/completed_orders.yaml
