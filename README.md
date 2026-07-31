@@ -118,11 +118,16 @@ troubleshooting, and suggested next steps.
 ## CLI
 
 ```text
+nexolith
 nexolith --version
 nexolith diagnostics
 nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
 ```
+
+Running `nexolith` without a subcommand opens the minimal Nexo interactive session. Use `/help` to
+list its currently available commands and `/exit` to leave it. Pipeline operations remain
+available through the established non-interactive `validate` and `run` commands.
 
 `diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
 information without exposing environment variables, usernames, hostnames, filesystem paths, or

@@ -11,6 +11,7 @@ from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
+from nexolith.cli.interactive import run_interactive_session
 from nexolith.exceptions import (
     ConfigurationError,
     ConnectorError,
@@ -20,7 +21,11 @@ from nexolith.exceptions import (
 )
 from nexolith.models import ExecutionResult
 
-app = typer.Typer(help="Build data flows that last.", no_args_is_help=True)
+app = typer.Typer(
+    help="Build data flows that last.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 
 
 class ExitCode(IntEnum):
@@ -49,13 +54,16 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    context: typer.Context,
     version: bool = typer.Option(
         False, "--version", callback=version_callback, is_eager=True, help="Show version."
     ),
 ) -> None:
     """Nexolith pipeline CLI."""
+    if context.invoked_subcommand is None:
+        run_interactive_session()
 
 
 def _show_result(result: ExecutionResult) -> None:

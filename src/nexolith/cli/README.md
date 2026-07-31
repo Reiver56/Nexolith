@@ -1,7 +1,15 @@
 # CLI
 
-The Typer application exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`, and
-`nexolith --version`.
+Running `nexolith` without a subcommand starts a minimal interactive session with a short Nexo
+splash and the `nexolith> ` prompt. `/help` lists the available commands and `/exit` closes the
+session. EOF and keyboard interruption also exit cleanly.
+
+The interactive session currently supports only `/help` and `/exit`. Opening, validating, or
+running pipelines interactively, live event output, progress rendering, persistent history, and
+completion are deliberately reserved for later stories.
+
+The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
+and `nexolith --version`.
 Presentation belongs here. The classic `validate` and `run` commands are thin adapters over the
 shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
 
