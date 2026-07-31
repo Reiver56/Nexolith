@@ -1,0 +1,97 @@
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from nexolith.types import Scalar
+
+
+class ComponentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str
+
+
+class CsvSourceConfig(ComponentConfig):
+    type: Literal["csv"]
+    path: str
+    encoding: str = "utf-8"
+
+
+class SqlSourceConfig(ComponentConfig):
+    type: Literal["sqlite", "postgresql"]
+    connection_url: str
+    query: str | None = None
+    table: str | None = None
+
+    @model_validator(mode="after")
+    def require_query_or_table(self) -> "SqlSourceConfig":
+        if not self.query and not self.table:
+            raise ValueError("either 'query' or 'table' is required")
+        return self
+
+
+class CsvDestinationConfig(ComponentConfig):
+    type: Literal["csv"]
+    path: str
+    encoding: str = "utf-8"
+
+
+class SqlDestinationConfig(ComponentConfig):
+    type: Literal["sqlite", "postgresql"]
+    connection_url: str
+    table: str
+    mode: Literal["append", "replace", "fail"] = "fail"
+
+
+class SelectConfig(ComponentConfig):
+    type: Literal["select"]
+    columns: list[str] = Field(min_length=1)
+
+
+class RenameConfig(ComponentConfig):
+    type: Literal["rename"]
+    columns: dict[str, str] = Field(min_length=1)
+
+
+class DropNullsConfig(ComponentConfig):
+    type: Literal["drop_nulls"]
+    columns: list[str] | None = None
+
+
+class FilterConfig(ComponentConfig):
+    type: Literal["filter"]
+    column: str
+    operator: Literal[
+        "equals",
+        "not_equals",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+        "contains",
+        "is_null",
+        "is_not_null",
+    ]
+    value: Scalar = None
+
+    @model_validator(mode="after")
+    def require_value(self) -> "FilterConfig":
+        if self.operator not in {"is_null", "is_not_null"} and self.value is None:
+            raise ValueError(f"'value' is required for operator '{self.operator}'")
+        return self
+
+
+SourceConfig = CsvSourceConfig | SqlSourceConfig
+DestinationConfig = CsvDestinationConfig | SqlDestinationConfig
+TransformationConfig = SelectConfig | RenameConfig | DropNullsConfig | FilterConfig
+
+
+class PipelineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    source: SourceConfig = Field(discriminator="type")
+    transformations: list[TransformationConfig] = Field(default_factory=list)
+    destination: DestinationConfig = Field(discriminator="type")
+
+    @classmethod
+    def validate_document(cls, document: Any) -> "PipelineConfig":
+        return cls.model_validate(document)

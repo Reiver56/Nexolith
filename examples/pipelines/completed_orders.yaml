@@ -1,0 +1,22 @@
+name: completed_orders
+
+source:
+  type: csv
+  path: examples/data/orders.csv
+
+transformations:
+  - type: filter
+    column: status
+    operator: equals
+    value: completed
+  - type: select
+    columns: [id, customer_id, total]
+  - type: rename
+    columns:
+      total: order_total
+
+destination:
+  type: sqlite
+  connection_url: sqlite:///nexolith.db
+  table: completed_orders
+  mode: replace

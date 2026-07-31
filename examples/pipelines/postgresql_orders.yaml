@@ -1,0 +1,17 @@
+name: postgresql_completed_orders
+
+source:
+  type: csv
+  path: examples/data/orders.csv
+
+transformations:
+  - type: filter
+    column: status
+    operator: equals
+    value: completed
+
+destination:
+  type: postgresql
+  connection_url: ${DATABASE_URL}
+  table: completed_orders
+  mode: replace

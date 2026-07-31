@@ -1,0 +1,6 @@
+id,customer_id,status,total,notes
+1,101,completed,49.90,first order
+2,102,pending,12.50,awaiting payment
+3,103,completed,125.00,
+4,104,cancelled,8.99,cancelled by customer
+5,105,completed,75.25,priority

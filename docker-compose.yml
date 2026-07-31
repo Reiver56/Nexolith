@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: nexolith
+      POSTGRES_USER: nexolith
+      POSTGRES_PASSWORD: nexolith
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexolith"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - nexolith-postgres:/var/lib/postgresql/data
+
+volumes:
+  nexolith-postgres:
