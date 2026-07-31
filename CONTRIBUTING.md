@@ -58,3 +58,9 @@ Release automation maps a tag such as `v0.2.0` to the `[0.2.0]` heading and fail
 is absent. Use `Unreleased` while preparing a version, then replace it with an ISO date such as
 `2026-07-31` when publishing the release.
 
+## Releases
+
+Maintainers must follow [RELEASING.md](RELEASING.md). Releases originate from reviewed `master`
+commits and exact `vX.Y.Z` tags. Never store a PyPI password or API token in GitHub: publication
+uses the protected `pypi` environment and PyPI Trusted Publishing.
+

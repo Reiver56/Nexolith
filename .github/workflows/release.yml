@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and validate distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag belongs to master
+        run: |
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/master"; then
+            echo "::error::Release tags must point to a commit contained in master."
+            exit 1
+          fi
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install build environment
+        run: uv sync --frozen --extra dev --python 3.12
+      - name: Validate release metadata
+        run: uv run python -m nexolith.release_validation --tag "${GITHUB_REF_NAME}"
+      - name: Build wheel and source distribution
+        run: uv build --python 3.12
+      - name: Validate distribution metadata
+        run: uv run twine check dist/*
+      - name: Validate distribution set
+        run: >-
+          uv run python -m nexolith.release_validation
+          --tag "${GITHUB_REF_NAME}"
+          --dist-dir dist
+      - name: Store validated distributions
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: release-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nexolith
+    permissions:
+      id-token: write
+    steps:
+      - name: Download validated distributions
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: release-distributions
+          path: dist/
+      - name: Publish distributions with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/
+          verify-metadata: false
+          attestations: true

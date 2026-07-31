@@ -13,6 +13,8 @@ Changes targeting releases after 0.2.0 will be recorded here.
 
 ### Added
 
+- Added a tag-driven PyPI release workflow using short-lived Trusted Publishing credentials,
+  protected-environment approval, one-time artifact builds, and fail-closed release validation.
 - Added `nexolith diagnostics`, a deterministic and secret-safe environment report for issue
   submissions. It includes Nexolith, Python, platform, installation, dependency, SQLite, and
   PostgreSQL driver availability without exposing local paths or environment values

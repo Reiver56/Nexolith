@@ -15,6 +15,9 @@ and monitoring data pipelines between files and SQL databases.
 See the [changelog](CHANGELOG.md) for user-facing release notes, compatibility changes, and
 migration guidance.
 
+Maintainers publish tagged packages through the documented [Trusted Publishing release
+process](RELEASING.md).
+
 ## Tech Stack
 
 [![Python](https://img.shields.io/badge/Python-3.12--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
