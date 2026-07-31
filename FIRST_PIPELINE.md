@@ -9,7 +9,7 @@ after Python and `uv` are installed.
 Install:
 
 - [Git](https://git-scm.com/)
-- Python 3.12 or newer
+- Python 3.12, 3.13, or 3.14
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 Confirm that the tools are available:
@@ -124,8 +124,8 @@ Because `build/` is ignored by Git, this output will not be committed accidental
 
 - **`uv` is not recognized:** install `uv`, restart the shell so its installation directory is on
   `PATH`, and run `uv --version`.
-- **Unsupported Python version:** install Python 3.12 or run `uv python install 3.12`, then repeat
-  `uv sync --extra dev`.
+- **Unsupported Python version:** install Python 3.12, 3.13, or 3.14 (for example,
+  `uv python install 3.12`), then repeat `uv sync --extra dev`.
 - **Pipeline file not found or input CSV cannot be read:** return to the cloned repository root and
   run the commands there. Confirm that both files shown in the tree above exist.
 - **Validation fails:** use the reported field path to check the YAML. Spaces matter in YAML; do

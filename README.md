@@ -7,14 +7,14 @@ and monitoring data pipelines between files and SQL databases.
 
 [![CI](https://github.com/Reiver56/Nexolith/actions/workflows/ci.yml/badge.svg)](https://github.com/Reiver56/Nexolith/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 > [!IMPORTANT]
 > Nexolith is an early-stage project. Its configuration format may evolve before 1.0.
 
 ## Tech Stack
 
-[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.12--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
 [![Typer](https://img.shields.io/badge/Typer-CLI-009688)](https://typer.tiangolo.com/)
@@ -44,7 +44,7 @@ to the runner.
 
 ## Requirements and installation
 
-- Python 3.12+
+- Python 3.12, 3.13, or 3.14
 - [uv](https://docs.astral.sh/uv/)
 
 ```bash
@@ -177,7 +177,8 @@ uv run pytest
 
 These commands run without Docker or external services. PostgreSQL tests are marked and skipped
 unless explicitly selected. The same standard checks run in GitHub Actions on pushes to `master`
-and pull requests.
+and pull requests. CI also builds the package and installs the wheel on every supported Python
+version (3.12, 3.13, and 3.14) before verifying import and the first CLI workflow.
 
 ## PostgreSQL with Docker Compose
 
