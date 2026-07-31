@@ -47,3 +47,14 @@ documentation, complete the pull request template, and ensure CI passes. Maintai
 for changes to preserve the small, modular architecture. Use clear commit messages; merge
 strategy is determined by the maintainers.
 
+## Changelog
+
+Update `CHANGELOG.md` for every user-facing addition, behavior change, fix, deprecation, removal,
+or security improvement. Group entries by Keep a Changelog category, link the relevant issue or
+pull request when useful, and state breaking changes plus required migrations explicitly.
+
+Version headings must use the exact form `## [X.Y.Z] - status-or-date`, without a leading `v`.
+Release automation maps a tag such as `v0.2.0` to the `[0.2.0]` heading and fails when that section
+is absent. Use `Unreleased` while preparing a version, then replace it with an ISO date such as
+`2026-07-31` when publishing the release.
+

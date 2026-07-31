@@ -12,6 +12,9 @@ and monitoring data pipelines between files and SQL databases.
 > [!IMPORTANT]
 > Nexolith is an early-stage project. Its configuration format may evolve before 1.0.
 
+See the [changelog](CHANGELOG.md) for user-facing release notes, compatibility changes, and
+migration guidance.
+
 ## Tech Stack
 
 [![Python](https://img.shields.io/badge/Python-3.12--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
