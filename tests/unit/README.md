@@ -3,7 +3,8 @@
 `test_application.py` covers dependency injection, the typed lifecycle event order, failure
 events, exception propagation, and isolation from CLI presentation dependencies.
 `test_interactive_cli.py` covers the Nexo splash, command loop, help, exit, empty and unknown input,
-EOF, keyboard interruption, and multi-command sessions without a real terminal.
+EOF, keyboard interruption, pipeline selection and replacement, contextual prompts, safe context
+clearing, changed or missing files, and multi-command sessions without a real terminal.
 
 These tests cover configuration loading, transformations, runner state, and CLI behavior without
 external services. Keep them fast, deterministic, and independent of execution order.

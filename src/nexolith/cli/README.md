@@ -4,9 +4,19 @@ Running `nexolith` without a subcommand starts a minimal interactive session wit
 splash and the `nexolith> ` prompt. `/help` lists the available commands and `/exit` closes the
 session. EOF and keyboard interruption also exit cleanly.
 
-The interactive session currently supports only `/help` and `/exit`. Opening, validating, or
-running pipelines interactively, live event output, progress rendering, persistent history, and
-completion are deliberately reserved for later stories.
+Use `/open <path>` to load a valid pipeline into the process-local session context. A successful
+open stores both the path entered by the user and its absolute resolved identity, but not the
+parsed configuration. This lets later operations reload the current file instead of using stale
+configuration when its contents change. Opening another pipeline replaces the context only after
+loading succeeds.
+
+`/open` without an argument reports the current path and marks it unavailable if the file was
+deleted after opening. `/clear` removes the active context. The prompt shows only the selected
+filename, for example `nexolith [orders.yaml]> `, and bounds unusual or long names. Context lasts
+only for the current interactive process.
+
+Interactive validation and execution, live event output, progress rendering, persistent history,
+and completion are deliberately reserved for later stories.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
 and `nexolith --version`.
