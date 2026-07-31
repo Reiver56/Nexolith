@@ -150,23 +150,62 @@ uv run mypy src
 uv run pytest
 ```
 
-The same checks run in GitHub Actions on pushes to `main` and pull requests.
+These commands run without Docker or external services. PostgreSQL tests are marked and skipped
+unless explicitly selected. The same standard checks run in GitHub Actions on pushes to `master`
+and pull requests.
 
 ## PostgreSQL with Docker Compose
 
+PostgreSQL integration requires Docker Engine with Docker Compose v2. The Compose service uses a
+fixed PostgreSQL 17.6 Alpine image, local-only development credentials, a health check, and a named
+volume.
+
+Copy the example environment file, or export its values in your shell:
+
 ```bash
-docker compose up -d postgres
+cp .env.example .env
 uv sync --extra dev --extra postgres
+docker compose up -d --wait postgres
 ```
 
-Set `DATABASE_URL` from `.env.example` in your shell, then run:
+Nexolith does not load `.env` automatically. Export the URL before running the integration tests
+or example:
 
 ```bash
+export DATABASE_URL="postgresql+psycopg://nexolith:nexolith@localhost:5432/nexolith"
+uv run pytest -m postgres
+uv run nexolith validate examples/pipelines/postgresql_orders.yaml
 uv run nexolith run examples/pipelines/postgresql_orders.yaml
 docker compose down
 ```
 
-The included credentials are local development defaults only.
+PowerShell equivalent:
+
+```powershell
+$env:DATABASE_URL = "postgresql+psycopg://nexolith:nexolith@localhost:5432/nexolith"
+uv run pytest -m postgres
+uv run nexolith validate examples/pipelines/postgresql_orders.yaml
+uv run nexolith run examples/pipelines/postgresql_orders.yaml
+docker compose down
+```
+
+Use `docker compose down --volumes` when you also want to remove the Nexolith development data.
+The included `nexolith` credentials are intentionally non-sensitive local defaults; override
+`POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_PORT` when needed. Never reuse
+these defaults outside an isolated development environment.
+
+If port `5432` is already occupied, choose another host port and keep the URL consistent:
+
+```powershell
+$env:POSTGRES_PORT = "55432"
+$env:DATABASE_URL = "postgresql+psycopg://nexolith:nexolith@localhost:55432/nexolith"
+docker compose up -d --wait postgres
+```
+
+An explicitly requested `pytest -m postgres` run fails clearly when `DATABASE_URL` is absent or
+PostgreSQL is unreachable. The standard `pytest` command skips these service-dependent tests.
+PostgreSQL schemas are inferred from the first incoming row, and migrations, schema evolution,
+and connection pooling configuration remain outside the current MVP.
 
 ## Roadmap
 
