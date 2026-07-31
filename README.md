@@ -156,6 +156,17 @@ Unexpected programming errors are not converted into expected failures and may s
 debugging. Reproduce those failures in a development environment, sanitize logs before sharing
 them, and never include credentials in issue reports.
 
+### stdout, stderr, and scripting compatibility
+
+`--version`, `diagnostics`, `validate`, and `run` are deterministic, non-interactive commands
+suitable for CI and scripts. Their result output goes to stdout; `Error [category]: message`
+goes to stderr. `run` additionally configures root Python logging (`INFO Pipeline '<name>'
+started`, `succeeded`, or `failed: <type>`) which the standard library sends to stderr, never
+stdout. `--version` is eager: it prints and exits before any subcommand or the interactive
+session would start. These four commands never construct an interactive session or attach the
+`EventSink` renderer, so their stdout/stderr contract does not change when Nexolith is invoked
+without arguments and starts the interactive shell instead.
+
 ## Connectors
 
 | Type | Source | Destination | Notes |

@@ -9,6 +9,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes targeting releases after 0.2.0 will be recorded here.
 
+### Added
+
+- Documented the stdout, stderr, and exit-code contract for the scriptable `--version`,
+  `diagnostics`, `validate`, and `run` commands, and added regression tests pinning that
+  contract so interactive-session work cannot silently change automation behavior (NXL-40).
+
 ## [0.2.0] - 2026-07-31
 
 ### Added
