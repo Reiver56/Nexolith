@@ -10,6 +10,7 @@ from pathlib import Path
 
 TAG_PATTERN = re.compile(r"v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))")
 SOURCE_VERSION_PATTERN = re.compile(r'^__version__ = "(?P<version>[^"]+)"$', re.MULTILINE)
+RELEASE_DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 
 
 class ReleaseValidationError(ValueError):
@@ -52,11 +53,17 @@ def _validate_changelog(root: Path, version: str) -> None:
         )
 
     release_date = headings[0].group("release_date")
+    if RELEASE_DATE_PATTERN.fullmatch(release_date) is None:
+        raise ReleaseValidationError(
+            f"CHANGELOG.md section [{version}] must use an ISO release date in YYYY-MM-DD format, "
+            f"not {release_date!r}"
+        )
     try:
         date.fromisoformat(release_date)
     except ValueError as error:
         raise ReleaseValidationError(
-            f"CHANGELOG.md section [{version}] must use an ISO release date, not {release_date!r}"
+            f"CHANGELOG.md section [{version}] must use an ISO release date in YYYY-MM-DD format, "
+            f"not {release_date!r}"
         ) from error
 
 
