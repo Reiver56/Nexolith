@@ -1,6 +1,10 @@
 # Integration tests
 
-This directory verifies real I/O boundaries. CSV and SQLite tests run in the standard suite.
+This directory verifies real I/O boundaries. CSV and SQLite tests run in the standard suite. The
+[first-pipeline tutorial](../../FIRST_PIPELINE.md) is checked by copying its real example into a
+temporary clean directory, invoking both documented CLI commands, and asserting the generated CSV.
+Extend that test when the introductory example's commands or expected rows change.
+
 PostgreSQL tests use the Compose service and dedicated `nxl9_*` tables that are removed after each
 test.
 

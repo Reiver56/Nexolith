@@ -16,7 +16,5 @@ transformations:
       total: order_total
 
 destination:
-  type: sqlite
-  connection_url: sqlite:///nexolith.db
-  table: completed_orders
-  mode: replace
+  type: csv
+  path: build/completed_orders.csv

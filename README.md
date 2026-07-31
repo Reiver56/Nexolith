@@ -60,14 +60,19 @@ uv sync --extra dev --extra postgres
 
 ## Quick start
 
-Run the fully local CSV-to-SQLite example from the repository root:
+New to Nexolith? Follow the **[zero-to-first-pipeline tutorial](FIRST_PIPELINE.md)** to install
+the project, understand the example, validate and run it, and inspect the resulting CSV in under
+ten minutes.
+
+The short version, run from the repository root, is:
 
 ```bash
 uv run nexolith validate examples/pipelines/completed_orders.yaml
 uv run nexolith run examples/pipelines/completed_orders.yaml
 ```
 
-The pipeline creates `nexolith.db` and replaces the `completed_orders` table:
+The pipeline reads five orders, keeps the three completed ones, selects and renames columns, and
+writes `build/completed_orders.csv`:
 
 ```yaml
 name: completed_orders
@@ -85,11 +90,12 @@ transformations:
     columns:
       total: order_total
 destination:
-  type: sqlite
-  connection_url: sqlite:///nexolith.db
-  table: completed_orders
-  mode: replace
+  type: csv
+  path: build/completed_orders.csv
 ```
+
+See the [tutorial](FIRST_PIPELINE.md) for the expected command output, a portable output check,
+troubleshooting, and suggested next steps.
 
 ## CLI
 
