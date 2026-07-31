@@ -1,6 +1,7 @@
 <p align="center">
   <img src="assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
 </p>
+
 # Nexolith
 
 > **Build data flows that last.**
