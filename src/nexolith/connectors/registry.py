@@ -11,7 +11,7 @@ from nexolith.config.models import (
 from nexolith.connectors.base import DestinationConnector, SourceConnector
 from nexolith.connectors.csv import CsvDestination, CsvSource
 from nexolith.connectors.sql import SqlDestination, SqlSource
-from nexolith.exceptions import ComponentNotFoundError
+from nexolith.exceptions import ConnectorError
 
 SourceFactory = Callable[[SourceConfig], SourceConnector]
 DestinationFactory = Callable[[DestinationConfig], DestinationConnector]
@@ -32,13 +32,13 @@ class ConnectorRegistry:
         try:
             return self._sources[config.type](config)
         except KeyError as exc:
-            raise ComponentNotFoundError(f"Unknown source connector: {config.type}") from exc
+            raise ConnectorError(f"Unknown source connector: {config.type}") from exc
 
     def create_destination(self, config: DestinationConfig) -> DestinationConnector:
         try:
             return self._destinations[config.type](config)
         except KeyError as exc:
-            raise ComponentNotFoundError(f"Unknown destination connector: {config.type}") from exc
+            raise ConnectorError(f"Unknown destination connector: {config.type}") from exc
 
 
 def default_connector_registry() -> ConnectorRegistry:

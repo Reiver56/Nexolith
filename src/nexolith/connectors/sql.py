@@ -10,7 +10,7 @@ from nexolith.types import Rows
 
 class SqlSource:
     def __init__(self, connection_url: str, query: str | None, table: str | None) -> None:
-        self.engine = create_engine(connection_url)
+        self.engine = _create_sql_engine(connection_url)
         self.query = query
         self.table = table
 
@@ -20,14 +20,16 @@ class SqlSource:
             with self.engine.connect() as connection:
                 return [dict(row) for row in connection.execute(text(statement)).mappings()]
         except SQLAlchemyError as exc:
-            raise ConnectorError(f"SQL source read failed: {type(exc).__name__}") from exc
+            raise ConnectorError(
+                "Could not read from SQL source. Check the connection, table, or query."
+            ) from exc
         finally:
             self.engine.dispose()
 
 
 class SqlDestination:
     def __init__(self, connection_url: str, table: str, mode: str) -> None:
-        self.engine = create_engine(connection_url)
+        self.engine = _create_sql_engine(connection_url)
         self.table = table
         self.mode = mode
 
@@ -72,6 +74,17 @@ class SqlDestination:
         except ConnectorError:
             raise
         except SQLAlchemyError as exc:
-            raise ConnectorError(f"SQL destination write failed: {type(exc).__name__}") from exc
+            raise ConnectorError(
+                "Could not write to SQL destination. Check the connection, table, and write mode."
+            ) from exc
         finally:
             self.engine.dispose()
+
+
+def _create_sql_engine(connection_url: str) -> Engine:
+    try:
+        return create_engine(connection_url)
+    except (ImportError, SQLAlchemyError) as exc:
+        raise ConnectorError(
+            "Could not configure SQL connector. Check the connection URL and database driver."
+        ) from exc

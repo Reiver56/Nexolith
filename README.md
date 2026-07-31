@@ -109,6 +109,22 @@ nexolith run path/to/pipeline.yaml
 without reading or writing data. `run` executes the ordered pipeline and prints status,
 duration, row counts, and an error when applicable.
 
+### Error handling and exit codes
+
+Expected failures use stable configuration, connector, transformation, and execution error
+categories. CLI diagnostics use the form `Error [category]: message`, omit tracebacks, and redact
+credentials, authenticated connection URLs, and raw driver details.
+
+| Exit code | Meaning |
+|---:|---|
+| `0` | Command succeeded |
+| `2` | Pipeline configuration or validation failed |
+| `3` | Pipeline execution, connector, or transformation failed |
+
+Unexpected programming errors are not converted into expected failures and may show a traceback for
+debugging. Reproduce those failures in a development environment, sanitize logs before sharing
+them, and never include credentials in issue reports.
+
 ## Connectors
 
 | Type | Source | Destination | Notes |
