@@ -3,6 +3,7 @@ from typing import Protocol
 
 from nexolith.config.models import PipelineConfig
 from nexolith.connectors.registry import ConnectorRegistry, default_connector_registry
+from nexolith.exceptions import ExecutionError, NexolithError
 from nexolith.models.execution import ExecutionResult
 from nexolith.transformations.registry import (
     TransformationRegistry,
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class PipelineRunner(Protocol):
-    def run(self, config: PipelineConfig) -> ExecutionResult: ...
+    def run(self, config: PipelineConfig, *, raise_on_error: bool = False) -> ExecutionResult: ...
 
 
 class DefaultPipelineRunner:
@@ -25,7 +26,7 @@ class DefaultPipelineRunner:
         self.connectors = connectors or default_connector_registry()
         self.transformations = transformations or default_transformation_registry()
 
-    def run(self, config: PipelineConfig) -> ExecutionResult:
+    def run(self, config: PipelineConfig, *, raise_on_error: bool = False) -> ExecutionResult:
         result = ExecutionResult(pipeline_name=config.name)
         result.start()
         logger.info("Pipeline '%s' started", config.name)
@@ -38,7 +39,10 @@ class DefaultPipelineRunner:
             written = self.connectors.create_destination(config.destination).write(rows)
             result.succeed(written)
             logger.info("Pipeline '%s' succeeded", config.name)
-        except Exception as exc:
-            result.fail(str(exc))
+        except NexolithError as exc:
+            execution_error = ExecutionError(f"Pipeline '{config.name}' failed: {exc}")
+            result.fail(str(execution_error))
             logger.error("Pipeline '%s' failed: %s", config.name, type(exc).__name__)
+            if raise_on_error:
+                raise execution_error from exc
         return result

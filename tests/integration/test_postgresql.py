@@ -221,7 +221,7 @@ destination:
     monkeypatch.setenv("NXL9_BAD_DATABASE_URL", bad_url)
     cli_result = CliRunner().invoke(app, ["run", str(pipeline)])
 
-    assert cli_result.exit_code == 1
+    assert cli_result.exit_code == 3
     assert_sensitive_values_absent(cli_result.output, sensitive_values)
     assert_sensitive_values_absent(
         "\n".join(record.getMessage() for record in caplog.records),

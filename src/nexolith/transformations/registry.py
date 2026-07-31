@@ -7,7 +7,7 @@ from nexolith.config.models import (
     SelectConfig,
     TransformationConfig,
 )
-from nexolith.exceptions import ComponentNotFoundError
+from nexolith.exceptions import TransformationError
 from nexolith.transformations.base import Transformation
 from nexolith.transformations.builtin import DropNulls, Filter, Rename, Select
 
@@ -25,7 +25,7 @@ class TransformationRegistry:
         try:
             return self._factories[config.type](config)
         except KeyError as exc:
-            raise ComponentNotFoundError(f"Unknown transformation: {config.type}") from exc
+            raise TransformationError(f"Unknown transformation: {config.type}") from exc
 
 
 def default_transformation_registry() -> TransformationRegistry:

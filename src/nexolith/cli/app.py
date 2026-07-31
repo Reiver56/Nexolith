@@ -1,4 +1,5 @@
 import logging
+from enum import IntEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -6,11 +7,37 @@ import typer
 
 from nexolith import __version__
 from nexolith.config import load_pipeline
-from nexolith.exceptions import NexolithError
+from nexolith.exceptions import (
+    ConfigurationError,
+    ConnectorError,
+    ExecutionError,
+    NexolithError,
+    TransformationError,
+)
 from nexolith.execution import DefaultPipelineRunner
-from nexolith.models import ExecutionResult, ExecutionStatus
+from nexolith.models import ExecutionResult
 
 app = typer.Typer(help="Build data flows that last.", no_args_is_help=True)
+
+
+class ExitCode(IntEnum):
+    CONFIGURATION_ERROR = 2
+    EXECUTION_ERROR = 3
+
+
+def _error_category(error: NexolithError) -> str:
+    cause = error.__cause__ if isinstance(error, ExecutionError) else error
+    if isinstance(cause, ConfigurationError):
+        return "configuration"
+    if isinstance(cause, ConnectorError):
+        return "connector"
+    if isinstance(cause, TransformationError):
+        return "transformation"
+    return "execution"
+
+
+def _show_error(error: NexolithError) -> None:
+    typer.echo(f"Error [{_error_category(error)}]: {error}", err=True)
 
 
 def version_callback(value: bool) -> None:
@@ -44,9 +71,9 @@ def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)])
     """Validate a pipeline YAML file without running it."""
     try:
         config = load_pipeline(path)
-    except NexolithError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
+    except ConfigurationError as exc:
+        _show_error(exc)
+        raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
     typer.echo(f"Pipeline '{config.name}' is valid.")
 
 
@@ -56,10 +83,12 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         config = load_pipeline(path)
-    except NexolithError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    result = DefaultPipelineRunner().run(config)
+    except ConfigurationError as exc:
+        _show_error(exc)
+        raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+    try:
+        result = DefaultPipelineRunner().run(config, raise_on_error=True)
+    except ExecutionError as exc:
+        _show_error(exc)
+        raise typer.Exit(code=ExitCode.EXECUTION_ERROR) from exc
     _show_result(result)
-    if result.status is ExecutionStatus.FAILED:
-        raise typer.Exit(code=1)
