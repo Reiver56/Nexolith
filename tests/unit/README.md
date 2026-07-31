@@ -1,5 +1,8 @@
 # Unit tests
 
+`test_application.py` covers dependency injection, the typed lifecycle event order, failure
+events, exception propagation, and isolation from CLI presentation dependencies.
+
 These tests cover configuration loading, transformations, runner state, and CLI behavior without
 external services. Keep them fast, deterministic, and independent of execution order.
 

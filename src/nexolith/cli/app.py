@@ -6,11 +6,11 @@ from typing import Annotated
 import typer
 
 from nexolith import __version__
+from nexolith.application import run_pipeline, validate_pipeline
 from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
-from nexolith.config import load_pipeline
 from nexolith.exceptions import (
     ConfigurationError,
     ConnectorError,
@@ -18,7 +18,6 @@ from nexolith.exceptions import (
     NexolithError,
     TransformationError,
 )
-from nexolith.execution import DefaultPipelineRunner
 from nexolith.models import ExecutionResult
 
 app = typer.Typer(help="Build data flows that last.", no_args_is_help=True)
@@ -81,7 +80,7 @@ def diagnostics() -> None:
 def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
     """Validate a pipeline YAML file without running it."""
     try:
-        config = load_pipeline(path)
+        config = validate_pipeline(path)
     except ConfigurationError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
@@ -93,12 +92,10 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
     """Run a pipeline YAML file."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        config = load_pipeline(path)
+        result = run_pipeline(path)
     except ConfigurationError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
-    try:
-        result = DefaultPipelineRunner().run(config, raise_on_error=True)
     except ExecutionError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.EXECUTION_ERROR) from exc

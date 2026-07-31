@@ -2,7 +2,8 @@
 
 The Typer application exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`, and
 `nexolith --version`.
-Presentation belongs here; pipeline execution and I/O belong in their dedicated packages.
+Presentation belongs here. The classic `validate` and `run` commands are thin adapters over the
+shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
 
 `diagnostics` prints deterministic, issue-friendly environment information. It reports Nexolith,
 Python, platform, dependency, and optional-feature versions without inspecting environment
