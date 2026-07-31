@@ -55,7 +55,15 @@ to the runner.
 ## Requirements and installation
 
 - Python 3.12, 3.13, or 3.14
-- [uv](https://docs.astral.sh/uv/)
+
+Install Nexolith from PyPI:
+
+```bash
+pip install nexolith
+nexolith --version
+```
+
+For development from a source checkout, install [uv](https://docs.astral.sh/uv/) and run:
 
 ```bash
 uv sync --extra dev

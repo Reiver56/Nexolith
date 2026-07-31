@@ -34,7 +34,7 @@ uv run nexolith --version
 The last command should print:
 
 ```text
-Nexolith 0.1.0
+Nexolith 0.2.0
 ```
 
 `uv sync` creates `.venv` when needed and installs Nexolith plus its development dependencies from
