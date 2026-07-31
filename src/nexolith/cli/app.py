@@ -6,6 +6,10 @@ from typing import Annotated
 import typer
 
 from nexolith import __version__
+from nexolith.cli.diagnostics import (
+    collect_environment_diagnostics,
+    render_environment_diagnostics,
+)
 from nexolith.config import load_pipeline
 from nexolith.exceptions import (
     ConfigurationError,
@@ -64,6 +68,13 @@ def _show_result(result: ExecutionResult) -> None:
     typer.echo(f"Duration: {duration:.3f}s")
     if result.error:
         typer.echo(f"Error: {result.error}", err=True)
+
+
+@app.command()
+def diagnostics() -> None:
+    """Print secret-safe environment details for troubleshooting."""
+    report = collect_environment_diagnostics()
+    typer.echo(render_environment_diagnostics(report))
 
 
 @app.command()

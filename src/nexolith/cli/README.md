@@ -1,7 +1,12 @@
 # CLI
 
-The Typer application exposes `nexolith validate`, `nexolith run`, and `nexolith --version`.
+The Typer application exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`, and
+`nexolith --version`.
 Presentation belongs here; pipeline execution and I/O belong in their dedicated packages.
+
+`diagnostics` prints deterministic, issue-friendly environment information. It reports Nexolith,
+Python, platform, dependency, and optional-feature versions without inspecting environment
+variables or reporting usernames, hostnames, filesystem paths, or connection details.
 
 Expected errors render as `Error [category]: message` without a traceback. Configuration failures
 exit with code `2`; execution, connector, and transformation failures exit with code `3`.
