@@ -10,6 +10,7 @@ from nexolith.cli.context import SelectedPipeline, SessionContext
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
+from nexolith.cli.nexo_art import render_nexo_pixel_art
 from nexolith.cli.render_context import RenderContext, detect_render_context
 from nexolith.config import PipelineConfig
 from nexolith.events import EventSink
@@ -74,7 +75,14 @@ def parse_command(value: str) -> ParsedCommand:
     return ParsedCommand(InteractiveCommand.UNKNOWN, command)
 
 
-def render_splash() -> str:
+def render_splash(render_context: RenderContext | None = None) -> str:
+    """Render the startup splash, which also stands in for the prompt's idle state:
+    it is the only thing shown before the first (and every subsequent, unchanged)
+    prompt in this synchronous, single-shot REPL. Colored pixel art is prepended
+    when the terminal can render it; plain terminals get exactly today's text.
+    """
+    if render_context is not None and not render_context.plain:
+        return f"{render_nexo_pixel_art()}\n{SPLASH}"
     return SPLASH
 
 
@@ -142,7 +150,7 @@ class InteractiveSession:
 
     def run(self) -> None:
         """Run until explicit exit, EOF, or an expected keyboard interruption."""
-        self._write(render_splash())
+        self._write(render_splash(self.render_context))
         while True:
             try:
                 command = parse_command(self._read(render_prompt(self.context)))

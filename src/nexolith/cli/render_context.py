@@ -24,6 +24,7 @@ class RenderContext:
     color_enabled: bool
     width: int
     forced_plain: bool = False
+    encoding_safe: bool = True
 
     @property
     def plain(self) -> bool:
@@ -32,6 +33,7 @@ class RenderContext:
             self.forced_plain
             or not self.is_tty
             or not self.color_enabled
+            or not self.encoding_safe
             or self.width < MINIMUM_WIDTH
         )
 
@@ -58,7 +60,24 @@ def detect_render_context(
         color_enabled="NO_COLOR" not in active_environ,
         width=_detect_width(active_environ),
         forced_plain=forced_plain,
+        encoding_safe=_can_encode_block_characters(active_stream),
     )
+
+
+def _can_encode_block_characters(stream: TextIO) -> bool:
+    """Block-drawing characters (e.g. full block, box lines) must round-trip through
+    the stream's encoding, or a legacy Windows codepage crashes the shell instead of
+    degrading. Streams with no declared encoding (e.g. injected test doubles) are
+    assumed safe.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if encoding is None:
+        return True
+    try:
+        "█─│".encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
 
 
 def _detect_width(environ: Mapping[str, str]) -> int:

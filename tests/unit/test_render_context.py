@@ -2,8 +2,9 @@ from nexolith.cli.render_context import MINIMUM_WIDTH, RenderContext, detect_ren
 
 
 class FakeStream:
-    def __init__(self, *, is_a_tty: bool) -> None:
+    def __init__(self, *, is_a_tty: bool, encoding: str | None = "utf-8") -> None:
         self._is_a_tty = is_a_tty
+        self.encoding = encoding
 
     def isatty(self) -> bool:
         return self._is_a_tty
@@ -98,4 +99,34 @@ def test_render_context_is_a_frozen_value_object() -> None:
     context = RenderContext(is_tty=True, color_enabled=True, width=MINIMUM_WIDTH)
 
     assert context.forced_plain is False
+    assert context.encoding_safe is True
     assert context.plain is False
+
+
+def test_legacy_codepage_stream_forces_plain() -> None:
+    """A stream that cannot encode block characters (e.g. Windows cp1252) must
+    degrade instead of crashing with UnicodeEncodeError when colored art is printed.
+    """
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True, encoding="cp1252"), environ=wide_environ()
+    )
+
+    assert context.encoding_safe is False
+    assert context.plain is True
+
+
+def test_utf8_stream_can_encode_block_characters() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True, encoding="utf-8"), environ=wide_environ()
+    )
+
+    assert context.encoding_safe is True
+    assert context.plain is False
+
+
+def test_stream_with_no_declared_encoding_is_assumed_safe() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True, encoding=None), environ=wide_environ()
+    )
+
+    assert context.encoding_safe is True

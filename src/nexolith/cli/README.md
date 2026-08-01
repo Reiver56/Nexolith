@@ -55,20 +55,40 @@ recognizable sentinel secrets and generic assertions that never echo those value
 
 ## Terminal capability detection (`render_context.py`)
 
-`detect_render_context()` builds an immutable `RenderContext` from three signals: `NO_COLOR`
+`detect_render_context()` builds an immutable `RenderContext` from four signals: `NO_COLOR`
 (presence in the environment disables color, regardless of value, per the
-[NO_COLOR spec](https://no-color.org/)), whether stdout is a TTY, and the detected terminal
-width against `MINIMUM_WIDTH` (80 columns). `stream` and `environ` are injectable so tests can
-simulate each degraded condition without a real terminal. `InteractiveSession` detects one
-`RenderContext` per session (`self.render_context`, also constructor-injectable) rather than
-re-detecting per render call, and today's plain-text output is unaffected by it: no interactive
-surface currently emits color or box-drawing.
+[NO_COLOR spec](https://no-color.org/)), whether stdout is a TTY, the detected terminal width
+against `MINIMUM_WIDTH` (80 columns), and whether the stream's encoding can round-trip block and
+box-drawing characters (`encoding_safe`; a legacy Windows codepage such as `cp1252` cannot, and
+must degrade instead of crashing the shell with `UnicodeEncodeError`). `stream` and `environ` are
+injectable so tests can simulate each degraded condition without a real terminal.
+`InteractiveSession` detects one `RenderContext` per session (`self.render_context`, also
+constructor-injectable) rather than re-detecting per render call.
 
 `RenderContext.plain` is `True` whenever `NO_COLOR` is set, output is not a TTY, the terminal is
-narrower than `MINIMUM_WIDTH`, or `forced_plain` was explicitly requested. Any future renderer
-that adds color or box-drawing (the pixel-art splash, an execution timeline/summary panel,
-`/validate` error highlighting) must read `session.render_context.plain` before emitting ANSI
-codes or box-drawing characters, and must produce fully readable output when it is `True` — color
-and box-drawing stay strictly additive, never the sole carrier of information. `is_tty`,
-`color_enabled`, and `width` are also exposed individually for renderers that need a narrower
-check than the combined `plain` flag (for example, a layout that only cares about width).
+narrower than `MINIMUM_WIDTH`, the stream's encoding is unsafe, or `forced_plain` was explicitly
+requested. Any future renderer that adds color or box-drawing (an execution timeline/summary
+panel, `/validate` error highlighting) must read `session.render_context.plain` before emitting
+ANSI codes or box-drawing characters, and must produce fully readable output when it is `True` —
+color and box-drawing stay strictly additive, never the sole carrier of information. `is_tty`,
+`color_enabled`, `width`, and `encoding_safe` are also exposed individually for renderers that
+need a narrower check than the combined `plain` flag (for example, a layout that only cares about
+width).
+
+## Nexo pixel art (`nexo_art.py`)
+
+`render_nexo_pixel_art()` renders Nexo as ANSI truecolor block characters, hand-stylized from
+`assets/nexo-icon.png` into a small 20x12 grid in a Discord-like blue palette (blurple body;
+dark, and white are reserved for the eye/nostril and its highlight, where they carry the
+mascot's expression). It always produces colored output and never checks terminal capability
+itself — `render_splash()` is the one call site that decides, prepending the art only when
+`render_context is not None and not render_context.plain`; on a plain or absent context it
+returns exactly today's text splash, unchanged.
+
+This synchronous, single-shot REPL has no background redraw or timer (per NXL-38's constraint
+against cooperative cancellation and background jobs), so there is no observable "idle" moment
+distinct from session start — the splash is shown exactly once, before the first prompt, and nothing
+re-renders between commands. The startup splash therefore doubles as the interactive prompt's idle
+state; a periodic or per-prompt-cycle re-render was considered and rejected as spammy in a scrolling
+terminal. Any future rendering work reusing this art should follow the same pattern: call
+`render_nexo_pixel_art()` directly, gated by the caller's own `render_context.plain` check.

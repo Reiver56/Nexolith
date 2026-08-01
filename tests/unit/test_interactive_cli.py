@@ -20,6 +20,7 @@ from nexolith.cli.interactive import (
     InteractiveSession,
     parse_command,
     render_prompt,
+    render_splash,
 )
 from nexolith.cli.render_context import RenderContext
 from nexolith.config.models import PipelineConfig
@@ -112,6 +113,53 @@ def test_session_accepts_injected_render_context() -> None:
     )
 
     assert session.render_context is forced
+
+
+def test_render_splash_is_byte_identical_to_current_text_when_no_context() -> None:
+    assert render_splash() == SPLASH
+    assert render_splash(None) == SPLASH
+
+
+def test_render_splash_falls_back_to_plain_text_in_degraded_conditions() -> None:
+    non_tty = RenderContext(is_tty=False, color_enabled=True, width=200)
+    no_color = RenderContext(is_tty=True, color_enabled=False, width=200)
+    narrow = RenderContext(is_tty=True, color_enabled=True, width=40)
+    forced = RenderContext(is_tty=True, color_enabled=True, width=200, forced_plain=True)
+
+    for degraded in (non_tty, no_color, narrow, forced):
+        assert render_splash(degraded) == SPLASH
+
+
+def test_render_splash_shows_colored_pixel_art_on_a_capable_terminal() -> None:
+    capable = RenderContext(is_tty=True, color_enabled=True, width=200)
+
+    rendered = render_splash(capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b[38;2;" in rendered
+
+
+def test_session_shows_plain_splash_when_render_context_is_degraded() -> None:
+    # run_session doesn't inject render_context; default detection under pytest
+    # (non-TTY output) must degrade to plain, matching current behavior exactly.
+    _, _, output = run_session(["/exit"])
+
+    assert output[0] == SPLASH
+
+
+def test_session_shows_colored_splash_when_render_context_is_capable() -> None:
+    capable = RenderContext(is_tty=True, color_enabled=True, width=200)
+    reader = ScriptedInput(["/exit"])
+    output: list[str] = []
+    session = InteractiveSession(
+        input_reader=reader, output_writer=output.append, render_context=capable
+    )
+
+    session.run()
+
+    assert output[0] != SPLASH
+    assert output[0].endswith(SPLASH)
 
 
 def test_no_subcommand_starts_interactive_session() -> None:
