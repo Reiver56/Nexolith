@@ -52,3 +52,23 @@ scriptable commands.
 
 Add CLI tests under `tests/unit/` whenever diagnostics or exit codes change. Tests must use
 recognizable sentinel secrets and generic assertions that never echo those values on failure.
+
+## Terminal capability detection (`render_context.py`)
+
+`detect_render_context()` builds an immutable `RenderContext` from three signals: `NO_COLOR`
+(presence in the environment disables color, regardless of value, per the
+[NO_COLOR spec](https://no-color.org/)), whether stdout is a TTY, and the detected terminal
+width against `MINIMUM_WIDTH` (80 columns). `stream` and `environ` are injectable so tests can
+simulate each degraded condition without a real terminal. `InteractiveSession` detects one
+`RenderContext` per session (`self.render_context`, also constructor-injectable) rather than
+re-detecting per render call, and today's plain-text output is unaffected by it: no interactive
+surface currently emits color or box-drawing.
+
+`RenderContext.plain` is `True` whenever `NO_COLOR` is set, output is not a TTY, the terminal is
+narrower than `MINIMUM_WIDTH`, or `forced_plain` was explicitly requested. Any future renderer
+that adds color or box-drawing (the pixel-art splash, an execution timeline/summary panel,
+`/validate` error highlighting) must read `session.render_context.plain` before emitting ANSI
+codes or box-drawing characters, and must produce fully readable output when it is `True` — color
+and box-drawing stay strictly additive, never the sole carrier of information. `is_tty`,
+`color_enabled`, and `width` are also exposed individually for renderers that need a narrower
+check than the combined `plain` flag (for example, a layout that only cares about width).

@@ -21,6 +21,7 @@ from nexolith.cli.interactive import (
     parse_command,
     render_prompt,
 )
+from nexolith.cli.render_context import RenderContext
 from nexolith.config.models import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
@@ -91,6 +92,26 @@ def run_session(
     )
     session.run()
     return session, reader, output
+
+
+def test_session_detects_render_context_by_default() -> None:
+    session = InteractiveSession(
+        input_reader=iter(["/exit"]).__next__, output_writer=lambda _: None
+    )
+
+    assert isinstance(session.render_context, RenderContext)
+
+
+def test_session_accepts_injected_render_context() -> None:
+    forced = RenderContext(is_tty=True, color_enabled=True, width=200)
+
+    session = InteractiveSession(
+        input_reader=iter(["/exit"]).__next__,
+        output_writer=lambda _: None,
+        render_context=forced,
+    )
+
+    assert session.render_context is forced
 
 
 def test_no_subcommand_starts_interactive_session() -> None:

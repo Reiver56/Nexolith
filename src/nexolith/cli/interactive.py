@@ -10,6 +10,7 @@ from nexolith.cli.context import SelectedPipeline, SessionContext
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
+from nexolith.cli.render_context import RenderContext, detect_render_context
 from nexolith.config import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
@@ -128,11 +129,16 @@ class InteractiveSession:
         output_writer: OutputWriter | None = None,
         context: SessionContext | None = None,
         application: InteractiveApplication | None = None,
+        render_context: RenderContext | None = None,
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
+        # Detected once per session so future colorized/panel renderers (splash,
+        # timeline, summary, /validate highlighting) share one consistent capability
+        # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
+        self.render_context = render_context or detect_render_context()
 
     def run(self) -> None:
         """Run until explicit exit, EOF, or an expected keyboard interruption."""
