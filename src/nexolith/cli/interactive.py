@@ -11,6 +11,7 @@ from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
 from nexolith.cli.nexo_art import render_nexo_pixel_art
+from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
 from nexolith.cli.render_context import RenderContext, detect_render_context
 from nexolith.config import PipelineConfig
 from nexolith.events import EventSink
@@ -78,12 +79,23 @@ def parse_command(value: str) -> ParsedCommand:
 def render_splash(render_context: RenderContext | None = None) -> str:
     """Render the startup splash, which also stands in for the prompt's idle state:
     it is the only thing shown before the first (and every subsequent, unchanged)
-    prompt in this synchronous, single-shot REPL. Colored pixel art is prepended
-    when the terminal can render it; plain terminals get exactly today's text.
+    prompt in this synchronous, single-shot REPL.
+
+    Tiered: (1) the Kitty graphics protocol at full fidelity, when heuristically
+    detected; (2) ANSI truecolor block art, for any other color-capable terminal;
+    (3) exactly today's plain text, when `render_context` is absent or `plain`.
+    Tier 1 has no synchronous acknowledgement from the terminal, so a build/write
+    failure is the only detectable failure mode; any exception there falls back
+    to tier 2 rather than risk crashing the session.
     """
-    if render_context is not None and not render_context.plain:
-        return f"{render_nexo_pixel_art()}\n{SPLASH}"
-    return SPLASH
+    if render_context is None or render_context.plain:
+        return SPLASH
+    if render_context.use_kitty:
+        try:
+            return f"{render_nexo_kitty_protocol()}\n{SPLASH}"
+        except Exception:
+            pass
+    return f"{render_nexo_pixel_art()}\n{SPLASH}"
 
 
 def render_help() -> str:

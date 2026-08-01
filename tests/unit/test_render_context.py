@@ -130,3 +130,57 @@ def test_stream_with_no_declared_encoding_is_assumed_safe() -> None:
     )
 
     assert context.encoding_safe is True
+
+
+def test_no_kitty_signals_means_no_kitty_graphics() -> None:
+    context = detect_render_context(stream=FakeStream(is_a_tty=True), environ=wide_environ())
+
+    assert context.kitty_graphics is False
+    assert context.use_kitty is False
+
+
+def test_term_xterm_kitty_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM="xterm-kitty")
+    )
+
+    assert context.kitty_graphics is True
+    assert context.use_kitty is True
+
+
+def test_kitty_window_id_presence_is_detected_regardless_of_value() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(KITTY_WINDOW_ID="")
+    )
+
+    assert context.kitty_graphics is True
+
+
+def test_wezterm_term_program_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM_PROGRAM="WezTerm")
+    )
+
+    assert context.kitty_graphics is True
+
+
+def test_unrelated_term_program_is_not_detected_as_kitty() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM_PROGRAM="iTerm.app")
+    )
+
+    assert context.kitty_graphics is False
+
+
+def test_use_kitty_is_false_when_plain_even_if_kitty_graphics_detected() -> None:
+    """A narrow/NO_COLOR/non-TTY terminal must never attempt the Kitty tier, even
+    if its environment happens to also match the Kitty heuristic (e.g. a narrow
+    pane inside an actual Kitty terminal)."""
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True),
+        environ=wide_environ(TERM="xterm-kitty", COLUMNS=str(MINIMUM_WIDTH - 1)),
+    )
+
+    assert context.kitty_graphics is True
+    assert context.plain is True
+    assert context.use_kitty is False

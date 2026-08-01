@@ -1,10 +1,34 @@
+import re
+
 from nexolith.cli.nexo_art import _PALETTE, _PIXELS, render_nexo_pixel_art
+from nexolith.cli.render_context import MINIMUM_WIDTH
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def test_render_nexo_pixel_art_matches_pixel_grid_row_count() -> None:
+def _visual_lines(rendered: str) -> list[str]:
+    return [_ANSI_RE.sub("", line) for line in rendered.split("\n")]
+
+
+def test_pixel_grid_has_an_even_row_count_for_half_block_pairing() -> None:
+    assert len(_PIXELS) % 2 == 0
+
+
+def test_render_nexo_pixel_art_halves_the_grid_into_terminal_lines() -> None:
     rendered = render_nexo_pixel_art()
 
-    assert rendered.count("\n") == len(_PIXELS) - 1
+    assert rendered.count("\n") == len(_PIXELS) // 2 - 1
+
+
+def test_render_nexo_pixel_art_stays_a_compact_header() -> None:
+    """Pin the compact-header sizing: well under MINIMUM_WIDTH, single-digit lines."""
+    rendered = render_nexo_pixel_art()
+    lines = rendered.split("\n")
+
+    assert len(lines) < 10
+    for line in _visual_lines(rendered):
+        assert len(line) == len(_PIXELS[0])
+    assert len(_PIXELS[0]) < MINIMUM_WIDTH
 
 
 def test_render_nexo_pixel_art_uses_ansi_truecolor_and_resets() -> None:

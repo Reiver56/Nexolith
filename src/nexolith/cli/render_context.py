@@ -25,6 +25,7 @@ class RenderContext:
     width: int
     forced_plain: bool = False
     encoding_safe: bool = True
+    kitty_graphics: bool = False
 
     @property
     def plain(self) -> bool:
@@ -37,6 +38,16 @@ class RenderContext:
             or self.width < MINIMUM_WIDTH
         )
 
+    @property
+    def use_kitty(self) -> bool:
+        """True when the full-fidelity Kitty graphics tier should be attempted.
+
+        Independent of `color_enabled`/`width`: `plain` alone gates whether any
+        colored/graphical rendering happens at all; this only chooses which
+        non-plain tier to use.
+        """
+        return self.kitty_graphics and not self.plain
+
 
 def detect_render_context(
     *,
@@ -44,7 +55,8 @@ def detect_render_context(
     environ: Mapping[str, str] | None = None,
     forced_plain: bool = False,
 ) -> RenderContext:
-    """Detect NO_COLOR, non-TTY output, and terminal width.
+    """Detect NO_COLOR, non-TTY output, terminal width, encoding safety, and
+    heuristic Kitty graphics protocol support.
 
     `stream` and `environ` are injectable so tests can simulate each degraded
     condition without a real terminal.
@@ -61,7 +73,27 @@ def detect_render_context(
         width=_detect_width(active_environ),
         forced_plain=forced_plain,
         encoding_safe=_can_encode_block_characters(active_stream),
+        kitty_graphics=_detect_kitty_graphics(active_environ),
     )
+
+
+_KITTY_TERM_PROGRAMS = frozenset({"WezTerm"})
+
+
+def _detect_kitty_graphics(environ: Mapping[str, str]) -> bool:
+    """Heuristic, environment-only detection of Kitty graphics protocol support.
+
+    Deliberately not an interactive query/response handshake with the terminal:
+    that would mean sending a query escape sequence and reading the terminal's
+    reply mid-session, risking interference with the session's own stdin read
+    loop or corrupting terminal state if it goes wrong. This under-detects some
+    genuinely compatible terminals; that's an accepted safety tradeoff, not a bug.
+    """
+    if environ.get("TERM") == "xterm-kitty":
+        return True
+    if "KITTY_WINDOW_ID" in environ:
+        return True
+    return environ.get("TERM_PROGRAM") in _KITTY_TERM_PROGRAMS
 
 
 def _can_encode_block_characters(stream: TextIO) -> bool:

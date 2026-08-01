@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from nexolith.application import PipelineApplication
-from nexolith.cli import app
+from nexolith.cli import app, interactive
 from nexolith.cli.context import SelectedPipeline, SessionContext
 from nexolith.cli.interactive import (
     DEFAULT_PROMPT,
@@ -130,7 +130,7 @@ def test_render_splash_falls_back_to_plain_text_in_degraded_conditions() -> None
         assert render_splash(degraded) == SPLASH
 
 
-def test_render_splash_shows_colored_pixel_art_on_a_capable_terminal() -> None:
+def test_render_splash_shows_ansi_block_art_on_a_capable_non_kitty_terminal() -> None:
     capable = RenderContext(is_tty=True, color_enabled=True, width=200)
 
     rendered = render_splash(capable)
@@ -138,6 +138,49 @@ def test_render_splash_shows_colored_pixel_art_on_a_capable_terminal() -> None:
     assert rendered != SPLASH
     assert rendered.endswith(SPLASH)
     assert "\x1b[38;2;" in rendered
+    assert "\x1b_G" not in rendered
+
+
+def test_render_splash_uses_kitty_protocol_when_detected() -> None:
+    kitty_capable = RenderContext(is_tty=True, color_enabled=True, width=200, kitty_graphics=True)
+
+    rendered = render_splash(kitty_capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b_G" in rendered
+
+
+def test_render_splash_falls_back_to_ansi_tier_when_kitty_rendering_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kitty_capable = RenderContext(is_tty=True, color_enabled=True, width=200, kitty_graphics=True)
+
+    def broken_kitty_renderer() -> str:
+        raise RuntimeError("simulated tier-1 failure")
+
+    monkeypatch.setattr(interactive, "render_nexo_kitty_protocol", broken_kitty_renderer)
+
+    rendered = render_splash(kitty_capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b_G" not in rendered
+    assert "\x1b[38;2;" in rendered
+
+
+def test_render_splash_never_attempts_kitty_or_ansi_rendering_when_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_be_called() -> str:
+        raise AssertionError("plain mode must not invoke colored rendering")
+
+    monkeypatch.setattr(interactive, "render_nexo_kitty_protocol", must_not_be_called)
+    monkeypatch.setattr(interactive, "render_nexo_pixel_art", must_not_be_called)
+
+    narrow_but_kitty = RenderContext(is_tty=True, color_enabled=True, width=40, kitty_graphics=True)
+
+    assert render_splash(narrow_but_kitty) == SPLASH
 
 
 def test_session_shows_plain_splash_when_render_context_is_degraded() -> None:
