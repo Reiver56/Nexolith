@@ -130,7 +130,7 @@ def test_render_splash_falls_back_to_plain_text_in_degraded_conditions() -> None
         assert render_splash(degraded) == SPLASH
 
 
-def test_render_splash_shows_ansi_block_art_on_a_capable_non_kitty_terminal() -> None:
+def test_render_splash_shows_bordered_panel_on_a_capable_non_kitty_terminal() -> None:
     capable = RenderContext(is_tty=True, color_enabled=True, width=200)
 
     rendered = render_splash(capable)
@@ -139,6 +139,9 @@ def test_render_splash_shows_ansi_block_art_on_a_capable_non_kitty_terminal() ->
     assert rendered.endswith(SPLASH)
     assert "\x1b[38;2;" in rendered
     assert "\x1b_G" not in rendered
+    assert "╭" in rendered and "╮" in rendered
+    assert "╰" in rendered and "╯" in rendered
+    assert "Nexolith" in rendered
 
 
 def test_render_splash_uses_kitty_protocol_when_detected() -> None:
@@ -176,7 +179,7 @@ def test_render_splash_never_attempts_kitty_or_ansi_rendering_when_plain(
         raise AssertionError("plain mode must not invoke colored rendering")
 
     monkeypatch.setattr(interactive, "render_nexo_kitty_protocol", must_not_be_called)
-    monkeypatch.setattr(interactive, "render_nexo_pixel_art", must_not_be_called)
+    monkeypatch.setattr(interactive, "render_nexo_panel", must_not_be_called)
 
     narrow_but_kitty = RenderContext(is_tty=True, color_enabled=True, width=40, kitty_graphics=True)
 

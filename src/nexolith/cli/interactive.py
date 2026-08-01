@@ -10,7 +10,7 @@ from nexolith.cli.context import SelectedPipeline, SessionContext
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
-from nexolith.cli.nexo_art import render_nexo_pixel_art
+from nexolith.cli.nexo_art import render_nexo_panel
 from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
 from nexolith.cli.render_context import RenderContext, detect_render_context
 from nexolith.config import PipelineConfig
@@ -82,11 +82,12 @@ def render_splash(render_context: RenderContext | None = None) -> str:
     prompt in this synchronous, single-shot REPL.
 
     Tiered: (1) the Kitty graphics protocol at full fidelity, when heuristically
-    detected; (2) ANSI truecolor block art, for any other color-capable terminal;
-    (3) exactly today's plain text, when `render_context` is absent or `plain`.
-    Tier 1 has no synchronous acknowledgement from the terminal, so a build/write
-    failure is the only detectable failure mode; any exception there falls back
-    to tier 2 rather than risk crashing the session.
+    detected; (2) a bordered ANSI truecolor panel around the same block art, for
+    any other color-capable terminal; (3) exactly today's plain text, when
+    `render_context` is absent or `plain`. Tier 1 has no synchronous
+    acknowledgement from the terminal, so a build/write failure is the only
+    detectable failure mode; any exception there falls back to tier 2 rather
+    than risk crashing the session.
     """
     if render_context is None or render_context.plain:
         return SPLASH
@@ -95,7 +96,7 @@ def render_splash(render_context: RenderContext | None = None) -> str:
             return f"{render_nexo_kitty_protocol()}\n{SPLASH}"
         except Exception:
             pass
-    return f"{render_nexo_pixel_art()}\n{SPLASH}"
+    return f"{render_nexo_panel()}\n{SPLASH}"
 
 
 def render_help() -> str:
