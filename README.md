@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
+  <img src="https://raw.githubusercontent.com/Reiver56/Nexolith/v0.2.0/assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
 </p>
 
 # Nexolith
