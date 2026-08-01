@@ -1,8 +1,20 @@
 # CLI
 
-Running `nexolith` without a subcommand starts a minimal interactive session with a short Nexo
-splash and the `nexolith> ` prompt. `/help` lists the available commands and `/exit` closes the
-session. EOF and keyboard interruption also exit cleanly.
+Running `nexolith` without a subcommand starts an interactive session. On a capable terminal
+(`RenderContext.plain` is `False`) this is a full-screen `prompt_toolkit` application, using the
+alternate screen buffer: the bordered Nexo panel as a static header, a scrollable output log, and
+a completing input line. Otherwise — `NO_COLOR`, non-TTY, a narrow terminal, or `prompt_toolkit`
+failing to acquire a real terminal for full-screen mode — it falls back to the classic, plain-text
+line-based loop this session always had: a short Nexo splash and the `nexolith> ` prompt, no
+border, no color, no completion. `/help` lists the available commands and `/exit` closes the
+session in either mode; EOF and keyboard interruption also exit cleanly.
+
+Every command dispatches through the same `InteractiveSession.dispatch()` method regardless of
+which mode is active — the full-screen layout and the classic loop share 100% of the command
+logic (`/open`, `/validate`, `/run`, `/clear`, error handling, redaction) and differ only in how
+output is displayed. `run_interactive_session()`'s fallback between the two is a single,
+deterministic branch on `render_context.plain`, tested directly — not something that happens by
+accident if `prompt_toolkit` raises.
 
 Use `/open <path>` to load a valid pipeline into the process-local session context. A successful
 open stores both the path entered by the user and its absolute resolved identity, but not the
@@ -24,8 +36,10 @@ or timing estimates.
 Expected operation failures are reported without a traceback or sensitive connector details, and
 the selected pipeline remains available for correction and retry. `Ctrl+C` during validation or a
 run interrupts that synchronous operation and returns to the prompt; Nexolith starts no background
-work. Persistent history, completion, progress bars, and live Rich rendering remain out of scope.
-`/logs` also remains out of scope until persistent execution history exists.
+work. Command and path tab-completion, and in-session command history (both via `prompt_toolkit`,
+full-screen mode only) are in scope; persisted history *across* sessions, progress bars, and live
+Rich rendering remain out of scope. `/logs` also remains out of scope until persistent execution
+history exists.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
 and `nexolith --version`.
@@ -119,10 +133,51 @@ background thread, no multi-frame state anywhere:
    is `True`. Byte-identical to current behavior; tiers 1 and 2 are never even attempted in this
    case — `render_splash()` returns immediately.
 
-This synchronous, single-shot REPL has no background redraw or timer (per NXL-38's constraint
-against cooperative cancellation and background jobs), so there is no observable "idle" moment
-distinct from session start — the splash is shown exactly once, before the first prompt, and nothing
-re-renders between commands. The startup splash therefore doubles as the interactive prompt's idle
-state; a periodic or per-prompt-cycle re-render was considered and rejected as spammy in a scrolling
-terminal. Any future rendering work reusing this art should follow the same pattern: call the
-renderer directly, gated by the caller's own `render_context.plain` / `.use_kitty` checks.
+In the classic loop, this is a synchronous, single-shot REPL with no background redraw or timer
+(per NXL-38's constraint against cooperative cancellation and background jobs), so there is no
+observable "idle" moment distinct from session start — the splash is shown exactly once, before
+the first prompt, and nothing re-renders between commands. The startup splash therefore doubles as
+the interactive prompt's idle state; a periodic or per-prompt-cycle re-render was considered and
+rejected as spammy in a scrolling terminal. In full-screen mode the panel is the persistent header
+(see `full_screen.py` below) — same static content, same idle-state role, just always visible
+instead of scrolled into history; it is still never re-rendered with different content. Any future
+rendering work reusing this art should follow the same pattern: call the renderer directly, gated
+by the caller's own `render_context.plain` / `.use_kitty` checks.
+
+## Tab-completion (`completion.py`)
+
+`NexolithCompleter` (a `prompt_toolkit.completion.Completer`) offers two kinds of completion,
+used only by the full-screen input line: the known command set (`/help`, `/open`, `/validate`,
+`/run`, `/clear`, `/exit`) while typing a `/`-prefixed word, and real filesystem paths — via
+`prompt_toolkit`'s own `PathCompleter`, scoped to the current working directory by default, not
+the filesystem root — once the text is `/open ` followed by a partial path. This is purely an
+input-editing convenience: it never resolves or validates a path itself, so it has no effect on
+`SessionContext`'s requested-path vs resolved-path distinction (NXL-37) — that still only happens
+when the command is actually submitted and dispatched, same as before this story.
+
+## Full-screen session (`full_screen.py`)
+
+`run_full_screen_session(render_context, *, session=None)` builds a `prompt_toolkit.Application`
+using the alternate screen buffer (`full_screen=True`): a fixed-height header showing
+`render_nexo_panel()`, a scrollable read-only output log below it, and a single-line, completing
+input field at the bottom. Enter on the input field parses the text and calls
+`InteractiveSession.dispatch()` — the same method the classic loop's `run()` now delegates to —
+so command behavior (including error redaction and shell-reusability-after-errors) is identical
+between the two presentations; only this module's layout code differs.
+
+`Ctrl+C` and `Ctrl+D` are bound to exit directly (full-screen mode reads raw keystrokes through
+`prompt_toolkit`'s own input handling, not blocking `input()` calls, so Python-level `EOFError` /
+`KeyboardInterrupt` never naturally occur here the way they do in the classic loop). On any exit —
+`/exit`, `Ctrl+C`, `Ctrl+D`, or an unhandled exception — `prompt_toolkit` itself restores the
+terminal (raw mode and the alternate screen buffer) from its own `finally` blocks in
+`Application.run_async()`; that guarantee is `prompt_toolkit`'s, not this module's, and is why
+crash-safety here doesn't depend on anything in `full_screen.py` catching exceptions. Terminal
+resize is handled by `prompt_toolkit`'s own redraw machinery; no custom resize code exists in this
+module.
+
+`run_interactive_session()` in `interactive.py` is the only caller: it checks
+`render_context.plain` first (the real, deterministic, tested fallback gate) and only attempts
+full-screen mode when that's `False`; a narrow `except Exception` around that attempt is a
+defensive backstop for the rare case where `prompt_toolkit` can't acquire a real terminal despite
+`is_tty` being `True` — it only covers session construction/startup, before any output has been
+drawn, so falling back at that point is still one clean decision, not a mid-session accident.

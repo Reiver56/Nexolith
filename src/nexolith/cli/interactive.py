@@ -161,6 +161,12 @@ class InteractiveSession:
         # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
         self.render_context = render_context or detect_render_context()
 
+    def set_output_writer(self, writer: OutputWriter) -> None:
+        """Redirect where this session's output goes, e.g. to a full-screen
+        session's scrollable log instead of the classic loop's direct writes.
+        """
+        self._write = writer
+
     def run(self) -> None:
         """Run until explicit exit, EOF, or an expected keyboard interruption."""
         self._write(render_splash(self.render_context))
@@ -170,28 +176,37 @@ class InteractiveSession:
             except (EOFError, KeyboardInterrupt):
                 self._write(GOODBYE)
                 return
-
-            if command.kind is InteractiveCommand.EMPTY:
-                continue
-            if command.kind is InteractiveCommand.HELP:
-                self._write(render_help())
-                continue
-            if command.kind is InteractiveCommand.OPEN:
-                self._open_pipeline(command.text)
-                continue
-            if command.kind is InteractiveCommand.CLEAR:
-                self._clear_pipeline()
-                continue
-            if command.kind is InteractiveCommand.VALIDATE:
-                self._validate_pipeline()
-                continue
-            if command.kind is InteractiveCommand.RUN:
-                self._run_pipeline()
-                continue
-            if command.kind is InteractiveCommand.EXIT:
-                self._write(GOODBYE)
+            if not self.dispatch(command):
                 return
-            self._write(render_unknown(command.text))
+
+    def dispatch(self, command: ParsedCommand) -> bool:
+        """Handle one already-parsed command. Returns False when the session
+        should end (explicit `/exit`). Shared by the classic blocking loop
+        (`run`) and the full-screen session so both dispatch identically —
+        only presentation differs between them.
+        """
+        if command.kind is InteractiveCommand.EMPTY:
+            return True
+        if command.kind is InteractiveCommand.HELP:
+            self._write(render_help())
+            return True
+        if command.kind is InteractiveCommand.OPEN:
+            self._open_pipeline(command.text)
+            return True
+        if command.kind is InteractiveCommand.CLEAR:
+            self._clear_pipeline()
+            return True
+        if command.kind is InteractiveCommand.VALIDATE:
+            self._validate_pipeline()
+            return True
+        if command.kind is InteractiveCommand.RUN:
+            self._run_pipeline()
+            return True
+        if command.kind is InteractiveCommand.EXIT:
+            self._write(GOODBYE)
+            return False
+        self._write(render_unknown(command.text))
+        return True
 
     def _open_pipeline(self, value: str) -> None:
         if not value:
@@ -275,5 +290,24 @@ def _render_execution_result(result: ExecutionResult) -> str:
 
 
 def run_interactive_session() -> None:
-    """Launch the default terminal-backed session."""
-    InteractiveSession().run()
+    """Launch the default terminal-backed session: full-screen when the
+    terminal supports it, today's classic line-based loop otherwise.
+
+    `render_context.plain` is the real, deterministic, tested fallback gate
+    (NO_COLOR, non-TTY, narrow width). The broad except below is a narrow
+    defensive backstop only, for the rare case where prompt_toolkit itself
+    cannot acquire a real terminal for full-screen mode despite `is_tty`
+    being true — it only wraps session construction/startup, before any
+    output has been drawn, so falling back at that point is still a clean,
+    single decision rather than an accident mid-session.
+    """
+    render_context = detect_render_context()
+    if not render_context.plain:
+        from nexolith.cli.full_screen import run_full_screen_session
+
+        try:
+            run_full_screen_session(render_context)
+            return
+        except Exception:
+            pass
+    InteractiveSession(render_context=render_context).run()

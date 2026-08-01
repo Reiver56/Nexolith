@@ -9,6 +9,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes targeting releases after 0.3.0 will be recorded here.
 
+### Added
+
+- Added a full-screen interactive session on capable terminals: a bordered, titled Nexo pixel-art
+  panel as a persistent header, a scrollable output log, and a tab-completing input line (slash
+  commands and `/open` path completion), using `prompt_toolkit`'s alternate screen buffer. Falls
+  back to the existing plain-text line loop — unchanged, byte-identical — whenever `NO_COLOR`, no
+  real TTY, a narrow terminal, or `prompt_toolkit` cannot acquire a terminal for full-screen mode.
+  Every command dispatches through the same logic in both modes; only presentation differs
+  (NXL-69).
+
 ## [0.3.0] - 2026-08-01
 
 ### Added

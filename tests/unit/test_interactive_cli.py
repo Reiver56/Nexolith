@@ -186,6 +186,100 @@ def test_render_splash_never_attempts_kitty_or_ansi_rendering_when_plain(
     assert render_splash(narrow_but_kitty) == SPLASH
 
 
+class _RecordingSession:
+    """Stand-in for InteractiveSession that records .run() without blocking
+    on real IO, so run_interactive_session()'s branch logic is testable in
+    isolation from both the classic loop's and the full-screen session's
+    actual behavior (each is tested separately, in their own test files)."""
+
+    def __init__(self, *, render_context: RenderContext) -> None:
+        self.render_context = render_context
+        self.ran = False
+
+    def run(self) -> None:
+        self.ran = True
+
+
+def _recording_session_factory(
+    recorded: list[_RecordingSession],
+) -> Callable[..., _RecordingSession]:
+    def factory(*, render_context: RenderContext) -> _RecordingSession:
+        session = _RecordingSession(render_context=render_context)
+        recorded.append(session)
+        return session
+
+    return factory
+
+
+def test_run_interactive_session_uses_classic_loop_when_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deterministic, tested fallback gate: RenderContext.plain routes to
+    the classic loop and never even attempts the full-screen session."""
+    plain_context = RenderContext(is_tty=False, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: plain_context)
+
+    def full_screen_must_not_be_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("full-screen must not be attempted when render_context.plain")
+
+    monkeypatch.setattr(
+        "nexolith.cli.full_screen.run_full_screen_session", full_screen_must_not_be_called
+    )
+    recorded: list[_RecordingSession] = []
+    monkeypatch.setattr(interactive, "InteractiveSession", _recording_session_factory(recorded))
+
+    interactive.run_interactive_session()
+
+    assert len(recorded) == 1
+    assert recorded[0].render_context is plain_context
+    assert recorded[0].ran is True
+
+
+def test_run_interactive_session_attempts_full_screen_when_capable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capable_context = RenderContext(is_tty=True, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: capable_context)
+
+    calls: list[RenderContext] = []
+    monkeypatch.setattr(
+        "nexolith.cli.full_screen.run_full_screen_session", lambda ctx: calls.append(ctx)
+    )
+
+    def classic_must_not_be_called(**kwargs: object) -> None:
+        raise AssertionError("classic loop must not run when full-screen succeeds")
+
+    monkeypatch.setattr(interactive, "InteractiveSession", classic_must_not_be_called)
+
+    interactive.run_interactive_session()
+
+    assert calls == [capable_context]
+
+
+def test_run_interactive_session_falls_back_to_classic_loop_if_full_screen_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive backstop: if prompt_toolkit can't acquire a real terminal
+    for full-screen mode despite is_tty being true, fall back cleanly rather
+    than crash -- this only covers setup-time failure, before any output has
+    been drawn (see run_interactive_session's docstring)."""
+    capable_context = RenderContext(is_tty=True, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: capable_context)
+
+    def broken_full_screen(ctx: RenderContext) -> None:
+        raise RuntimeError("simulated: prompt_toolkit couldn't acquire a real terminal")
+
+    monkeypatch.setattr("nexolith.cli.full_screen.run_full_screen_session", broken_full_screen)
+    recorded: list[_RecordingSession] = []
+    monkeypatch.setattr(interactive, "InteractiveSession", _recording_session_factory(recorded))
+
+    interactive.run_interactive_session()
+
+    assert len(recorded) == 1
+    assert recorded[0].render_context is capable_context
+    assert recorded[0].ran is True
+
+
 def test_session_shows_plain_splash_when_render_context_is_degraded() -> None:
     # run_session doesn't inject render_context; default detection under pytest
     # (non-TTY output) must degrade to plain, matching current behavior exactly.
