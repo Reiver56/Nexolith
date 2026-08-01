@@ -434,6 +434,41 @@ def test_operation_reloads_changed_pipeline_and_preserves_context(
     assert "Traceback" not in rendered
 
 
+def test_five_essential_commands_are_discoverable_and_invocable_as_a_set(tmp_path: Path) -> None:
+    """Pin NXL-39: /help, /open, /validate, /run, /exit are each discoverable via /help
+    and each actually invocable in a single session."""
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_executable_pipeline(pipeline, source, destination)
+
+    session, reader, output = run_session(
+        ["/help", f"/open {pipeline}", "/validate", "/run", "/exit"]
+    )
+
+    help_text = "\n".join(output)
+    for command in ("/help", "/open", "/validate", "/run", "/exit"):
+        assert command in help_text
+
+    assert any(line.startswith("Pipeline opened:") for line in output)
+    assert "Pipeline valid." in output
+    assert any(line.startswith("Status: succeeded") for line in output)
+    assert output[-1] == GOODBYE
+    assert session.context.pipeline is not None
+    assert len(reader.prompts) == 5
+
+
+def test_help_does_not_expose_deferred_v031_or_v050_features() -> None:
+    """Pin NXL-39's explicit deferrals: completion, persistent history, and /logs
+    must not appear in the discoverable command surface for v0.3.0."""
+    _, _, output = run_session(["/help", "/exit"])
+
+    help_text = "\n".join(output).lower()
+    assert "/logs" not in help_text
+    assert "completion" not in help_text
+    assert "history" not in help_text
+
+
 def test_real_run_failure_is_redacted_and_session_remains_usable(tmp_path: Path) -> None:
     pipeline = tmp_path / "pipeline.yaml"
     missing_source = tmp_path / "private-user-password.csv"

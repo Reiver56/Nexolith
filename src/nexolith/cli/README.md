@@ -25,6 +25,7 @@ Expected operation failures are reported without a traceback or sensitive connec
 the selected pipeline remains available for correction and retry. `Ctrl+C` during validation or a
 run interrupts that synchronous operation and returns to the prompt; Nexolith starts no background
 work. Persistent history, completion, progress bars, and live Rich rendering remain out of scope.
+`/logs` also remains out of scope until persistent execution history exists.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
 and `nexolith --version`.
