@@ -88,7 +88,7 @@ def test_diagnostics_command_reports_to_stdout_only() -> None:
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "Nexolith 0.2.0"
+    assert result.stdout.strip() == "Nexolith 0.3.0"
     assert result.stderr == ""
 
 

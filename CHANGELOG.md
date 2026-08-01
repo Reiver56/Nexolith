@@ -7,7 +7,9 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Changes targeting releases after 0.2.0 will be recorded here.
+Changes targeting releases after 0.3.0 will be recorded here.
+
+## [0.3.0] - 2026-08-01
 
 ### Added
 
@@ -29,6 +31,13 @@ Changes targeting releases after 0.2.0 will be recorded here.
   `/help` and individually tested end to end. Documented that context-aware completion and
   persistent command history are deferred to v0.3.1, and `/logs` is deferred until persistent
   execution history ships in v0.5.0 (NXL-39).
+
+### Fixed
+
+- Fixed the Nexo mascot not rendering on PyPI. The README image now uses a stable absolute URL
+  pinned to the `v0.2.0` release tag instead of a repository-relative path, so it renders
+  correctly on both GitHub and in the PyPI-rendered package description; the mascot remains
+  centered (NXL-32).
 
 ## [0.2.0] - 2026-07-31
 
