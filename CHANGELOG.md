@@ -9,6 +9,27 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Changes targeting releases after 0.2.0 will be recorded here.
 
+### Added
+
+- Added a persistent interactive session. Running `nexolith` without a subcommand now opens a
+  `nexolith> ` prompt behind a short Nexo splash; `/help` lists the available commands, `/exit`
+  closes the session, and EOF or `Ctrl+C` exit cleanly without a traceback (NXL-36).
+- Added `/open <path>`, `/open`, and `/clear` to the interactive session for selecting, showing,
+  and clearing the active pipeline. The selected filename appears in the prompt, and a failed or
+  deleted pipeline leaves the previous selection in place instead of breaking the session (NXL-37).
+- Added `/validate` and `/run` to the interactive session. Both reread the active pipeline through
+  the shared application layer and print plain-text lifecycle events as they happen, followed by
+  the real status, row counts, and duration; failures report the error without leaking connector
+  details and return to a usable prompt, and `Ctrl+C` interrupts only the current operation
+  (NXL-38).
+- Documented the stdout, stderr, and exit-code contract for the scriptable `--version`,
+  `diagnostics`, `validate`, and `run` commands, and added regression tests pinning that
+  contract so interactive-session work cannot silently change automation behavior (NXL-40).
+- Confirmed `/help`, `/open`, `/validate`, `/run`, and `/exit` are all discoverable through
+  `/help` and individually tested end to end. Documented that context-aware completion and
+  persistent command history are deferred to v0.3.1, and `/logs` is deferred until persistent
+  execution history ships in v0.5.0 (NXL-39).
+
 ## [0.2.0] - 2026-07-31
 
 ### Added

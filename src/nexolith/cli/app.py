@@ -6,22 +6,21 @@ from typing import Annotated
 import typer
 
 from nexolith import __version__
+from nexolith.application import run_pipeline, validate_pipeline
 from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
-from nexolith.config import load_pipeline
-from nexolith.exceptions import (
-    ConfigurationError,
-    ConnectorError,
-    ExecutionError,
-    NexolithError,
-    TransformationError,
-)
-from nexolith.execution import DefaultPipelineRunner
+from nexolith.cli.errors import render_error
+from nexolith.cli.interactive import run_interactive_session
+from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 
-app = typer.Typer(help="Build data flows that last.", no_args_is_help=True)
+app = typer.Typer(
+    help="Build data flows that last.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 
 
 class ExitCode(IntEnum):
@@ -29,19 +28,8 @@ class ExitCode(IntEnum):
     EXECUTION_ERROR = 3
 
 
-def _error_category(error: NexolithError) -> str:
-    cause = error.__cause__ if isinstance(error, ExecutionError) else error
-    if isinstance(cause, ConfigurationError):
-        return "configuration"
-    if isinstance(cause, ConnectorError):
-        return "connector"
-    if isinstance(cause, TransformationError):
-        return "transformation"
-    return "execution"
-
-
-def _show_error(error: NexolithError) -> None:
-    typer.echo(f"Error [{_error_category(error)}]: {error}", err=True)
+def _show_error(error: ConfigurationError | ExecutionError) -> None:
+    typer.echo(render_error(error), err=True)
 
 
 def version_callback(value: bool) -> None:
@@ -50,13 +38,16 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    context: typer.Context,
     version: bool = typer.Option(
         False, "--version", callback=version_callback, is_eager=True, help="Show version."
     ),
 ) -> None:
     """Nexolith pipeline CLI."""
+    if context.invoked_subcommand is None:
+        run_interactive_session()
 
 
 def _show_result(result: ExecutionResult) -> None:
@@ -81,7 +72,7 @@ def diagnostics() -> None:
 def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
     """Validate a pipeline YAML file without running it."""
     try:
-        config = load_pipeline(path)
+        config = validate_pipeline(path)
     except ConfigurationError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
@@ -93,12 +84,10 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
     """Run a pipeline YAML file."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        config = load_pipeline(path)
+        result = run_pipeline(path)
     except ConfigurationError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
-    try:
-        result = DefaultPipelineRunner().run(config, raise_on_error=True)
     except ExecutionError as exc:
         _show_error(exc)
         raise typer.Exit(code=ExitCode.EXECUTION_ERROR) from exc

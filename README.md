@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
+  <img src="https://raw.githubusercontent.com/Reiver56/Nexolith/v0.2.0/assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
 </p>
 
 # Nexolith
@@ -118,11 +118,21 @@ troubleshooting, and suggested next steps.
 ## CLI
 
 ```text
+nexolith
 nexolith --version
 nexolith diagnostics
 nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
 ```
+
+Running `nexolith` without a subcommand opens the minimal Nexo interactive session. Use `/help` to
+list its currently available commands, `/open <path>` to select or replace a valid pipeline,
+`/validate` and `/run` to operate on it, `/open` to show the current selection, `/clear` to remove
+it, and `/exit` to leave. The selected filename appears in the prompt and the context lasts only
+for the current process. Validation and execution report observable pipeline phases as plain text;
+successful runs finish with the real status, row counts, and duration. Expected failures keep the
+session usable, and `Ctrl+C` returns to the prompt after interrupting the current synchronous
+operation.
 
 `diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
 information without exposing environment variables, usernames, hostnames, filesystem paths, or
@@ -145,6 +155,17 @@ credentials, authenticated connection URLs, and raw driver details.
 Unexpected programming errors are not converted into expected failures and may show a traceback for
 debugging. Reproduce those failures in a development environment, sanitize logs before sharing
 them, and never include credentials in issue reports.
+
+### stdout, stderr, and scripting compatibility
+
+`--version`, `diagnostics`, `validate`, and `run` are deterministic, non-interactive commands
+suitable for CI and scripts. Their result output goes to stdout; `Error [category]: message`
+goes to stderr. `run` additionally configures root Python logging (`INFO Pipeline '<name>'
+started`, `succeeded`, or `failed: <type>`) which the standard library sends to stderr, never
+stdout. `--version` is eager: it prints and exits before any subcommand or the interactive
+session would start. These four commands never construct an interactive session or attach the
+`EventSink` renderer, so their stdout/stderr contract does not change when Nexolith is invoked
+without arguments and starts the interactive shell instead.
 
 ## Connectors
 
