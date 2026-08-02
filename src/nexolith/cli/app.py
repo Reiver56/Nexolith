@@ -227,7 +227,8 @@ def runs_list(
 
 @runs_app.command("show")
 def runs_show(run_id: Annotated[int, typer.Argument(help="The DAG run id to show.")]) -> None:
-    """Show full detail for one DAG run, including per-task status."""
+    """Show full detail for one DAG run, including per-task status and any
+    retry attempts."""
     store = StateStore()
     try:
         run = store.get_dag_run(run_id)
@@ -235,6 +236,7 @@ def runs_show(run_id: Annotated[int, typer.Argument(help="The DAG run id to show
             typer.echo(render_run_not_found(run_id), err=True)
             raise typer.Exit(code=1)
         tasks = store.list_task_runs(run_id)
+        attempts = store.list_run_attempts(run_id)
     finally:
         store.close()
-    typer.echo(render_run_detail(run, tasks, detect_render_context()))
+    typer.echo(render_run_detail(run, tasks, detect_render_context(), attempts))

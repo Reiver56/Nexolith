@@ -7,11 +7,19 @@ visual language for these commands. Plain static ANSI strings here, not
 that print and exit, not a live session.
 """
 
+from collections import defaultdict
 from datetime import datetime
 
 from nexolith.cli.nexo_art import BLURPLE, DIM, GREEN, RED, WHITE
 from nexolith.cli.render_context import RenderContext
-from nexolith.state import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+from nexolith.state import (
+    DagRunRecord,
+    DagRunStatus,
+    TaskAttemptRecord,
+    TaskAttemptStatus,
+    TaskRunRecord,
+    TaskRunStatus,
+)
 
 _RESET = "\x1b[0m"
 
@@ -28,16 +36,20 @@ _DAG_RUN_COLOR = {
     DagRunStatus.FAILED: RED,
 }
 
-# ● covers both an in-progress task and a succeeded one -- the status word
-# printed alongside it (and its color, in styled mode) is what disambiguates,
-# matching the "never let color alone carry meaning" rule status_area.py
-# already established for its own timeline.
+# ● covers both an in-progress task and a succeeded one, and ⊘ covers both
+# 'skipped' and 'blocked' -- the status word printed alongside each marker
+# (and its color, in styled mode) is what disambiguates, matching the
+# "never let color alone carry meaning" rule status_area.py already
+# established for its own timeline. skipped and blocked are visually
+# identical on purpose: what distinguishes them for a reader is the word
+# itself ("skipped" vs "blocked"), not a bespoke third symbol.
 _TASK_MARKER = {
     TaskRunStatus.PENDING: "○",
     TaskRunStatus.RUNNING: "●",
     TaskRunStatus.SUCCEEDED: "●",
     TaskRunStatus.FAILED: "✗",
     TaskRunStatus.SKIPPED: "⊘",
+    TaskRunStatus.BLOCKED: "⊘",
 }
 
 _TASK_COLOR = {
@@ -46,6 +58,13 @@ _TASK_COLOR = {
     TaskRunStatus.SUCCEEDED: GREEN,
     TaskRunStatus.FAILED: RED,
     TaskRunStatus.SKIPPED: DIM,
+    TaskRunStatus.BLOCKED: DIM,
+}
+
+_ATTEMPT_COLOR = {
+    TaskAttemptStatus.RUNNING: BLURPLE,
+    TaskAttemptStatus.SUCCEEDED: GREEN,
+    TaskAttemptStatus.FAILED: RED,
 }
 
 _LIST_COLUMNS = ("ID", "DAG", "STATUS", "STARTED", "ENDED")
@@ -109,14 +128,25 @@ def _panel_lines(
 
 
 def render_run_detail(
-    run: DagRunRecord, tasks: list[TaskRunRecord], render_context: RenderContext
+    run: DagRunRecord,
+    tasks: list[TaskRunRecord],
+    render_context: RenderContext,
+    attempts: list[TaskAttemptRecord] | None = None,
 ) -> str:
+    """`attempts` is optional (defaults to none) so existing callers that
+    predate retry support keep working; a real caller passes
+    `store.list_run_attempts(run.id)`. Only tasks that were actually
+    retried (more than one recorded attempt) get a visible attempt
+    breakdown -- a task that ran exactly once, the common case, renders
+    exactly as it did before this story.
+    """
     plain = render_context.plain
     status_color = None if plain else _DAG_RUN_COLOR.get(run.status)
     panel_rows: list[tuple[str, str, tuple[int, int, int] | None]] = [
         ("Status", run.status.value, status_color),
         ("DAG", run.dag_name, None),
         ("Trigger", run.trigger_reason, None),
+        ("Policy", run.on_failure, None),
         ("Started", run.started_at, None),
         ("Ended", run.ended_at or "(in progress)", None),
     ]
@@ -130,6 +160,10 @@ def render_run_detail(
     if not tasks:
         lines.append("  (no tasks recorded)")
         return "\n".join(lines)
+
+    attempts_by_task: dict[str, list[TaskAttemptRecord]] = defaultdict(list)
+    for attempt in attempts or []:
+        attempts_by_task[attempt.task_name].append(attempt)
 
     name_width = max(len(task.task_name) for task in tasks)
     status_width = max(len(task.status.value) for task in tasks)
@@ -149,7 +183,25 @@ def render_run_detail(
             row += f"  {task.error}"
         lines.append(row)
 
+        task_attempts = attempts_by_task.get(task.task_name, [])
+        if len(task_attempts) > 1:
+            lines.extend(_render_attempt_lines(task_attempts, plain=plain))
+
     return "\n".join(lines)
+
+
+def _render_attempt_lines(attempts: list[TaskAttemptRecord], *, plain: bool) -> list[str]:
+    lines = []
+    for attempt in attempts:
+        duration = _format_duration(attempt.started_at, attempt.ended_at)
+        status_text = attempt.status.value
+        if not plain:
+            status_text = _colorize(status_text, _ATTEMPT_COLOR[attempt.status])
+        line = f"      attempt {attempt.attempt_number}: {status_text} ({duration})"
+        if attempt.error:
+            line += f" - {attempt.error}"
+        lines.append(line)
+    return lines
 
 
 def _format_duration(started_at: str | None, ended_at: str | None) -> str:

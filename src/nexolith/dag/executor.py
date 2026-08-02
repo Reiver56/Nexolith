@@ -6,6 +6,8 @@ later CLI/scheduler story calls; `DagExecutor` is its lower-level building
 block, useful directly in tests.
 """
 
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -99,13 +101,29 @@ class DagExecutor:
     CLI's `/run` and classic `run` command already use. Sequential only:
     independent branches run one after another, not in parallel (explicitly
     out of scope for this story).
+
+    Because execution is strictly sequential, at most one task is ever "in
+    progress" at a time -- so honoring `on_failure="block"`'s requirement
+    to let an already-in-progress task finish rather than aborting it
+    mid-flight needs no special handling: the failing task's own retries
+    already run to completion (see `_run_task_with_retries`) before the
+    block decision is ever evaluated, by construction.
     """
 
     def __init__(
-        self, store: StateStore, application: PipelineRunnerApplication | None = None
+        self,
+        store: StateStore,
+        application: PipelineRunnerApplication | None = None,
+        *,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self._store = store
         self._application = application or PipelineApplication()
+        # Injectable so tests never sleep for real wall-clock seconds
+        # waiting out a retry delay; a real DagExecutor uses real time.sleep.
+        # No thread/timer here either way -- a retry is "try again", not
+        # "try again on a timer in the background".
+        self._sleep = sleep or time.sleep
 
     def run(self, dag: DagConfig, path: Path, *, trigger_reason: str = "manual") -> int:
         """`path` is the DAG file itself (the same path `load_dag()` was
@@ -124,33 +142,79 @@ class DagExecutor:
 
         ordered = _topological_order(dag.tasks)
         dag_run_id = self._store.start_dag_run(
-            dag.name, [task.name for task in ordered], trigger_reason=trigger_reason
+            dag.name,
+            [task.name for task in ordered],
+            trigger_reason=trigger_reason,
+            on_failure=dag.on_failure,
         )
 
         failed_tasks: set[str] = set()
         dag_failed = False
         first_error: str | None = None
+        # Once True (on_failure="block" and some task ultimately failed),
+        # every remaining task is blocked outright -- independent branches
+        # included, not just tasks transitively dependent on the failure.
+        # With on_failure="skip" (the default) this never becomes True, so
+        # behavior is identical to before this story: only the
+        # _transitive_dependents() skip check below ever applies.
+        blocked = False
 
         for task in ordered:
+            if blocked:
+                self._store.block_task_run(dag_run_id, task.name)
+                continue
             if task.name in _transitive_dependents(dag.tasks, failed_tasks):
                 self._store.skip_task_run(dag_run_id, task.name)
                 continue
 
             self._store.start_task_run(dag_run_id, task.name)
             pipeline_path = _resolve_pipeline_path(task, base_dir)
-            try:
-                self._application.run_pipeline(pipeline_path)
-            except (ConfigurationError, ExecutionError) as exc:
-                self._store.complete_task_run(dag_run_id, task.name, success=False, error=str(exc))
+            success, error = self._run_task_with_retries(dag_run_id, task, pipeline_path)
+            self._store.complete_task_run(dag_run_id, task.name, success=success, error=error)
+
+            if not success:
                 failed_tasks.add(task.name)
                 dag_failed = True
                 if first_error is None:
-                    first_error = f"Task '{task.name}' failed: {exc}"
-            else:
-                self._store.complete_task_run(dag_run_id, task.name, success=True)
+                    first_error = f"Task '{task.name}' failed: {error}"
+                if dag.on_failure == "block":
+                    blocked = True
 
         self._store.complete_dag_run(dag_run_id, success=not dag_failed, error=first_error)
         return dag_run_id
+
+    def _run_task_with_retries(
+        self, dag_run_id: int, task: DagTaskConfig, pipeline_path: Path
+    ) -> tuple[bool, str | None]:
+        """Try `task` up to `1 + task.retries` times (retries=0, the
+        default, means exactly one attempt -- today's exact pre-existing
+        behavior). Each attempt is a real call to `PipelineApplication.
+        run_pipeline()`, recorded to the store as its own task_attempts row
+        the moment it starts and the moment it finishes -- never batched,
+        never simulated, satisfying "no silent retries" directly rather
+        than by convention.
+        """
+        max_attempts = 1 + task.retries
+        last_error: str | None = None
+        for attempt_number in range(1, max_attempts + 1):
+            if attempt_number > 1:
+                delay = task.retry_delay_seconds * (
+                    task.retry_backoff_multiplier ** (attempt_number - 2)
+                )
+                if delay > 0:
+                    self._sleep(delay)
+
+            attempt_id = self._store.start_task_attempt(dag_run_id, task.name, attempt_number)
+            try:
+                self._application.run_pipeline(pipeline_path)
+            except (ConfigurationError, ExecutionError) as exc:
+                last_error = str(exc)
+                self._store.complete_task_attempt(attempt_id, success=False, error=last_error)
+                continue
+            else:
+                self._store.complete_task_attempt(attempt_id, success=True)
+                return True, None
+        return False, last_error
 
 
 def execute_dag(

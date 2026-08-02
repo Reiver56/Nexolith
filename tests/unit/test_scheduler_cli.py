@@ -14,6 +14,8 @@ from nexolith.cli.render_context import RenderContext
 from nexolith.cli.runs_render import render_run_detail, render_runs_list
 from nexolith.cli.scheduler_render import SchedulerStatus, render_scheduler_status
 from nexolith.dag import execute_dag
+from nexolith.events import EventSink
+from nexolith.models import ExecutionResult
 from nexolith.scheduler import (
     default_pidfile_path,
     is_process_alive,
@@ -414,6 +416,63 @@ tasks:
     assert "transform" in result.output
     assert "side" in result.output
     assert "load" in result.output
+
+
+def test_runs_show_renders_multiple_retry_attempts_for_one_task(
+    isolated_state_dir: Path, tmp_path: Path
+) -> None:
+    """A task that fails once and succeeds on retry (real DagExecutor retry
+    support, NXL-79) -- runs show must render both attempts and the
+    on_failure policy, not just the task's final status.
+    """
+    from nexolith.dag import DagExecutor, load_dag
+
+    class _FlakyOnce:
+        def __init__(self) -> None:
+            from nexolith.application import PipelineApplication
+
+            self._real = PipelineApplication()
+            self._calls = 0
+
+        def run_pipeline(
+            self, path: Path, *, event_sink: EventSink | None = None
+        ) -> ExecutionResult:
+            from nexolith.exceptions import ExecutionError
+
+            self._calls += 1
+            if self._calls == 1:
+                raise ExecutionError("simulated transient failure")
+            return self._real.run_pipeline(path, event_sink=event_sink)
+
+    write_pipeline(tmp_path / "flaky.yaml", name="flaky")
+    dag_path = tmp_path / "workflow.yaml"
+    dag_path.write_text(
+        """
+name: retry-demo
+tasks:
+  - name: flaky
+    pipeline: flaky.yaml
+    depends_on: []
+    retries: 1
+    retry_delay_seconds: 0
+""",
+        encoding="utf-8",
+    )
+    store = StateStore()
+    try:
+        dag = load_dag(dag_path)
+        run_id = DagExecutor(store, _FlakyOnce()).run(dag, dag_path)
+    finally:
+        store.close()
+
+    result = runner.invoke(app, ["runs", "show", str(run_id)])
+
+    assert result.exit_code == 0
+    assert "succeeded" in result.output
+    assert "attempt 1" in result.output
+    assert "attempt 2" in result.output
+    assert "simulated transient failure" in result.output
+    assert "Policy: skip" in result.output
 
 
 def test_runs_show_reports_not_found_for_a_nonexistent_run(isolated_state_dir: Path) -> None:
