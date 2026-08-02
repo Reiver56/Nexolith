@@ -144,7 +144,18 @@ def run_full_screen_session(
         layout=layout,
         key_bindings=bindings,
         full_screen=True,
-        mouse_support=False,
+        # Without this, the terminal is never asked to report real
+        # scroll-wheel/trackpad events, so it falls back (a common
+        # alt-screen-buffer convention, for compatibility with programs
+        # without mouse support) to emulating Up/Down arrow key presses for
+        # scroll gestures -- which always land on `input_field` (the
+        # permanently-focused control) and trigger its history navigation
+        # instead of scrolling `output_area`. With real mouse events enabled,
+        # prompt_toolkit routes SCROLL_UP/SCROLL_DOWN by screen position (see
+        # `Window._mouse_handler`), not keyboard focus, so scrolling over the
+        # output log scrolls it directly; keyboard Up/Down history navigation
+        # is unaffected either way.
+        mouse_support=True,
     )
 
     # The panel header already carries the "Nexo/Nexolith" branding that the

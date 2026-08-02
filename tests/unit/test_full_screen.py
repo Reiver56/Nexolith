@@ -3,9 +3,12 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+import pytest
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.application.current import get_app
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.output import DummyOutput
 
 from nexolith.cli.full_screen import _DIVIDER_COLOR, _divider, run_full_screen_session
@@ -246,3 +249,134 @@ def test_run_spawns_no_background_threads(tmp_path: Path) -> None:
     after = {t.ident for t in threading.enumerate()}
 
     assert after == before
+
+
+def test_mouse_support_is_enabled() -> None:
+    """Without `mouse_support=True`, the terminal is never asked to report
+    real scroll-wheel/trackpad events at all, so it falls back (a common
+    alt-screen-buffer convention, for compatibility with programs that don't
+    support the mouse) to emulating Up/Down arrow key presses for scroll
+    gestures -- which always land on `input_field` (the permanently-focused
+    control) and trigger its history navigation instead of scrolling
+    `output_area`.
+
+    That terminal-level fallback decision is made by the real terminal
+    emulator, outside anything a headless pipe-fed Input can reproduce --
+    confirmed directly: injecting a synthetic mouse-scroll escape sequence
+    through `create_pipe_input()` routes correctly to `output_area` (see
+    `test_scroll_events_route_to_the_output_log_not_input_history` below)
+    regardless of this flag's value, because it bypasses the exact layer
+    the flag controls. So this test only pins the one thing our own code
+    controls: the flag is actually set. The rest requires a real terminal.
+    """
+    captured: dict[str, bool] = {}
+
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        captured["mouse_support"] = bool(get_app().mouse_support())
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    assert captured.get("mouse_support") is True
+
+
+def test_scroll_events_route_to_the_output_log_not_input_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confirms the routing mechanism the mouse_support fix relies on: once
+    prompt_toolkit decodes a real mouse scroll event, it dispatches by
+    screen position (`Window._mouse_handler`, called via the handler grid
+    populated at `renderer.mouse_handlers`), landing on whichever Window the
+    coordinates fall inside -- not on whichever control has keyboard focus.
+    `BufferControl.mouse_handler` explicitly does not handle scroll events
+    itself (falls through to the Window), so this holds for both
+    `output_area` and `input_field`.
+
+    This does NOT by itself prove `mouse_support=True` is what fixes Issue
+    B: injecting a raw SGR mouse-scroll escape sequence through a headless
+    pipe Input bypasses the exact layer that flag controls (whether a real
+    terminal is asked to report mouse events at all, versus falling back to
+    emulating arrow-key presses for scroll gestures). Confirmed directly --
+    this exact test was run unchanged against both `mouse_support=True` and
+    `mouse_support=False` and produced identical results either way. That
+    terminal-level behavior genuinely cannot be reproduced headlessly; only
+    manual verification in a real terminal confirms the fix end to end.
+    """
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_pipeline(pipeline, source, destination)
+
+    scroll_calls: list[tuple[str, int]] = []
+    history_calls: list[tuple[str, int]] = []
+    window_ids_by_ypos: dict[int, tuple[int, int]] = {}
+
+    original_scroll_up = Window._scroll_up
+    original_scroll_down = Window._scroll_down
+    original_auto_up = Buffer.auto_up
+    original_auto_down = Buffer.auto_down
+
+    def patched_scroll_up(self: Window) -> None:
+        scroll_calls.append(("up", id(self)))
+        original_scroll_up(self)
+
+    def patched_scroll_down(self: Window) -> None:
+        scroll_calls.append(("down", id(self)))
+        original_scroll_down(self)
+
+    def patched_auto_up(self: Buffer, count: int = 1) -> None:
+        history_calls.append(("up", id(self)))
+        original_auto_up(self, count=count)
+
+    def patched_auto_down(self: Buffer, count: int = 1) -> None:
+        history_calls.append(("down", id(self)))
+        original_auto_down(self, count=count)
+
+    monkeypatch.setattr(Window, "_scroll_up", patched_scroll_up)
+    monkeypatch.setattr(Window, "_scroll_down", patched_scroll_down)
+    monkeypatch.setattr(Buffer, "auto_up", patched_auto_up)
+    monkeypatch.setattr(Buffer, "auto_down", patched_auto_down)
+
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        app = get_app()
+        app._redraw()
+        screen = app.renderer._last_screen
+        assert screen is not None
+        for window, wp in screen.visible_windows_to_write_positions.items():
+            buffer = getattr(window.content, "buffer", None)
+            if buffer is not None:
+                window_ids_by_ypos[wp.ypos] = (id(window), id(buffer))
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    # A real xterm SGR mouse-scroll-up escape sequence (`64` = scroll up, no
+    # modifiers) targeting screen row 13 (1-indexed), column 10. Row 13
+    # lands inside output_area's rendered rectangle: header (9 rows) +
+    # divider (1) + an invisible/1-line status area (1, since `/open` alone
+    # never makes it visible) + divider (1) = output_area starts at
+    # (0-indexed) row 12, i.e. 1-indexed row 13.
+    scroll_up = "\x1b[<64;10;13M"
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(f"/open {pipeline}\n{scroll_up}/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    output_area_window_id, _output_buffer_id = window_ids_by_ypos[12]
+
+    assert scroll_calls == [("up", output_area_window_id)]
+    assert history_calls == []
