@@ -52,6 +52,23 @@ _TASK_MARKER = {
     TaskRunStatus.BLOCKED: "⊘",
 }
 
+# Plain-mode fallback (NXL-80): these must never reach the terminal in an
+# encoding that can't represent them -- the styled markers above are pure
+# ANSI-terminal decoration, not something plain mode may ever fall back to
+# partially. Bracket-words rather than single ASCII characters, matching
+# the panel border's own ASCII fallback ('+'/'-'/'|') in spirit: cheap to
+# read unambiguously without color. Each status gets its own distinct word
+# here (unlike the shared ⊘ above) because there's no scarce-glyph
+# constraint in plain text and no color to lean on for disambiguation.
+_PLAIN_TASK_MARKER = {
+    TaskRunStatus.PENDING: "[PENDING]",
+    TaskRunStatus.RUNNING: "[RUNNING]",
+    TaskRunStatus.SUCCEEDED: "[OK]",
+    TaskRunStatus.FAILED: "[FAIL]",
+    TaskRunStatus.SKIPPED: "[SKIP]",
+    TaskRunStatus.BLOCKED: "[BLOCKED]",
+}
+
 _TASK_COLOR = {
     TaskRunStatus.PENDING: DIM,
     TaskRunStatus.RUNNING: BLURPLE,
@@ -169,12 +186,13 @@ def render_run_detail(
     status_width = max(len(task.status.value) for task in tasks)
     for task in tasks:
         duration = _format_duration(task.started_at, task.ended_at)
-        marker = _TASK_MARKER[task.status]
         name = task.task_name.ljust(name_width)
         status_text = task.status.value.ljust(status_width)
-        if not plain:
+        if plain:
+            marker = _PLAIN_TASK_MARKER[task.status]
+        else:
             color = _TASK_COLOR[task.status]
-            marker = _colorize(marker, color, bold=True)
+            marker = _colorize(_TASK_MARKER[task.status], color, bold=True)
             status_text = _colorize(task.status.value, color) + " " * (
                 status_width - len(task.status.value)
             )

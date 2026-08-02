@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
@@ -553,3 +554,108 @@ def test_render_run_detail_styled_mode_has_escape_codes_and_unicode_border() -> 
     output = render_run_detail(run, tasks, _STYLED_CONTEXT)
     assert "\x1b[" in output
     assert "╭" in output
+
+
+# -- NXL-80: UnicodeEncodeError in plain-mode task-status markers ----------
+#
+# The bug: RenderContext.plain gated whether the task-status marker got
+# wrapped in color codes, but not the marker CHARACTER itself -- so a
+# 'skipped'/'blocked'/etc. task still emitted a raw ● ○ ✗ ⊘ even in plain
+# mode. NO_COLOR alone doesn't reproduce this (it makes render_context.plain
+# True, which *did* correctly switch the panel border to ASCII -- the bug
+# was specifically that the same switch never happened for the marker).
+# The real, reported failure mode is writing that string through a stream
+# that can't encode it -- e.g. a Windows console on a legacy code page like
+# cp1252 -- so these tests write the rendered output through a real
+# io.TextIOWrapper configured with encoding='cp1252', errors='strict': the
+# same failure `typer.echo()` hits on such a console, not just inspecting
+# the string for non-ASCII characters.
+
+
+def test_run_detail_plain_mode_markers_are_safe_under_a_real_non_utf8_encoding() -> None:
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+    tasks = [
+        TaskRunRecord(1, "pending_task", TaskRunStatus.PENDING, None, None, None),
+        TaskRunRecord(1, "running_task", TaskRunStatus.RUNNING, _T0, None, None),
+        TaskRunRecord(1, "succeeded_task", TaskRunStatus.SUCCEEDED, _T0, _T1, None),
+        TaskRunRecord(1, "failed_task", TaskRunStatus.FAILED, _T0, _T1, "oops"),
+        TaskRunRecord(1, "skipped_task", TaskRunStatus.SKIPPED, None, _T1, None),
+        TaskRunRecord(1, "blocked_task", TaskRunStatus.BLOCKED, None, _T1, None),
+    ]
+
+    output = render_run_detail(run, tasks, _PLAIN_CONTEXT)
+
+    buffer = io.BytesIO()
+    with io.TextIOWrapper(buffer, encoding="cp1252", errors="strict") as wrapper:
+        wrapper.write(output)  # must not raise UnicodeEncodeError
+        wrapper.flush()
+
+    assert "[PENDING]" in output
+    assert "[RUNNING]" in output
+    assert "[OK]" in output
+    assert "[FAIL]" in output
+    assert "[SKIP]" in output
+    assert "[BLOCKED]" in output
+    assert "●" not in output
+    assert "○" not in output
+    assert "✗" not in output
+    assert "⊘" not in output
+
+
+def test_run_detail_styled_mode_still_uses_the_real_unicode_markers() -> None:
+    """Confirms the fix didn't regress the working (styled) case while
+    fixing the broken (plain) one.
+    """
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+    tasks = [
+        TaskRunRecord(1, "a", TaskRunStatus.SUCCEEDED, _T0, _T1, None),
+        TaskRunRecord(1, "b", TaskRunStatus.FAILED, _T0, _T1, "oops"),
+        TaskRunRecord(1, "c", TaskRunStatus.SKIPPED, None, _T1, None),
+        TaskRunRecord(1, "d", TaskRunStatus.BLOCKED, None, _T1, None),
+    ]
+
+    output = render_run_detail(run, tasks, _STYLED_CONTEXT)
+
+    assert "●" in output
+    assert "✗" in output
+    assert "⊘" in output
+    assert "[OK]" not in output
+    assert "[FAIL]" not in output
+    assert "[SKIP]" not in output
+
+
+def test_retry_attempt_rendering_is_safe_under_a_real_non_utf8_encoding() -> None:
+    """Story 6's retry-attempt breakdown predates this bug report -- verify
+    it directly rather than assuming it's fine because it only ever prints
+    plain-ASCII enum values (running/succeeded/failed) and never a Unicode
+    marker.
+    """
+    from nexolith.state.models import (
+        DagRunRecord,
+        DagRunStatus,
+        TaskAttemptRecord,
+        TaskAttemptStatus,
+        TaskRunRecord,
+        TaskRunStatus,
+    )
+
+    run = DagRunRecord(1, "etl", DagRunStatus.SUCCEEDED, "manual", _T0, _T1, None)
+    tasks = [TaskRunRecord(1, "flaky", TaskRunStatus.SUCCEEDED, _T0, _T1, None)]
+    attempts = [
+        TaskAttemptRecord(1, 1, "flaky", 1, TaskAttemptStatus.FAILED, _T0, _T1, "boom"),
+        TaskAttemptRecord(2, 1, "flaky", 2, TaskAttemptStatus.SUCCEEDED, _T1, _T1, None),
+    ]
+
+    output = render_run_detail(run, tasks, _PLAIN_CONTEXT, attempts)
+
+    buffer = io.BytesIO()
+    with io.TextIOWrapper(buffer, encoding="cp1252", errors="strict") as wrapper:
+        wrapper.write(output)  # must not raise UnicodeEncodeError
+        wrapper.flush()
+
+    assert "attempt 1" in output
+    assert "attempt 2" in output
