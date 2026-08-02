@@ -20,6 +20,16 @@ from nexolith import __version__
 BLURPLE: tuple[int, int, int] = (0x58, 0x65, 0xF2)  # Discord blurple
 WHITE: tuple[int, int, int] = (0xFF, 0xFF, 0xFF)
 
+# Semantic status colors, reserved specifically for success/error/neutral
+# signaling (never used for the art itself) -- shared by every CLI renderer
+# that needs them (the full-screen status area, and the scheduler/runs CLI
+# commands). Defined here rather than in status_area.py, which has its own
+# top-level prompt_toolkit import: classic, non-interactive commands must
+# never pull that in just to get these three color tuples.
+GREEN: tuple[int, int, int] = (0x57, 0xF2, 0x87)  # Discord green
+RED: tuple[int, int, int] = (0xED, 0x42, 0x45)  # Discord red
+DIM: tuple[int, int, int] = (0x8A, 0x8F, 0xA3)
+
 _PALETTE: dict[str, tuple[int, int, int]] = {
     "B": BLURPLE,  # body
     "S": (0x36, 0x36, 0xAC),  # body shading (darker blue-purple)

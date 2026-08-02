@@ -23,7 +23,7 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 
 from nexolith.cli.context import SelectedPipeline
 from nexolith.cli.interactive import render_operation_error
-from nexolith.cli.nexo_art import BLURPLE, WHITE
+from nexolith.cli.nexo_art import BLURPLE, DIM, GREEN, RED, WHITE
 from nexolith.config import PipelineConfig
 from nexolith.events import (
     ApplicationEvent,
@@ -41,10 +41,6 @@ from nexolith.events import (
 )
 from nexolith.exceptions import ConfigurationError, NexolithError
 from nexolith.models import ExecutionResult, ExecutionStatus
-
-GREEN: tuple[int, int, int] = (0x57, 0xF2, 0x87)  # Discord green
-RED: tuple[int, int, int] = (0xED, 0x42, 0x45)  # Discord red
-DIM: tuple[int, int, int] = (0x8A, 0x8F, 0xA3)
 
 _EXCERPT_CONTEXT_LINES = 2
 

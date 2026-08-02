@@ -1,4 +1,8 @@
 import logging
+import os
+import sys
+import time
+from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 from typing import Annotated
@@ -13,14 +17,39 @@ from nexolith.cli.diagnostics import (
 )
 from nexolith.cli.errors import render_error
 from nexolith.cli.interactive import run_interactive_session
+from nexolith.cli.render_context import detect_render_context
+from nexolith.cli.runs_render import render_run_detail, render_run_not_found, render_runs_list
+from nexolith.cli.scheduler_render import (
+    SchedulerStatus,
+    render_scheduler_not_running,
+    render_scheduler_started,
+    render_scheduler_status,
+    render_scheduler_stop_uncertain,
+    render_scheduler_stopped,
+    render_windows_stop_caveat,
+)
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.scheduler import (
+    Scheduler,
+    default_pidfile_path,
+    is_process_alive,
+    read_pidfile,
+    remove_pidfile,
+    stop_process,
+    write_pidfile,
+)
+from nexolith.state import StateStore
 
 app = typer.Typer(
     help="Build data flows that last.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
+scheduler_app = typer.Typer(help="Manage the scheduler daemon.")
+runs_app = typer.Typer(help="Observe DAG run history.")
+app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(runs_app, name="runs")
 
 
 class ExitCode(IntEnum):
@@ -92,3 +121,120 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
         _show_error(exc)
         raise typer.Exit(code=ExitCode.EXECUTION_ERROR) from exc
     _show_result(result)
+
+
+@scheduler_app.command("start")
+def scheduler_start() -> None:
+    """Run the scheduler daemon in the foreground until stopped (Ctrl+C)."""
+    pidfile_path = default_pidfile_path()
+    existing = read_pidfile(pidfile_path)
+    if existing is not None and is_process_alive(existing.pid):
+        typer.echo(
+            f"Scheduler already appears to be running (PID {existing.pid}, "
+            f"started {existing.started_at}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    if existing is not None:
+        remove_pidfile(pidfile_path)  # stale marker from a prior, uncleanly-stopped run
+
+    store = StateStore()
+    scheduler = Scheduler(store)
+    write_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
+    typer.echo(render_scheduler_started(os.getpid()))
+    try:
+        scheduler.run()
+    finally:
+        remove_pidfile(pidfile_path)
+        store.close()
+
+
+@scheduler_app.command("stop")
+def scheduler_stop() -> None:
+    """Stop a running scheduler daemon.
+
+    Best-effort on Windows: this forcibly stops the process rather than
+    signaling it to shut down gracefully -- there is no reliable
+    cross-process graceful-stop mechanism on Windows in the standard
+    library (verified directly against a real process, not assumed; see
+    nexolith.scheduler.pidfile's own docstring for the investigation). An
+    in-progress DAG run is not waited on. Use Ctrl+C in the scheduler's own
+    terminal for a fully graceful stop.
+    """
+    pidfile_path = default_pidfile_path()
+    record = read_pidfile(pidfile_path)
+    if record is None:
+        typer.echo(render_scheduler_not_running())
+        return
+    if not is_process_alive(record.pid):
+        remove_pidfile(pidfile_path)
+        typer.echo(render_scheduler_not_running())
+        return
+
+    if sys.platform == "win32":
+        typer.echo(render_windows_stop_caveat(), err=True)
+    stop_process(record.pid)
+
+    for _ in range(20):  # ~2s budget for the process to actually exit
+        if not is_process_alive(record.pid):
+            break
+        time.sleep(0.1)
+
+    # This command owns marker cleanup rather than trusting the target
+    # process's own shutdown path -- see pidfile.py's docstring for why
+    # that trust wouldn't be well-founded on Windows.
+    remove_pidfile(pidfile_path)
+    if is_process_alive(record.pid):
+        typer.echo(render_scheduler_stop_uncertain(record.pid))
+    else:
+        typer.echo(render_scheduler_stopped(record.pid))
+
+
+@scheduler_app.command("status")
+def scheduler_status() -> None:
+    """Report whether the scheduler daemon appears to be running."""
+    pidfile_path = default_pidfile_path()
+    record = read_pidfile(pidfile_path)
+    render_context = detect_render_context()
+    if record is None or not is_process_alive(record.pid):
+        if record is not None:
+            remove_pidfile(pidfile_path)
+        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+        return
+    typer.echo(
+        render_scheduler_status(
+            SchedulerStatus(True, record.pid, record.started_at), render_context
+        )
+    )
+
+
+@runs_app.command("list")
+def runs_list(
+    dag: Annotated[str | None, typer.Option(help="Filter to one DAG's runs.")] = None,
+    limit: Annotated[int, typer.Option(help="Maximum number of runs to show.")] = 20,
+) -> None:
+    """List recent DAG runs."""
+    store = StateStore()
+    try:
+        if dag is not None:
+            runs = store.list_dag_runs(dag)[:limit]
+        else:
+            runs = store.list_recent_dag_runs(limit)
+    finally:
+        store.close()
+    typer.echo(render_runs_list(runs, detect_render_context()))
+
+
+@runs_app.command("show")
+def runs_show(run_id: Annotated[int, typer.Argument(help="The DAG run id to show.")]) -> None:
+    """Show full detail for one DAG run, including per-task status."""
+    store = StateStore()
+    try:
+        run = store.get_dag_run(run_id)
+        if run is None:
+            typer.echo(render_run_not_found(run_id), err=True)
+            raise typer.Exit(code=1)
+        tasks = store.list_task_runs(run_id)
+    finally:
+        store.close()
+    typer.echo(render_run_detail(run, tasks, detect_render_context()))

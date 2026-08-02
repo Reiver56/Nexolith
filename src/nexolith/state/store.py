@@ -280,6 +280,17 @@ class StateStore:
         ).fetchall()
         return [_dag_run_record(row) for row in rows]
 
+    def list_recent_dag_runs(self, limit: int = 20) -> list[DagRunRecord]:
+        """Most recent runs across every DAG, not filtered to one -- what
+        `nexolith runs list` (no `--dag` filter) needs. Added for that CLI
+        story rather than story 1's original set of queries; a plain,
+        read-only addition to this module, not a schema change.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM dag_runs ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [_dag_run_record(row) for row in rows]
+
     def latest_dag_run(self, dag_name: str) -> DagRunRecord | None:
         row = self._conn.execute(
             "SELECT * FROM dag_runs WHERE dag_name = ? ORDER BY id DESC LIMIT 1", (dag_name,)
