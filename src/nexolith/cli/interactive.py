@@ -148,6 +148,7 @@ class OperationPresenter(Protocol):
 
     def event_sink(self, operation: PipelineOperation) -> EventSink: ...
     def show_result(self, result: ExecutionResult) -> None: ...
+    def show_validation_result(self, config: PipelineConfig) -> None: ...
     def show_error(
         self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
     ) -> None: ...
@@ -167,6 +168,15 @@ class ClassicOperationPresenter:
 
     def show_result(self, result: ExecutionResult) -> None:
         self._write(render_execution_result(result))
+
+    def show_validation_result(self, config: PipelineConfig) -> None:
+        # No-op: the event stream already prints "Pipeline valid." (see
+        # event_renderer.render_event's PipelineOperation.VALIDATE branch) --
+        # classic mode's per-event lines are its terminal-state signal, same
+        # as every other event here. Only the full-screen presenter's status
+        # area needs an explicit completion call, since it replaces a live
+        # timeline in place rather than appending lines.
+        pass
 
     def show_error(
         self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
@@ -281,11 +291,13 @@ class InteractiveSession:
             return
         sink = self._presenter.event_sink(PipelineOperation.VALIDATE)
         try:
-            self._application.validate_pipeline(pipeline.resolved_path, event_sink=sink)
+            config = self._application.validate_pipeline(pipeline.resolved_path, event_sink=sink)
         except KeyboardInterrupt:
             self._write("Validation interrupted.")
         except ConfigurationError as error:
             self._presenter.show_error(error, pipeline, PipelineOperation.VALIDATE)
+        else:
+            self._presenter.show_validation_result(config)
 
     def _run_pipeline(self) -> None:
         pipeline = self._require_pipeline()

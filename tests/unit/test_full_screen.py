@@ -168,6 +168,29 @@ def test_run_updates_the_status_area_timeline_and_summary_end_to_end(tmp_path: P
     assert all(step_status.value == "done" for _, step_status in status.steps)
 
 
+def test_validate_updates_the_status_area_to_a_terminal_validation_panel(tmp_path: Path) -> None:
+    """Mirrors test_run_updates_the_status_area_timeline_and_summary_end_to_end:
+    `/validate` produces a narrower event sequence than `/run` (no extraction,
+    transformation, or write events), and previously the status area had no
+    call at all on a successful validate -- it stayed on the in-progress
+    timeline forever. Confirm `/validate` now reaches a real terminal visual
+    state of its own (a validation panel, not `/run`'s summary panel, since
+    `validate_pipeline()` never produces row counts or a duration)."""
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_pipeline(pipeline, source, destination)
+    status = StatusAreaState()
+
+    run_with_keys(f"/open {pipeline}\n/validate\n/exit\n", status_state=status)
+
+    assert status.visible is True
+    assert status.result is None
+    assert status.validated_config is not None
+    assert status.validated_config.name == "full-screen-test"
+    assert status.error_text is None
+
+
 def test_validate_error_populates_the_status_area_with_an_excerpt(tmp_path: Path) -> None:
     """Open a valid pipeline (so it's already selected), corrupt it on disk,
     then /validate -- matching NXL-37's own reload-on-change convention. The

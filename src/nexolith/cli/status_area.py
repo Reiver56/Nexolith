@@ -24,6 +24,7 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 from nexolith.cli.context import SelectedPipeline
 from nexolith.cli.interactive import render_operation_error
 from nexolith.cli.nexo_art import BLURPLE, WHITE
+from nexolith.config import PipelineConfig
 from nexolith.events import (
     ApplicationEvent,
     EventSink,
@@ -82,6 +83,7 @@ class StatusAreaState:
     steps: list[tuple[str, StepStatus]] = field(default_factory=list)
     dot_on: bool = False
     result: ExecutionResult | None = None
+    validated_config: PipelineConfig | None = None
     error_text: str | None = None
     error_excerpt: list[tuple[bool, int, str]] | None = None
 
@@ -90,6 +92,7 @@ class StatusAreaState:
         self.steps = [(label, StepStatus.PENDING) for label in labels]
         self.dot_on = False
         self.result = None
+        self.validated_config = None
         self.error_text = None
         self.error_excerpt = None
         self.visible = True
@@ -123,6 +126,10 @@ class StatusAreaState:
         self.result = result
         self.visible = True
 
+    def finish_with_validation(self, config: PipelineConfig) -> None:
+        self.validated_config = config
+        self.visible = True
+
     def finish_with_error(self, text: str, excerpt: list[tuple[bool, int, str]] | None) -> None:
         self.error_text = text
         self.error_excerpt = excerpt
@@ -133,6 +140,8 @@ class StatusAreaState:
             return [("", "")]
         if self.result is not None:
             return _render_summary_panel(self.result)
+        if self.validated_config is not None:
+            return _render_validation_panel(self.validated_config)
         if self.error_text is not None:
             return _render_error(self.error_text, self.error_excerpt)
         return _render_timeline(self.steps, self.dot_on)
@@ -168,16 +177,9 @@ def _render_error(text: str, excerpt: list[tuple[bool, int, str]] | None) -> Sty
     return fragments
 
 
-def _render_summary_panel(result: ExecutionResult) -> StyleAndTextTuples:
-    success = result.status is ExecutionStatus.SUCCEEDED
-    rows: list[tuple[str, str]] = [
-        ("Status", result.status.value),
-        ("Rows read", str(result.rows_read)),
-        ("Rows written", str(result.rows_written)),
-    ]
-    if result.duration_seconds is not None:
-        rows.append(("Duration", f"{result.duration_seconds:.3f}s"))
-
+def _render_bordered_panel(
+    rows: list[tuple[str, str]], color_for: Callable[[str, str], tuple[int, int, int]]
+) -> StyleAndTextTuples:
     plain_lines = [f"{label}: {value}" for label, value in rows]
     width = max(len(line) for line in plain_lines)
     border = _fg(BLURPLE)
@@ -187,11 +189,23 @@ def _render_summary_panel(result: ExecutionResult) -> StyleAndTextTuples:
         pad = " " * (width - len(plain))
         fragments.append((border, "│ "))
         fragments.append(("", f"{label}: "))
-        fragments.append((_fg(_value_color(label, value, success), bold=True), value))
+        fragments.append((_fg(color_for(label, value), bold=True), value))
         fragments.append(("", pad))
         fragments.append((border, " │\n"))
     fragments.append((border, "╰" + "─" * (width + 2) + "╯"))
     return fragments
+
+
+def _render_summary_panel(result: ExecutionResult) -> StyleAndTextTuples:
+    success = result.status is ExecutionStatus.SUCCEEDED
+    rows: list[tuple[str, str]] = [
+        ("Status", result.status.value),
+        ("Rows read", str(result.rows_read)),
+        ("Rows written", str(result.rows_written)),
+    ]
+    if result.duration_seconds is not None:
+        rows.append(("Duration", f"{result.duration_seconds:.3f}s"))
+    return _render_bordered_panel(rows, lambda label, value: _value_color(label, value, success))
 
 
 def _value_color(label: str, value: str, success: bool) -> tuple[int, int, int]:
@@ -203,6 +217,17 @@ def _value_color(label: str, value: str, success: bool) -> tuple[int, int, int]:
     if not success:
         return RED
     return DIM if value == "0" else GREEN
+
+
+def _render_validation_panel(config: PipelineConfig) -> StyleAndTextTuples:
+    """`/validate` never produces row counts or a duration -- `validate_pipeline()`
+    only parses and checks the configuration, it never extracts, transforms, or
+    writes anything. Show only what a validation actually confirms: the
+    pipeline is structurally valid, and which pipeline (by its declared name,
+    real data from the parsed config) was checked.
+    """
+    rows: list[tuple[str, str]] = [("Status", "valid"), ("Pipeline", config.name)]
+    return _render_bordered_panel(rows, lambda label, _: GREEN if label == "Status" else WHITE)
 
 
 class _TimelineEventSink:
@@ -290,6 +315,10 @@ class FullScreenOperationPresenter:
 
     def show_result(self, result: ExecutionResult) -> None:
         self._state.finish_with_result(result)
+        self._invalidate()
+
+    def show_validation_result(self, config: PipelineConfig) -> None:
+        self._state.finish_with_validation(config)
         self._invalidate()
 
     def show_error(
