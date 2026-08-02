@@ -20,6 +20,10 @@ class TaskRunStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    # Never ran because an upstream dependency failed -- distinct from
+    # FAILED (the task itself ran and errored) and PENDING (still eligible
+    # to run). Added in schema_version 2.
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)

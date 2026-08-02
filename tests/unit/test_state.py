@@ -23,7 +23,7 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
         }
         assert {"schema_version", "dags", "dag_runs", "task_runs"} <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 1
+        assert version == 2
         conn.close()
     finally:
         store.close()
@@ -39,7 +39,60 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(1,)]
+    assert rows == [(2,)]
+
+
+def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
+    """A database created before the 'skipped' status existed (schema_version
+    1) must upgrade cleanly on next open: existing task_runs rows survive
+    the rebuild-under-a-new-name migration, and the new status becomes
+    usable immediately after.
+    """
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (1);
+        CREATE TABLE dags (
+            name TEXT PRIMARY KEY, source_path TEXT NOT NULL, schedule TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE dag_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, dag_name TEXT NOT NULL REFERENCES dags(name),
+            status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+            trigger_reason TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, error TEXT
+        );
+        CREATE TABLE task_runs (
+            dag_run_id INTEGER NOT NULL REFERENCES dag_runs(id), task_name TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed')),
+            started_at TEXT, ended_at TEXT, error TEXT,
+            PRIMARY KEY (dag_run_id, task_name)
+        );
+        INSERT INTO dags VALUES ('etl', 'etl.yaml', NULL, 1, 't0', 't0');
+        INSERT INTO dag_runs VALUES (1, 'etl', 'succeeded', 'manual', 't0', 't1', NULL);
+        INSERT INTO task_runs VALUES (1, 'x', 'succeeded', 't0', 't1', NULL);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = StateStore(db_path)
+    try:
+        preserved = store.list_task_runs(1)
+        assert len(preserved) == 1
+        assert preserved[0].task_name == "x"
+        assert preserved[0].status is TaskRunStatus.SUCCEEDED
+
+        store.skip_task_run(1, "x")
+        assert store.list_task_runs(1)[0].status is TaskRunStatus.SKIPPED
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(str(db_path))
+    version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    conn.close()
+    assert version == 2
 
 
 def test_register_and_read_back_a_dag(tmp_path: Path) -> None:
@@ -164,6 +217,22 @@ def test_failed_run(tmp_path: Path) -> None:
         task = store.list_task_runs(run_id)[0]
         assert task.status is TaskRunStatus.FAILED
         assert task.error == "connection refused"
+    finally:
+        store.close()
+
+
+def test_skip_task_run(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        run_id = store.start_dag_run("etl", ["extract", "load"], trigger_reason="manual")
+
+        store.skip_task_run(run_id, "load")
+
+        task = next(t for t in store.list_task_runs(run_id) if t.task_name == "load")
+        assert task.status is TaskRunStatus.SKIPPED
+        assert task.started_at is None  # never actually started
+        assert task.ended_at is not None
     finally:
         store.close()
 

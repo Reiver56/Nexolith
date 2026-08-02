@@ -68,6 +68,33 @@ _MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        -- Add 'skipped' to task_runs.status. SQLite has no ALTER TABLE for
+        -- CHECK constraints, so this rebuilds the table under a temporary
+        -- name and swaps it in. `DROP TABLE IF EXISTS task_runs_new` first
+        -- makes this safe to re-run from any crash point: whether the
+        -- previous attempt died before creating the copy, mid-copy, or
+        -- after the rename already completed, retrying always converges on
+        -- the same end state with the same data.
+        DROP TABLE IF EXISTS task_runs_new;
+        CREATE TABLE task_runs_new (
+            dag_run_id INTEGER NOT NULL REFERENCES dag_runs(id),
+            task_name TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'skipped')),
+            started_at TEXT,
+            ended_at TEXT,
+            error TEXT,
+            PRIMARY KEY (dag_run_id, task_name)
+        );
+        INSERT INTO task_runs_new (dag_run_id, task_name, status, started_at, ended_at, error)
+            SELECT dag_run_id, task_name, status, started_at, ended_at, error FROM task_runs;
+        DROP TABLE task_runs;
+        ALTER TABLE task_runs_new RENAME TO task_runs;
+        """,
+    ),
 ]
 
 
@@ -204,6 +231,20 @@ class StateStore:
                 WHERE dag_run_id = ? AND task_name = ?
                 """,
                 (TaskRunStatus.RUNNING.value, _now(), dag_run_id, task_name),
+            )
+
+    def skip_task_run(self, dag_run_id: int, task_name: str) -> None:
+        """A task that never ran because an upstream dependency it
+        transitively depends on failed. `started_at` stays NULL -- it never
+        started -- `ended_at` records when the skip was decided.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE task_runs SET status = ?, ended_at = ?
+                WHERE dag_run_id = ? AND task_name = ?
+                """,
+                (TaskRunStatus.SKIPPED.value, _now(), dag_run_id, task_name),
             )
 
     def complete_task_run(
