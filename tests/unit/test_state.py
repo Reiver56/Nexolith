@@ -21,9 +21,9 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"schema_version", "dags", "dag_runs", "task_runs"} <= tables
+        assert {"schema_version", "dags", "dag_runs", "task_runs", "task_attempts"} <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 2
+        assert version == 3
         conn.close()
     finally:
         store.close()
@@ -39,14 +39,15 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(2,)]
+    assert rows == [(3,)]
 
 
 def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
     """A database created before the 'skipped' status existed (schema_version
-    1) must upgrade cleanly on next open: existing task_runs rows survive
-    the rebuild-under-a-new-name migration, and the new status becomes
-    usable immediately after.
+    1) must upgrade cleanly on next open, all the way through schema_version
+    3: existing task_runs rows survive both rebuild-under-a-new-name
+    migrations, and both the 'skipped' and 'blocked' statuses become usable
+    immediately after.
     """
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
@@ -84,15 +85,22 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
         assert preserved[0].task_name == "x"
         assert preserved[0].status is TaskRunStatus.SUCCEEDED
 
+        run = store.get_dag_run(1)
+        assert run is not None
+        assert run.on_failure == "skip"  # backfilled default for a pre-existing row
+
         store.skip_task_run(1, "x")
         assert store.list_task_runs(1)[0].status is TaskRunStatus.SKIPPED
+
+        store.block_task_run(1, "x")
+        assert store.list_task_runs(1)[0].status is TaskRunStatus.BLOCKED
     finally:
         store.close()
 
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     conn.close()
-    assert version == 2
+    assert version == 3
 
 
 def test_register_and_read_back_a_dag(tmp_path: Path) -> None:

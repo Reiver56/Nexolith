@@ -22,6 +22,8 @@ from nexolith.state.models import (
     DagRecord,
     DagRunRecord,
     DagRunStatus,
+    TaskAttemptRecord,
+    TaskAttemptStatus,
     TaskRunRecord,
     TaskRunStatus,
 )
@@ -95,11 +97,84 @@ _MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE task_runs_new RENAME TO task_runs;
         """,
     ),
+    (
+        3,
+        """
+        -- Retry/failure-propagation policy (NXL-79). Two schema changes:
+        -- add 'blocked' to task_runs.status (same rebuild-and-swap
+        -- technique as schema_version 2's 'skipped', for the same reason
+        -- -- SQLite has no ALTER TABLE for CHECK constraints), and a new
+        -- task_attempts table recording every real execution attempt.
+        -- task_runs stays "the current/final state of this task in this
+        -- run"; task_attempts holds the full history behind that state,
+        -- one row per attempt, written the moment it starts.
+        --
+        -- dag_runs.on_failure (the policy actually in effect for that run)
+        -- is added separately, in Python, before this script runs -- see
+        -- _ensure_schema. Unlike a CHECK-constraint change, adding a
+        -- plain column is a single ALTER TABLE with no rebuild needed, but
+        -- SQLite has no "ADD COLUMN IF NOT EXISTS", so it needs its own
+        -- idempotency check that a bare SQL script can't express.
+        --
+        -- task_attempts is dropped before task_runs is rebuilt, in that
+        -- order: it has its own foreign key into task_runs, and SQLite
+        -- refuses to drop a table another table still references (verified
+        -- directly, not assumed). Dropping task_attempts first, before
+        -- task_runs_new, makes retrying this whole script safe from any
+        -- crash point, matching schema_version 2's own guarantee.
+        DROP TABLE IF EXISTS task_attempts;
+        DROP TABLE IF EXISTS task_runs_new;
+
+        CREATE TABLE task_runs_new (
+            dag_run_id INTEGER NOT NULL REFERENCES dag_runs(id),
+            task_name TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK (status IN
+                    ('pending', 'running', 'succeeded', 'failed', 'skipped', 'blocked')),
+            started_at TEXT,
+            ended_at TEXT,
+            error TEXT,
+            PRIMARY KEY (dag_run_id, task_name)
+        );
+        INSERT INTO task_runs_new (dag_run_id, task_name, status, started_at, ended_at, error)
+            SELECT dag_run_id, task_name, status, started_at, ended_at, error FROM task_runs;
+        DROP TABLE task_runs;
+        ALTER TABLE task_runs_new RENAME TO task_runs;
+
+        CREATE TABLE task_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dag_run_id INTEGER NOT NULL,
+            task_name TEXT NOT NULL,
+            attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            error TEXT,
+            FOREIGN KEY (dag_run_id, task_name) REFERENCES task_runs(dag_run_id, task_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_attempts_run_task
+            ON task_attempts(dag_run_id, task_name);
+        """,
+    ),
 ]
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _add_dag_runs_on_failure_column_if_missing(conn: sqlite3.Connection) -> None:
+    """SQLite's ALTER TABLE has no "ADD COLUMN IF NOT EXISTS" -- re-running
+    it unconditionally raises "duplicate column name" on a second attempt
+    (verified directly). A plain column addition doesn't need the
+    rebuild-and-swap technique the CHECK-constraint changes use (that would
+    itself require dropping dag_runs, which task_runs' own foreign key
+    would then block -- also verified directly, not assumed), so this is
+    just a Python-level existence check instead.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(dag_runs)").fetchall()}
+    if "on_failure" not in columns:
+        conn.execute("ALTER TABLE dag_runs ADD COLUMN on_failure TEXT NOT NULL DEFAULT 'skip'")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -110,6 +185,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     for version, script in _MIGRATIONS:
         if version <= current_version:
             continue
+        if version == 3:
+            _add_dag_runs_on_failure_column_if_missing(conn)
         conn.executescript(script)
         with conn:
             if has_row:
@@ -193,7 +270,12 @@ class StateStore:
     # -- Run lifecycle ------------------------------------------------------
 
     def start_dag_run(
-        self, dag_name: str, task_names: Sequence[str], *, trigger_reason: str
+        self,
+        dag_name: str,
+        task_names: Sequence[str],
+        *,
+        trigger_reason: str,
+        on_failure: str = "skip",
     ) -> int:
         """Record a DAG run starting, pre-creating every one of its tasks as
         'pending' in the same transaction. Recording the full expected task
@@ -202,15 +284,22 @@ class StateStore:
         alone: after an unclean shutdown, a task still 'pending' or
         'running' is directly queryable without needing external knowledge
         of what the DAG was supposed to contain.
+
+        `on_failure` ('skip' or 'block') is the policy actually in effect
+        for this run, recorded here rather than only living in the DAG
+        file, so a past run's history stays accurate even if the file's
+        policy changes later. Defaults to 'skip' -- today's only behavior
+        before this field existed -- so a caller that doesn't pass it gets
+        exactly the pre-existing default.
         """
         now = _now()
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO dag_runs (dag_name, status, trigger_reason, started_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO dag_runs (dag_name, status, trigger_reason, on_failure, started_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (dag_name, DagRunStatus.RUNNING.value, trigger_reason, now),
+                (dag_name, DagRunStatus.RUNNING.value, trigger_reason, on_failure, now),
             )
             dag_run_id = cursor.lastrowid
             assert dag_run_id is not None
@@ -247,6 +336,21 @@ class StateStore:
                 (TaskRunStatus.SKIPPED.value, _now(), dag_run_id, task_name),
             )
 
+    def block_task_run(self, dag_run_id: int, task_name: str) -> None:
+        """A task that never ran because the DAG's on_failure policy is
+        'block' and an earlier task in the run ultimately failed -- unlike
+        `skip_task_run`, this doesn't imply any dependency relationship to
+        the failure. `started_at` stays NULL, same as a skip.
+        """
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE task_runs SET status = ?, ended_at = ?
+                WHERE dag_run_id = ? AND task_name = ?
+                """,
+                (TaskRunStatus.BLOCKED.value, _now(), dag_run_id, task_name),
+            )
+
     def complete_task_run(
         self, dag_run_id: int, task_name: str, *, success: bool, error: str | None = None
     ) -> None:
@@ -267,6 +371,61 @@ class StateStore:
                 "UPDATE dag_runs SET status = ?, ended_at = ?, error = ? WHERE id = ?",
                 (status.value, _now(), error, dag_run_id),
             )
+
+    # -- Retry attempts (schema_version 3) -----------------------------------
+    #
+    # task_runs stays "the current/final state of this task in this run";
+    # these record the full history behind that state, one row per real
+    # execution attempt, written the moment it starts -- the "no silent
+    # retries" requirement lives here, not batched after the fact.
+
+    def start_task_attempt(self, dag_run_id: int, task_name: str, attempt_number: int) -> int:
+        now = _now()
+        with self._conn:
+            cursor = self._conn.execute(
+                """
+                INSERT INTO task_attempts
+                    (dag_run_id, task_name, attempt_number, status, started_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (dag_run_id, task_name, attempt_number, TaskAttemptStatus.RUNNING.value, now),
+            )
+            attempt_id = cursor.lastrowid
+            assert attempt_id is not None
+        return attempt_id
+
+    def complete_task_attempt(
+        self, attempt_id: int, *, success: bool, error: str | None = None
+    ) -> None:
+        status = TaskAttemptStatus.SUCCEEDED if success else TaskAttemptStatus.FAILED
+        with self._conn:
+            self._conn.execute(
+                "UPDATE task_attempts SET status = ?, ended_at = ?, error = ? WHERE id = ?",
+                (status.value, _now(), error, attempt_id),
+            )
+
+    def list_task_attempts(self, dag_run_id: int, task_name: str) -> list[TaskAttemptRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM task_attempts WHERE dag_run_id = ? AND task_name = ?
+            ORDER BY attempt_number
+            """,
+            (dag_run_id, task_name),
+        ).fetchall()
+        return [_task_attempt_record(row) for row in rows]
+
+    def list_run_attempts(self, dag_run_id: int) -> list[TaskAttemptRecord]:
+        """Every attempt across every task in one run -- what `runs show`
+        needs to render retry history without a separate query per task.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT * FROM task_attempts WHERE dag_run_id = ?
+            ORDER BY task_name, attempt_number
+            """,
+            (dag_run_id,),
+        ).fetchall()
+        return [_task_attempt_record(row) for row in rows]
 
     # -- Queries ------------------------------------------------------------
 
@@ -336,6 +495,7 @@ def _dag_run_record(row: sqlite3.Row) -> DagRunRecord:
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         error=row["error"],
+        on_failure=row["on_failure"],
     )
 
 
@@ -344,6 +504,19 @@ def _task_run_record(row: sqlite3.Row) -> TaskRunRecord:
         dag_run_id=row["dag_run_id"],
         task_name=row["task_name"],
         status=TaskRunStatus(row["status"]),
+        started_at=row["started_at"],
+        ended_at=row["ended_at"],
+        error=row["error"],
+    )
+
+
+def _task_attempt_record(row: sqlite3.Row) -> TaskAttemptRecord:
+    return TaskAttemptRecord(
+        id=row["id"],
+        dag_run_id=row["dag_run_id"],
+        task_name=row["task_name"],
+        attempt_number=row["attempt_number"],
+        status=TaskAttemptStatus(row["status"]),
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         error=row["error"],

@@ -24,6 +24,24 @@ class TaskRunStatus(StrEnum):
     # FAILED (the task itself ran and errored) and PENDING (still eligible
     # to run). Added in schema_version 2.
     SKIPPED = "skipped"
+    # Never ran because the DAG's on_failure policy is 'block' and an
+    # earlier task in the run ultimately failed -- distinct from SKIPPED,
+    # which specifically means this task depends (directly or
+    # transitively) on the failed one. A BLOCKED task may have no
+    # dependency relationship to the failure at all. Added in
+    # schema_version 3.
+    BLOCKED = "blocked"
+
+
+class TaskAttemptStatus(StrEnum):
+    """A task_attempts row only ever exists once an attempt has actually
+    started, so unlike TaskRunStatus there is no PENDING/SKIPPED/BLOCKED
+    here -- an attempt is real execution or it doesn't exist yet.
+    """
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +63,13 @@ class DagRunRecord:
     started_at: str
     ended_at: str | None
     error: str | None
+    # The on_failure policy actually in effect for THIS run -- recorded at
+    # run time (schema_version 3) rather than read from the DAG file's
+    # current setting, so a past run's history stays accurate even if the
+    # file's policy changes later. Defaulted here (not just in the
+    # database) so existing positional construction of this dataclass
+    # elsewhere in the codebase keeps working unchanged.
+    on_failure: str = "skip"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,5 +78,17 @@ class TaskRunRecord:
     task_name: str
     status: TaskRunStatus
     started_at: str | None
+    ended_at: str | None
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAttemptRecord:
+    id: int
+    dag_run_id: int
+    task_name: str
+    attempt_number: int
+    status: TaskAttemptStatus
+    started_at: str
     ended_at: str | None
     error: str | None

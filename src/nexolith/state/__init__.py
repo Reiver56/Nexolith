@@ -2,6 +2,8 @@ from nexolith.state.models import (
     DagRecord,
     DagRunRecord,
     DagRunStatus,
+    TaskAttemptRecord,
+    TaskAttemptStatus,
     TaskRunRecord,
     TaskRunStatus,
 )
@@ -13,6 +15,8 @@ __all__ = [
     "DagRunRecord",
     "DagRunStatus",
     "StateStore",
+    "TaskAttemptRecord",
+    "TaskAttemptStatus",
     "TaskRunRecord",
     "TaskRunStatus",
     "default_database_path",
