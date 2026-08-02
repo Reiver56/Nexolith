@@ -155,15 +155,22 @@ input-editing convenience: it never resolves or validates a path itself, so it h
 `SessionContext`'s requested-path vs resolved-path distinction (NXL-37) — that still only happens
 when the command is actually submitted and dispatched, same as before this story.
 
+Completions are shown live as a menu while typing (a `CompletionsMenu` float positioned at the
+cursor, `prompt_toolkit`'s own layout primitive — not a custom widget), not only on Tab/Enter.
+What gets completed is unchanged; only the visibility is new.
+
 ## Full-screen session (`full_screen.py`)
 
-`run_full_screen_session(render_context, *, session=None)` builds a `prompt_toolkit.Application`
-using the alternate screen buffer (`full_screen=True`): a fixed-height header showing
-`render_nexo_panel()`, a scrollable read-only output log below it, and a single-line, completing
-input field at the bottom. Enter on the input field parses the text and calls
-`InteractiveSession.dispatch()` — the same method the classic loop's `run()` now delegates to —
-so command behavior (including error redaction and shell-reusability-after-errors) is identical
-between the two presentations; only this module's layout code differs.
+`run_full_screen_session(render_context, *, session=None, status_state=None)` builds a
+`prompt_toolkit.Application` using the alternate screen buffer (`full_screen=True`): a
+fixed-height header showing `render_nexo_panel()`, a status area for `/validate`/`/run` progress
+(see below), a scrollable read-only output log, and a single-line, completing input field —
+separated by blue Discord-toned divider lines (`Window(char="─", ...)`, the same idiom
+`prompt_toolkit.widgets.HorizontalLine` uses internally, styled to the panel's blurple). Enter on
+the input field parses the text and calls `InteractiveSession.dispatch()` — the same method the
+classic loop's `run()` now delegates to — so command behavior (including error redaction and
+shell-reusability-after-errors) is identical between the two presentations; only presentation
+differs.
 
 `Ctrl+C` and `Ctrl+D` are bound to exit directly (full-screen mode reads raw keystrokes through
 `prompt_toolkit`'s own input handling, not blocking `input()` calls, so Python-level `EOFError` /
@@ -181,3 +188,43 @@ full-screen mode when that's `False`; a narrow `except Exception` around that at
 defensive backstop for the rare case where `prompt_toolkit` can't acquire a real terminal despite
 `is_tty` being `True` — it only covers session construction/startup, before any output has been
 drawn, so falling back at that point is still one clean decision, not a mid-session accident.
+
+## `/validate`/`/run` presentation seam (`OperationPresenter`) and the status area (`status_area.py`)
+
+`InteractiveSession` no longer hardcodes how `/validate` and `/run` progress and outcomes are
+shown — `OperationPresenter` (in `interactive.py`) is the injected seam, matching the same
+constructor/`set_*` pattern already used for `output_writer` and `render_context`.
+`ClassicOperationPresenter` reproduces today's plain-text behavior exactly (unchanged); the
+full-screen session injects `FullScreenOperationPresenter` instead. `InteractiveSession.dispatch()`
+itself doesn't change — only which presenter its `_validate_pipeline`/`_run_pipeline` methods call
+through.
+
+`FullScreenOperationPresenter` drives a `StatusAreaState`: an in-place step timeline (`●`/`○`,
+filled = done, hollow = pending, alternating = the active step) while an operation is running,
+replaced by a bordered summary panel (status/rows read/rows written/duration, reusing the panel's
+rounded-corner style) on completion, or the existing safe error text — plus a bounded YAML excerpt
+for `/validate` configuration errors, when the offending line can be reliably located — on
+failure. Numeric values in the summary panel are colored semantically (green for a non-zero count
+on success, red on failure, dim for a zero count) but the panel is fully legible with color
+stripped entirely — color is never the only carrier of the information.
+
+**The pulse dot is event-driven only — no timer, no thread, no periodic redraw.**
+`StatusAreaState.dot_on` toggles exactly once per call to `_TimelineEventSink.handle()`, which
+only runs when `PipelineApplication` delivers a real event through the `EventSink` protocol. This
+was a deliberate, explicit architectural decision: a true timer-driven blink was considered and
+rejected specifically to avoid reopening the synchronous-only constraint already closed for
+`/validate`/`/run` (and already reverted once, for an earlier idle-splash animation attempt). The
+resulting pulse is irregular — paced by real event arrival, not a clock — which is expected, not a
+defect. `tests/unit/test_status_area.py` and `tests/unit/test_full_screen.py` both pin this
+directly: one test waits with no event dispatched and asserts `dot_on` is unchanged; another
+compares `threading.enumerate()` before/after a full headless session and asserts no new thread
+appeared.
+
+The YAML excerpt locator (`build_error_excerpt`) is conservative by design: it trusts a YAML
+parser's own line/column mark when present (authoritative), or a simple top-level-key match
+against the raw file text for Pydantic validation errors, and returns `None` — falling back to
+plain-text-only error reporting — for anything else, including when the reported location falls
+outside the file's actual line range. It reads the raw pipeline file directly (a separate,
+rendering-only read; not a re-validation), shows only line numbers and content — never a path — so
+it cannot leak more than current error handling already allows, and never prints more than a
+handful of lines of context around the target line.

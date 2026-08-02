@@ -18,6 +18,15 @@ Changes targeting releases after 0.3.0 will be recorded here.
   real TTY, a narrow terminal, or `prompt_toolkit` cannot acquire a terminal for full-screen mode.
   Every command dispatches through the same logic in both modes; only presentation differs
   (NXL-69).
+- Added blue Discord-toned divider lines separating the full-screen layout's header, status,
+  output, and input regions, and made command/path tab-completion visible as a live menu while
+  typing instead of only on Tab/Enter (NXL-69).
+- Added an in-place step timeline for `/validate` and `/run` in the full-screen session, with a
+  small activity dot that pulses only when a real pipeline lifecycle event arrives (no timer, no
+  background thread), replaced by a bordered summary panel (status, rows read, rows written,
+  duration) on completion. `/validate` configuration errors now additionally show a small, bounded
+  excerpt of the pipeline YAML with the offending line highlighted, when it can be reliably
+  located; otherwise falls back to today's plain-text-only error message (NXL-69).
 
 ## [0.3.0] - 2026-08-01
 

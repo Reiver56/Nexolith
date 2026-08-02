@@ -17,10 +17,13 @@ from nexolith import __version__
 # Discord-like blue palette, sampled from the source image and nudged toward
 # Discord's canonical blurple/white. Dark tones are reserved for shading the body
 # silhouette itself, not a separate feature, matching the source's own limited palette.
+BLURPLE: tuple[int, int, int] = (0x58, 0x65, 0xF2)  # Discord blurple
+WHITE: tuple[int, int, int] = (0xFF, 0xFF, 0xFF)
+
 _PALETTE: dict[str, tuple[int, int, int]] = {
-    "B": (0x58, 0x65, 0xF2),  # body (Discord blurple)
+    "B": BLURPLE,  # body
     "S": (0x36, 0x36, 0xAC),  # body shading (darker blue-purple)
-    "W": (0xFF, 0xFF, 0xFF),  # eye highlight
+    "W": WHITE,  # eye highlight
 }
 
 _PIXELS: tuple[str, ...] = (

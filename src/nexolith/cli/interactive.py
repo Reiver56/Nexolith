@@ -14,7 +14,7 @@ from nexolith.cli.nexo_art import render_nexo_panel
 from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
 from nexolith.cli.render_context import RenderContext, detect_render_context
 from nexolith.config import PipelineConfig
-from nexolith.events import EventSink
+from nexolith.events import EventSink, PipelineOperation
 from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
 from nexolith.models import ExecutionResult
 
@@ -140,6 +140,40 @@ class InteractiveApplication(Protocol):
     ) -> ExecutionResult: ...
 
 
+class OperationPresenter(Protocol):
+    """How `/validate` and `/run` progress and outcomes get shown. The
+    classic loop and the full-screen session each inject their own;
+    `InteractiveSession`'s dispatch logic is identical either way.
+    """
+
+    def event_sink(self, operation: PipelineOperation) -> EventSink: ...
+    def show_result(self, result: ExecutionResult) -> None: ...
+    def show_error(
+        self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
+    ) -> None: ...
+
+
+class ClassicOperationPresenter:
+    """Today's plain-text behavior: each event is written as a line
+    immediately, the final result/error is one more line. Unchanged from
+    before this story's presenter seam existed.
+    """
+
+    def __init__(self, write: OutputWriter) -> None:
+        self._write = write
+
+    def event_sink(self, operation: PipelineOperation) -> EventSink:
+        return InteractiveEventRenderer(self._write)
+
+    def show_result(self, result: ExecutionResult) -> None:
+        self._write(render_execution_result(result))
+
+    def show_error(
+        self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
+    ) -> None:
+        self._write(render_operation_error(error, pipeline))
+
+
 class InteractiveSession:
     """Read and dispatch the intentionally small interactive command set."""
 
@@ -151,11 +185,13 @@ class InteractiveSession:
         context: SessionContext | None = None,
         application: InteractiveApplication | None = None,
         render_context: RenderContext | None = None,
+        presenter: OperationPresenter | None = None,
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
+        self._presenter: OperationPresenter = presenter or ClassicOperationPresenter(self._write)
         # Detected once per session so future colorized/panel renderers (splash,
         # timeline, summary, /validate highlighting) share one consistent capability
         # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
@@ -166,6 +202,12 @@ class InteractiveSession:
         session's scrollable log instead of the classic loop's direct writes.
         """
         self._write = writer
+
+    def set_presenter(self, presenter: OperationPresenter) -> None:
+        """Redirect how `/validate`/`/run` progress and outcomes are shown,
+        e.g. to a full-screen session's step timeline and summary panel
+        instead of the classic loop's plain-text lines."""
+        self._presenter = presenter
 
     def run(self) -> None:
         """Run until explicit exit, EOF, or an expected keyboard interruption."""
@@ -237,27 +279,27 @@ class InteractiveSession:
         pipeline = self._require_pipeline()
         if pipeline is None:
             return
-        renderer = InteractiveEventRenderer(self._write)
+        sink = self._presenter.event_sink(PipelineOperation.VALIDATE)
         try:
-            self._application.validate_pipeline(pipeline.resolved_path, event_sink=renderer)
+            self._application.validate_pipeline(pipeline.resolved_path, event_sink=sink)
         except KeyboardInterrupt:
             self._write("Validation interrupted.")
         except ConfigurationError as error:
-            self._write(_render_operation_error(error, pipeline))
+            self._presenter.show_error(error, pipeline, PipelineOperation.VALIDATE)
 
     def _run_pipeline(self) -> None:
         pipeline = self._require_pipeline()
         if pipeline is None:
             return
-        renderer = InteractiveEventRenderer(self._write)
+        sink = self._presenter.event_sink(PipelineOperation.RUN)
         try:
-            result = self._application.run_pipeline(pipeline.resolved_path, event_sink=renderer)
+            result = self._application.run_pipeline(pipeline.resolved_path, event_sink=sink)
         except KeyboardInterrupt:
             self._write("Execution interrupted.")
         except (ConfigurationError, ExecutionError) as error:
-            self._write(_render_operation_error(error, pipeline))
+            self._presenter.show_error(error, pipeline, PipelineOperation.RUN)
         else:
-            self._write(_render_execution_result(result))
+            self._presenter.show_result(result)
 
     def _require_pipeline(self) -> SelectedPipeline | None:
         if self.context.pipeline is None:
@@ -265,7 +307,7 @@ class InteractiveSession:
         return self.context.pipeline
 
 
-def _render_operation_error(error: NexolithError, pipeline: SelectedPipeline) -> str:
+def render_operation_error(error: NexolithError, pipeline: SelectedPipeline) -> str:
     category = error_category(error)
     if isinstance(error, ConfigurationError):
         message = str(error).replace(str(pipeline.resolved_path), str(pipeline.requested_path))
@@ -278,7 +320,7 @@ def _render_operation_error(error: NexolithError, pipeline: SelectedPipeline) ->
     return f"Error [{category}]: {message}"
 
 
-def _render_execution_result(result: ExecutionResult) -> str:
+def render_execution_result(result: ExecutionResult) -> str:
     lines = [
         f"Status: {result.status.value}",
         f"Rows read: {result.rows_read}",
