@@ -1,0 +1,331 @@
+import sqlite3
+from pathlib import Path
+
+from nexolith.state import DagRunStatus, StateStore, TaskRunStatus
+
+
+def make_store(tmp_path: Path, name: str = "state.db") -> StateStore:
+    return StateStore(tmp_path / name)
+
+
+def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    assert not db_path.exists()
+
+    store = make_store(tmp_path)
+    try:
+        conn = sqlite3.connect(str(db_path))
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"schema_version", "dags", "dag_runs", "task_runs"} <= tables
+        version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+        assert version == 1
+        conn.close()
+    finally:
+        store.close()
+
+    assert db_path.exists()
+
+
+def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    StateStore(db_path).close()
+    StateStore(db_path).close()  # must not raise, must not duplicate schema_version rows
+
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute("SELECT version FROM schema_version").fetchall()
+    conn.close()
+    assert rows == [(1,)]
+
+
+def test_register_and_read_back_a_dag(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("nightly-etl", Path("workflow.yaml"), "0 2 * * *")
+
+        dag = store.get_dag("nightly-etl")
+
+        assert dag is not None
+        assert dag.name == "nightly-etl"
+        assert dag.source_path == "workflow.yaml"
+        assert dag.schedule == "0 2 * * *"
+        assert dag.enabled is True
+        assert dag.created_at == dag.updated_at
+    finally:
+        store.close()
+
+
+def test_registering_an_existing_dag_name_updates_it(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("nightly-etl", Path("workflow.yaml"), "0 2 * * *")
+        first = store.get_dag("nightly-etl")
+        assert first is not None
+
+        store.register_dag("nightly-etl", Path("workflow_v2.yaml"), "0 3 * * *", enabled=False)
+
+        updated = store.get_dag("nightly-etl")
+        assert updated is not None
+        assert updated.source_path == "workflow_v2.yaml"
+        assert updated.schedule == "0 3 * * *"
+        assert updated.enabled is False
+        assert len(store.list_dags()) == 1  # updated in place, not duplicated
+    finally:
+        store.close()
+
+
+def test_set_dag_enabled(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("d", Path("d.yaml"), None)
+        store.set_dag_enabled("d", False)
+        assert store.get_dag("d").enabled is False  # type: ignore[union-attr]
+        store.set_dag_enabled("d", True)
+        assert store.get_dag("d").enabled is True  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_list_dags_returns_all_registered_dags_sorted_by_name(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("b", Path("b.yaml"), None)
+        store.register_dag("a", Path("a.yaml"), None)
+
+        names = [dag.name for dag in store.list_dags()]
+
+        assert names == ["a", "b"]
+    finally:
+        store.close()
+
+
+def test_get_dag_returns_none_when_not_registered(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        assert store.get_dag("does-not-exist") is None
+    finally:
+        store.close()
+
+
+def test_full_successful_run_lifecycle(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        run_id = store.start_dag_run("etl", ["extract", "load"], trigger_reason="manual")
+
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        assert run.status is DagRunStatus.RUNNING
+        assert run.ended_at is None
+
+        tasks = store.list_task_runs(run_id)
+        assert [task.task_name for task in tasks] == ["extract", "load"]
+        assert all(task.status is TaskRunStatus.PENDING for task in tasks)
+
+        store.start_task_run(run_id, "extract")
+        store.complete_task_run(run_id, "extract", success=True)
+        store.start_task_run(run_id, "load")
+        store.complete_task_run(run_id, "load", success=True)
+        store.complete_dag_run(run_id, success=True)
+
+        finished_run = store.get_dag_run(run_id)
+        assert finished_run is not None
+        assert finished_run.status is DagRunStatus.SUCCEEDED
+        assert finished_run.ended_at is not None
+
+        finished_tasks = {task.task_name: task for task in store.list_task_runs(run_id)}
+        assert finished_tasks["extract"].status is TaskRunStatus.SUCCEEDED
+        assert finished_tasks["extract"].started_at is not None
+        assert finished_tasks["extract"].ended_at is not None
+        assert finished_tasks["load"].status is TaskRunStatus.SUCCEEDED
+    finally:
+        store.close()
+
+
+def test_failed_run(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        run_id = store.start_dag_run("etl", ["extract"], trigger_reason="manual")
+
+        store.start_task_run(run_id, "extract")
+        store.complete_task_run(run_id, "extract", success=False, error="connection refused")
+        store.complete_dag_run(run_id, success=False, error="task 'extract' failed")
+
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        assert run.status is DagRunStatus.FAILED
+        assert run.error == "task 'extract' failed"
+
+        task = store.list_task_runs(run_id)[0]
+        assert task.status is TaskRunStatus.FAILED
+        assert task.error == "connection refused"
+    finally:
+        store.close()
+
+
+def test_partially_completed_run_is_the_crash_recovery_relevant_case(tmp_path: Path) -> None:
+    """A run that started, had one task succeed, then the process died before
+    the remaining tasks or the run itself ever reached a terminal state --
+    exactly what a scheduler must detect and reconstruct after an unclean
+    shutdown. No 'crash' is simulated here (nothing to simulate -- the
+    store just never gets told the run finished); the test is that this
+    state is fully, accurately queryable from the store alone.
+    """
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        run_id = store.start_dag_run(
+            "etl", ["extract", "transform", "load"], trigger_reason="schedule"
+        )
+        store.start_task_run(run_id, "extract")
+        store.complete_task_run(run_id, "extract", success=True)
+        store.start_task_run(run_id, "transform")
+        # ... process dies here: 'transform' never completes, 'load' never starts,
+        # complete_dag_run() is never called.
+
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        assert run.status is DagRunStatus.RUNNING
+        assert run.ended_at is None
+
+        tasks = {task.task_name: task for task in store.list_task_runs(run_id)}
+        assert tasks["extract"].status is TaskRunStatus.SUCCEEDED
+        assert tasks["transform"].status is TaskRunStatus.RUNNING
+        assert tasks["transform"].ended_at is None
+        assert tasks["load"].status is TaskRunStatus.PENDING
+
+        incomplete = store.list_incomplete_dag_runs()
+        assert [incomplete_run.id for incomplete_run in incomplete] == [run_id]
+    finally:
+        store.close()
+
+
+def test_list_incomplete_dag_runs_excludes_finished_runs(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        finished_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+        store.complete_dag_run(finished_id, success=True)
+        running_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+
+        incomplete_ids = [run.id for run in store.list_incomplete_dag_runs()]
+
+        assert incomplete_ids == [running_id]
+        assert finished_id not in incomplete_ids
+    finally:
+        store.close()
+
+
+def test_latest_dag_run_with_multiple_runs_present(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        first_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+        store.complete_dag_run(first_id, success=True)
+        second_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+        store.complete_dag_run(second_id, success=False, error="boom")
+
+        latest = store.latest_dag_run("etl")
+
+        assert latest is not None
+        assert latest.id == second_id
+        assert latest.status is DagRunStatus.FAILED
+    finally:
+        store.close()
+
+
+def test_list_dag_runs_returns_all_runs_most_recent_first(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        first_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+        second_id = store.start_dag_run("etl", ["a"], trigger_reason="manual")
+
+        run_ids = [run.id for run in store.list_dag_runs("etl")]
+
+        assert run_ids == [second_id, first_id]
+    finally:
+        store.close()
+
+
+def test_latest_dag_run_returns_none_for_a_dag_with_no_runs(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        assert store.latest_dag_run("etl") is None
+        assert store.list_dag_runs("etl") == []
+    finally:
+        store.close()
+
+
+def test_get_dag_run_returns_none_for_a_nonexistent_run(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        assert store.get_dag_run(999) is None
+        assert store.list_task_runs(999) == []
+    finally:
+        store.close()
+
+
+def test_task_run_query_for_a_specific_run_only_returns_that_runs_tasks(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+        run_a = store.start_dag_run("etl", ["x"], trigger_reason="manual")
+        run_b = store.start_dag_run("etl", ["x", "y"], trigger_reason="manual")
+
+        assert [task.task_name for task in store.list_task_runs(run_a)] == ["x"]
+        assert [task.task_name for task in store.list_task_runs(run_b)] == ["x", "y"]
+    finally:
+        store.close()
+
+
+def test_journal_mode_is_wal(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+    finally:
+        store.close()
+
+
+def test_a_reader_is_not_blocked_by_an_uncommitted_writer(tmp_path: Path) -> None:
+    """The concurrency case this schema is designed for: a writer (the
+    future scheduler daemon) holding an open transaction must not block a
+    concurrent reader (a future CLI command) in a separate connection --
+    whether that's a second connection in the same process or a wholly
+    separate one, SQLite's file-level WAL locking behaves identically
+    either way, so a second `StateStore` on the same database file exercises
+    the real mechanism under test. Under WAL, a reader sees the last
+    *committed* state and proceeds immediately; under the default
+    rollback-journal mode it would block or raise 'database is locked'.
+    """
+    db_path = tmp_path / "state.db"
+    writer = StateStore(db_path)
+    reader = StateStore(db_path)
+    try:
+        writer.register_dag("etl", Path("etl.yaml"), None)
+
+        writer._conn.execute("BEGIN IMMEDIATE")
+        writer._conn.execute("UPDATE dags SET schedule = ? WHERE name = ?", ("0 * * * *", "etl"))
+        # Deliberately not committed yet -- a reader must still succeed, and
+        # must still see the pre-write value (WAL readers see a consistent
+        # snapshot, not a partially-applied uncommitted write).
+
+        during_write = reader.get_dag("etl")
+
+        writer._conn.commit()
+        after_commit = reader.get_dag("etl")
+
+        assert during_write is not None
+        assert during_write.schedule is None
+        assert after_commit is not None
+        assert after_commit.schedule == "0 * * * *"
+    finally:
+        writer.close()
+        reader.close()
