@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from prompt_toolkit.application import create_app_session
+from prompt_toolkit.application.current import get_app
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 
@@ -116,6 +117,37 @@ def test_divider_uses_the_blue_discord_palette() -> None:
     assert divider.char == "─"
     assert divider.style == _DIVIDER_COLOR
     assert f"fg:#{BLURPLE[0]:02x}{BLURPLE[1]:02x}{BLURPLE[2]:02x}" == _DIVIDER_COLOR
+
+
+def test_a_divider_separates_the_status_area_from_the_output_log() -> None:
+    """The CHANGELOG promises divider lines between the header, status,
+    output, and input regions (NXL-69). That's four regions and three
+    boundaries -- header|status, status|output, and output|input -- but the
+    layout previously only drew two, leaving the status area (a step
+    timeline or summary panel that changes height and content between
+    `/run` and `/validate`) directly adjacent to the scrollable output log
+    with no visual boundary. Confirmed via a real headless run inspecting
+    the live layout, not just `_divider()` in isolation.
+    """
+    divider_count: dict[str, int] = {}
+
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        windows = get_app().layout.find_all_windows()
+        divider_count["n"] = sum(1 for w in windows if w.style == _DIVIDER_COLOR)
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    assert divider_count.get("n") == 3
 
 
 def test_run_updates_the_status_area_timeline_and_summary_end_to_end(tmp_path: Path) -> None:

@@ -114,6 +114,7 @@ def run_full_screen_session(
             header,
             _divider(),
             status_window,
+            _divider(),
             output_area,
             _divider(),
             input_field,
