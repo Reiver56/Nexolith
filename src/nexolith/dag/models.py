@@ -8,7 +8,21 @@ from nexolith.types import Scalar
 class DagTaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1)
-    pipeline: str = Field(min_length=1)
+    pipeline: str | None = Field(default=None, min_length=1)
+    # script (NXL-88, ADR-7, Model B): an alternative to `pipeline` -- a
+    # self-contained script that manages its own I/O entirely (does not
+    # receive/return Nexolith's in-flight Rows, unlike Model A's
+    # `python_job` transform step). Mutually exclusive with `pipeline`, same
+    # pattern as story 1's `query`/`query_file`. Run as a subprocess (see
+    # nexolith.jobs.script_runner for why) via `interpreter` (defaults to
+    # the interpreter running Nexolith itself) with the documented
+    # entrypoint contract `def <entrypoint>(context) -> None`, `context`
+    # exposing only `.parameters` (a plain object, not an importable
+    # Nexolith type -- the subprocess may not have nexolith installed at
+    # all, e.g. a dedicated PySpark venv).
+    script: str | None = Field(default=None, min_length=1)
+    entrypoint: str = "run"
+    interpreter: str | None = None
     depends_on: list[str] = Field(default_factory=list)
     # parameters (NXL-82): DAG-run-time values for the task's own pipeline
     # `parameters:` block -- the DAG layer's answer to "where do runtime
@@ -31,6 +45,14 @@ class DagTaskConfig(BaseModel):
     # backoff-strategy plugin system -- this is the whole strategy.
     retry_delay_seconds: float = Field(default=0.0, ge=0.0)
     retry_backoff_multiplier: float = Field(default=1.0, ge=1.0)
+
+    @model_validator(mode="after")
+    def require_pipeline_or_script(self) -> "DagTaskConfig":
+        if self.pipeline and self.script:
+            raise ValueError("'pipeline' and 'script' are mutually exclusive; specify only one")
+        if not self.pipeline and not self.script:
+            raise ValueError("either 'pipeline' or 'script' is required")
+        return self
 
 
 class DagConfig(BaseModel):

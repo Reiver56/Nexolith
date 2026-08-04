@@ -16,6 +16,7 @@ from nexolith.dag.models import DagConfig, DagTaskConfig
 from nexolith.dag.validator import load_dag
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ExecutionError
+from nexolith.jobs import run_script
 from nexolith.models import ExecutionResult
 from nexolith.state import StateStore
 from nexolith.types import Scalar
@@ -94,10 +95,19 @@ def _transitive_dependents(tasks: list[DagTaskConfig], failed: set[str]) -> set[
 
 
 def _resolve_pipeline_path(task: DagTaskConfig, base_dir: Path) -> Path:
+    assert task.pipeline is not None
     pipeline_path = Path(task.pipeline)
     if not pipeline_path.is_absolute():
         pipeline_path = base_dir / pipeline_path
     return pipeline_path
+
+
+def _resolve_script_path(task: DagTaskConfig, base_dir: Path) -> Path:
+    assert task.script is not None
+    script_path = Path(task.script)
+    if not script_path.is_absolute():
+        script_path = base_dir / script_path
+    return script_path
 
 
 class DagExecutor:
@@ -173,8 +183,26 @@ class DagExecutor:
                 continue
 
             self._store.start_task_run(dag_run_id, task.name)
-            pipeline_path = _resolve_pipeline_path(task, base_dir)
-            success, error = self._run_task_with_retries(dag_run_id, task, pipeline_path)
+            if task.script is not None:
+                script_path = _resolve_script_path(task, base_dir)
+
+                def run_script_attempt(
+                    task: DagTaskConfig = task, path: Path = script_path
+                ) -> None:
+                    run_script(path, task.entrypoint, task.parameters, task.interpreter)
+
+                success, error = self._run_with_retries(dag_run_id, task, run_script_attempt)
+            else:
+                pipeline_path = _resolve_pipeline_path(task, base_dir)
+
+                def run_pipeline_attempt(
+                    task: DagTaskConfig = task, path: Path = pipeline_path
+                ) -> ExecutionResult:
+                    return self._application.run_pipeline(
+                        path, parameter_overrides=task.parameters
+                    )
+
+                success, error = self._run_with_retries(dag_run_id, task, run_pipeline_attempt)
             self._store.complete_task_run(dag_run_id, task.name, success=success, error=error)
 
             if not success:
@@ -188,16 +216,19 @@ class DagExecutor:
         self._store.complete_dag_run(dag_run_id, success=not dag_failed, error=first_error)
         return dag_run_id
 
-    def _run_task_with_retries(
-        self, dag_run_id: int, task: DagTaskConfig, pipeline_path: Path
+    def _run_with_retries(
+        self, dag_run_id: int, task: DagTaskConfig, attempt: Callable[[], object]
     ) -> tuple[bool, str | None]:
         """Try `task` up to `1 + task.retries` times (retries=0, the
         default, means exactly one attempt -- today's exact pre-existing
-        behavior). Each attempt is a real call to `PipelineApplication.
-        run_pipeline()`, recorded to the store as its own task_attempts row
-        the moment it starts and the moment it finishes -- never batched,
-        never simulated, satisfying "no silent retries" directly rather
-        than by convention.
+        behavior). Each attempt is a real call to `attempt()` -- either
+        `PipelineApplication.run_pipeline()` for a `pipeline:` task, or
+        `nexolith.jobs.run_script()` for a `script:` task (NXL-88); both
+        raise `(ConfigurationError | ExecutionError)` on failure, so this
+        loop, and everything it records to the store, is identical either
+        way. Recorded as its own task_attempts row the moment each attempt
+        starts and finishes -- never batched, never simulated, satisfying
+        "no silent retries" directly rather than by convention.
         """
         max_attempts = 1 + task.retries
         last_error: str | None = None
@@ -211,7 +242,7 @@ class DagExecutor:
 
             attempt_id = self._store.start_task_attempt(dag_run_id, task.name, attempt_number)
             try:
-                self._application.run_pipeline(pipeline_path, parameter_overrides=task.parameters)
+                attempt()
             except (ConfigurationError, ExecutionError) as exc:
                 last_error = str(exc)
                 self._store.complete_task_attempt(attempt_id, success=False, error=last_error)

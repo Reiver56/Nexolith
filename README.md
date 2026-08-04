@@ -248,8 +248,67 @@ Nexolith's own error output (only its type name is), so a job's own logging acci
 containing something sensitive is not repeated back through Nexolith's error path.
 
 `python_job` is Model A -- in-process, exchanging Nexolith's own in-flight rows. It is not
-suitable for engines with their own distributed data model (e.g. PySpark); that is a
-separate, later capability (Model B).
+suitable for engines with their own distributed data model (e.g. PySpark); that is Model B,
+below.
+
+### Script job steps (Model B)
+
+> [!WARNING]
+> `script:` runs your own local script, in its own subprocess, with no sandboxing. Same
+> trusted-local-code posture as `python_job` (see ADR-7) -- never for untrusted code.
+
+Model B is a DAG task type, not a pipeline transform step: a self-contained script that
+manages its own I/O entirely (its own reads, its own writes, its own database connections)
+and does not receive or return Nexolith's in-flight rows. It exists for shapes a single
+pipeline can't express -- for example a single source read that fans out into several
+independently-filtered exports -- and for engines with their own execution model (e.g.
+PySpark) that shouldn't run inside Nexolith's own process.
+
+A DAG task references either a pipeline or a script, never both:
+
+```yaml
+name: fan_out_exports
+tasks:
+  - name: export_by_segment
+    script: jobs/fan_out.py
+    entrypoint: run              # optional, defaults to "run"
+    interpreter: .venv-spark/bin/python  # optional, defaults to Nexolith's own interpreter
+    parameters:
+      database: data/customers.db
+      out_dir: build/exports
+    depends_on: []
+```
+
+The script's entrypoint receives a single `context` argument exposing `.parameters` (a plain
+object, not an importable Nexolith type -- the configured interpreter may be a completely
+separate virtual environment with no `nexolith` package installed at all, e.g. a dedicated
+PySpark venv):
+
+```python
+def run(context):
+    database = context.parameters["database"]
+    ...  # the script's own I/O; nothing is returned to Nexolith
+```
+
+Unlike `python_job`, a script step always runs as a subprocess, for two reasons: an engine's
+own session lifecycle and heavy dependencies (PySpark's JVM gateway, for example) should not
+be importable into Nexolith's own long-lived process, and the `interpreter:` field -- letting
+a script use its own venv with dependencies Nexolith itself never needs -- can only work by
+launching a separate process with that interpreter. A clean exit is success; an exception or
+any non-zero exit is a failure, recorded the same way a failed pipeline task is (including
+retries, if configured).
+
+Because a script's own stdout/stderr is arbitrary text a script's author controls, Nexolith
+cannot inspect or redact it the way it can a caught Python exception's type. Captured output
+is logged for real debugging, but -- unlike every other Nexolith error message -- that log
+line is **not** guaranteed free of anything sensitive a misbehaving script prints; the safe,
+generic failure message recorded in DAG run state (`nexolith runs show`) never includes it.
+
+Only the script's own file is validated ahead of time (`nexolith validate` confirms it
+exists); unlike `python_job`, the entrypoint itself is not checked in advance, since doing so
+would mean importing the script into Nexolith's own interpreter -- exactly the coupling
+subprocess isolation exists to avoid. A missing or misnamed entrypoint surfaces as a real,
+clean execution failure instead.
 
 ## Environment variables
 

@@ -103,6 +103,10 @@ def _check_for_cycles(dag: DagConfig) -> None:
 
 def _validate_referenced_pipelines(dag: DagConfig, base_dir: Path) -> None:
     for task in dag.tasks:
+        if task.script is not None:
+            _validate_referenced_script(task, base_dir)
+            continue
+        assert task.pipeline is not None  # guaranteed by DagTaskConfig's own validator
         pipeline_path = Path(task.pipeline)
         if not pipeline_path.is_absolute():
             pipeline_path = base_dir / pipeline_path
@@ -112,3 +116,25 @@ def _validate_referenced_pipelines(dag: DagConfig, base_dir: Path) -> None:
             raise ConfigurationError(
                 f"Task '{task.name}' references an invalid pipeline ({task.pipeline}): {exc}"
             ) from exc
+
+
+def _validate_referenced_script(task: DagTaskConfig, base_dir: Path) -> None:
+    """Model B (NXL-88): confirm only that the script file exists and is
+    readable -- deliberately NOT importing it to check the entrypoint, the
+    way Model A's `python_job` does. Importing here would run the script's
+    own top-level code inside Nexolith's own interpreter during a nominally
+    side-effect-free `validate`, and would fail for entirely expected
+    reasons (e.g. `import pyspark` when Nexolith's own venv doesn't have
+    it) -- precisely the coupling subprocess isolation exists to avoid. A
+    missing/misnamed entrypoint is instead a real execution-time failure
+    (a non-zero exit from the configured interpreter), not a validate-time
+    one.
+    """
+    assert task.script is not None
+    script_path = Path(task.script)
+    if not script_path.is_absolute():
+        script_path = base_dir / script_path
+    if not script_path.is_file():
+        raise ConfigurationError(
+            f"Task '{task.name}' references a script that does not exist: {script_path}"
+        )
