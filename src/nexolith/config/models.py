@@ -30,6 +30,16 @@ class SqlSourceConfig(ComponentConfig):
     # regardless of which one the user wrote.
     query_file: str | None = None
     table: str | None = None
+    # parameters (NXL-82): named values bound into `query`/`query_file` via
+    # the real SQLAlchemy Core bound-parameter mechanism (`:name` syntax,
+    # `connection.execute(text(query), parameters)`) -- never string
+    # interpolation. Explicit declaration, not SQL-text inspection (see
+    # nexolith.config.loader._resolve_parameters): every name this pipeline
+    # ever binds must appear as a key here. A `None` value means "required,
+    # not yet supplied" -- filled in later by a DAG task's own `parameters:`
+    # override (nexolith.dag.models.DagTaskConfig.parameters), or it is a
+    # load-time ConfigurationError, never a runtime driver error.
+    parameters: dict[str, Scalar] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def require_query_or_table(self) -> "SqlSourceConfig":

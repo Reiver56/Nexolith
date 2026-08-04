@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 from nexolith.application import PipelineApplication
@@ -5,6 +6,7 @@ from nexolith.dag import DagExecutor, execute_dag, load_dag
 from nexolith.events import EventSink
 from nexolith.models import ExecutionResult
 from nexolith.state import DagRunStatus, StateStore, TaskRunRecord, TaskRunStatus
+from nexolith.types import Scalar
 
 
 def write_pipeline(path: Path, *, name: str) -> None:
@@ -51,6 +53,142 @@ destination:
 
 def write_dag(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
+
+
+def write_sqlite_db_with_items(path: Path) -> None:
+    import sqlite3
+
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE items (id INTEGER, status TEXT)")
+    connection.executemany(
+        "INSERT INTO items VALUES (?, ?)",
+        [(1, "active"), (2, "active"), (3, "inactive")],
+    )
+    connection.commit()
+    connection.close()
+
+
+def write_parameterized_pipeline(path: Path, *, name: str, database: Path) -> None:
+    """A required parameter (`status: null`) with no static value -- only a
+    DAG task's own `parameters:` override (NXL-82) can resolve it."""
+    path.write_text(
+        f"""
+name: {name}
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query: "SELECT id, status FROM items WHERE status = :status"
+  parameters:
+    status: null
+transformations: []
+destination:
+  type: csv
+  path: {(path.parent / f"{name}_out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+
+def test_dag_task_parameter_override_reaches_and_affects_the_real_query(tmp_path: Path) -> None:
+    """NXL-82 end-to-end: the pipeline declares a required parameter with no
+    static value; only the DAG task's own `parameters:` block can resolve
+    it. Two DAGs supplying different values for the same pipeline must
+    produce genuinely different real query output -- not just "doesn't
+    crash" -- proving the value actually reached the database query.
+    """
+    database = tmp_path / "items.db"
+    write_sqlite_db_with_items(database)
+    write_parameterized_pipeline(tmp_path / "filtered.yaml", name="filtered", database=database)
+
+    active_dag = tmp_path / "active.yaml"
+    write_dag(
+        active_dag,
+        """
+name: active_only
+tasks:
+  - name: filtered
+    pipeline: filtered.yaml
+    depends_on: []
+    parameters:
+      status: active
+""",
+    )
+    inactive_dag = tmp_path / "inactive.yaml"
+    write_dag(
+        inactive_dag,
+        """
+name: inactive_only
+tasks:
+  - name: filtered
+    pipeline: filtered.yaml
+    depends_on: []
+    parameters:
+      status: inactive
+""",
+    )
+
+    import csv
+
+    output_path = tmp_path / "filtered_out.csv"
+
+    store = StateStore(tmp_path / "state.db")
+    try:
+        active_run_id = execute_dag(active_dag, store)
+        active_run = store.get_dag_run(active_run_id)
+        assert active_run is not None
+        assert active_run.status is DagRunStatus.SUCCEEDED
+
+        # Both DAGs point at the same pipeline (and thus the same
+        # destination file) -- read it immediately after each run, before
+        # the next run's own write overwrites it.
+        with output_path.open(newline="", encoding="utf-8") as handle:
+            active_rows = list(csv.DictReader(handle))
+
+        inactive_run_id = execute_dag(inactive_dag, store)
+        inactive_run = store.get_dag_run(inactive_run_id)
+        assert inactive_run is not None
+        assert inactive_run.status is DagRunStatus.SUCCEEDED
+
+        with output_path.open(newline="", encoding="utf-8") as handle:
+            inactive_rows = list(csv.DictReader(handle))
+    finally:
+        store.close()
+
+    assert {row["status"] for row in active_rows} == {"active"}
+    assert len(active_rows) == 2
+    assert {row["status"] for row in inactive_rows} == {"inactive"}
+    assert len(inactive_rows) == 1
+
+
+def test_dag_validation_catches_a_missing_task_parameter_before_any_run(tmp_path: Path) -> None:
+    """A DAG referencing a pipeline with a required parameter, but never
+    supplying it via the task's own `parameters:` block, must fail
+    `load_dag`'s validation -- the same load-time guarantee story 1
+    established for a missing `query_file`, extended to NXL-82."""
+    database = tmp_path / "items.db"
+    write_sqlite_db_with_items(database)
+    write_parameterized_pipeline(tmp_path / "filtered.yaml", name="filtered", database=database)
+
+    dag_path = tmp_path / "workflow.yaml"
+    write_dag(
+        dag_path,
+        """
+name: missing_param
+tasks:
+  - name: filtered
+    pipeline: filtered.yaml
+    depends_on: []
+""",
+    )
+
+    from nexolith.exceptions import ConfigurationError
+
+    try:
+        load_dag(dag_path)
+    except ConfigurationError as exc:
+        assert "status" in str(exc)
+    else:
+        raise AssertionError("expected load_dag to reject the missing parameter")
 
 
 def test_fully_successful_linear_dag(tmp_path: Path) -> None:
@@ -245,8 +383,16 @@ class _ProbingApplication:
         self._dag_name = dag_name
         self.snapshots: list[dict[str, TaskRunRecord]] = []
 
-    def run_pipeline(self, path: Path, *, event_sink: EventSink | None = None) -> ExecutionResult:
-        result = self._real.run_pipeline(path, event_sink=event_sink)
+    def run_pipeline(
+        self,
+        path: Path,
+        *,
+        parameter_overrides: Mapping[str, Scalar] | None = None,
+        event_sink: EventSink | None = None,
+    ) -> ExecutionResult:
+        result = self._real.run_pipeline(
+            path, parameter_overrides=parameter_overrides, event_sink=event_sink
+        )
         run = self._store.latest_dag_run(self._dag_name)
         assert run is not None
         self.snapshots.append({task.task_name: task for task in self._store.list_task_runs(run.id)})
@@ -342,12 +488,18 @@ tasks:
                 self._calls = 0
 
             def run_pipeline(
-                self, path: Path, *, event_sink: EventSink | None = None
+                self,
+                path: Path,
+                *,
+                parameter_overrides: Mapping[str, Scalar] | None = None,
+                event_sink: EventSink | None = None,
             ) -> ExecutionResult:
                 self._calls += 1
                 if self._calls == 2:
                     raise RuntimeError("process died")
-                return self._real.run_pipeline(path, event_sink=event_sink)
+                return self._real.run_pipeline(
+                    path, parameter_overrides=parameter_overrides, event_sink=event_sink
+                )
 
         executor = DagExecutor(store, _CrashingApplication())
 

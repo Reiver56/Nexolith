@@ -2,12 +2,22 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nexolith.types import Scalar
+
 
 class DagTaskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1)
     pipeline: str = Field(min_length=1)
     depends_on: list[str] = Field(default_factory=list)
+    # parameters (NXL-82): DAG-run-time values for the task's own pipeline
+    # `parameters:` block -- the DAG layer's answer to "where do runtime
+    # parameter values come from," since there is no other trigger mechanism
+    # today. Applied on top of (never replacing) the pipeline's own static
+    # parameters at load time -- see nexolith.dag.validator and
+    # nexolith.dag.executor, both of which pass this dict into
+    # `load_pipeline`/`run_pipeline` as `parameter_overrides`.
+    parameters: dict[str, Scalar] = Field(default_factory=dict)
     # Retry policy (NXL-79) -- per-task, since retrying is inherently about
     # one task's own execution, not the DAG as a whole. Defaults preserve
     # today's exact behavior: retries=0 means exactly one attempt, same as

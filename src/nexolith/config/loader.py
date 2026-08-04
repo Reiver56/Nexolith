@@ -1,5 +1,6 @@
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from pydantic import ValidationError
 
 from nexolith.config.models import PipelineConfig, SqlSourceConfig
 from nexolith.exceptions import ConfigurationError
+from nexolith.types import Scalar
 
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -40,7 +42,9 @@ def _resolve_environment(value: Any) -> Any:
     return value
 
 
-def load_pipeline(path: Path) -> PipelineConfig:
+def load_pipeline(
+    path: Path, parameter_overrides: Mapping[str, Scalar] | None = None
+) -> PipelineConfig:
     if not path.is_file():
         raise ConfigurationError(f"Pipeline file not found: {path}. Check the path and try again.")
     try:
@@ -66,7 +70,44 @@ def load_pipeline(path: Path) -> PipelineConfig:
             errors.append(f"{location}: {error['msg']}")
         raise ConfigurationError("Invalid pipeline configuration:\n" + "\n".join(errors)) from exc
     _resolve_query_file(config, path.parent)
+    _resolve_parameters(config, parameter_overrides)
     return config
+
+
+def _resolve_parameters(config: PipelineConfig, overrides: Mapping[str, Scalar] | None) -> None:
+    """Merge NXL-82 parameter overrides (e.g. a DAG task's own `parameters:`
+    block) on top of the pipeline's own static `parameters:` declaration,
+    then confirm every declared name has a real value before the query is
+    allowed to run. A declared parameter with no static value (`null` in
+    YAML) exists specifically to be filled this way; if it still isn't after
+    merging, that is the "missing required parameter" case the acceptance
+    criteria calls out -- caught here, at load time, for both
+    `nexolith validate` and `nexolith run`, rather than surfacing as an
+    opaque driver error once the query executes. Declared names not
+    referenced by the actual query text are not detected here -- see the
+    field-level docstring on `SqlSourceConfig.parameters` for why (explicit
+    declaration was chosen over parsing the SQL).
+    """
+    source = config.source
+    overrides = overrides or {}
+    if not isinstance(source, SqlSourceConfig):
+        if overrides:
+            raise ConfigurationError(
+                "Parameter overrides were supplied, but this pipeline's source does not "
+                "declare a SQL query."
+            )
+        return
+    unknown = sorted(set(overrides) - set(source.parameters))
+    if unknown:
+        raise ConfigurationError(
+            "Unknown parameter override(s), not declared in this pipeline's 'parameters': "
+            + ", ".join(unknown)
+        )
+    merged = {**source.parameters, **overrides}
+    missing = sorted(name for name, value in merged.items() if value is None)
+    if missing:
+        raise ConfigurationError("Missing required parameter(s): " + ", ".join(missing))
+    source.parameters = merged
 
 
 def _resolve_query_file(config: PipelineConfig, base_dir: Path) -> None:

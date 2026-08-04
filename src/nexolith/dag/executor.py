@@ -7,7 +7,7 @@ block, useful directly in tests.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +18,7 @@ from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 from nexolith.state import StateStore
+from nexolith.types import Scalar
 
 
 class PipelineRunnerApplication(Protocol):
@@ -28,7 +29,11 @@ class PipelineRunnerApplication(Protocol):
     """
 
     def run_pipeline(
-        self, path: Path, *, event_sink: EventSink | None = None
+        self,
+        path: Path,
+        *,
+        parameter_overrides: Mapping[str, Scalar] | None = None,
+        event_sink: EventSink | None = None,
     ) -> ExecutionResult: ...
 
 
@@ -206,7 +211,7 @@ class DagExecutor:
 
             attempt_id = self._store.start_task_attempt(dag_run_id, task.name, attempt_number)
             try:
-                self._application.run_pipeline(pipeline_path)
+                self._application.run_pipeline(pipeline_path, parameter_overrides=task.parameters)
             except (ConfigurationError, ExecutionError) as exc:
                 last_error = str(exc)
                 self._store.complete_task_attempt(attempt_id, success=False, error=last_error)

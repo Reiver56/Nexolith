@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from nexolith.scheduler import (
     write_pidfile,
 )
 from nexolith.state import StateStore
+from nexolith.types import Scalar
 
 runner = CliRunner()
 
@@ -436,14 +438,20 @@ def test_runs_show_renders_multiple_retry_attempts_for_one_task(
             self._calls = 0
 
         def run_pipeline(
-            self, path: Path, *, event_sink: EventSink | None = None
+            self,
+            path: Path,
+            *,
+            parameter_overrides: Mapping[str, Scalar] | None = None,
+            event_sink: EventSink | None = None,
         ) -> ExecutionResult:
             from nexolith.exceptions import ExecutionError
 
             self._calls += 1
             if self._calls == 1:
                 raise ExecutionError("simulated transient failure")
-            return self._real.run_pipeline(path, event_sink=event_sink)
+            return self._real.run_pipeline(
+                path, parameter_overrides=parameter_overrides, event_sink=event_sink
+            )
 
     write_pipeline(tmp_path / "flaky.yaml", name="flaky")
     dag_path = tmp_path / "workflow.yaml"

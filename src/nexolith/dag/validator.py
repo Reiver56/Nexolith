@@ -107,7 +107,7 @@ def _validate_referenced_pipelines(dag: DagConfig, base_dir: Path) -> None:
         if not pipeline_path.is_absolute():
             pipeline_path = base_dir / pipeline_path
         try:
-            load_pipeline(pipeline_path)
+            load_pipeline(pipeline_path, parameter_overrides=task.parameters)
         except ConfigurationError as exc:
             raise ConfigurationError(
                 f"Task '{task.name}' references an invalid pipeline ({task.pipeline}): {exc}"

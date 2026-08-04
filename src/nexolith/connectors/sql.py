@@ -9,16 +9,29 @@ from nexolith.types import Rows
 
 
 class SqlSource:
-    def __init__(self, connection_url: str, query: str | None, table: str | None) -> None:
+    def __init__(
+        self,
+        connection_url: str,
+        query: str | None,
+        table: str | None,
+        parameters: dict[str, Any] | None = None,
+    ) -> None:
         self.engine = _create_sql_engine(connection_url)
         self.query = query
         self.table = table
+        # Bound via SQLAlchemy Core's own `:name` parameter syntax --
+        # `connection.execute(text(statement), parameters)` -- the real
+        # parameter-binding call the underlying DBAPI driver (psycopg for
+        # postgresql, sqlite3 for sqlite) executes against, never string
+        # interpolation (NXL-82).
+        self.parameters = parameters or {}
 
     def read(self) -> Rows:
         statement = self.query or f'SELECT * FROM "{self.table}"'
         try:
             with self.engine.connect() as connection:
-                return [dict(row) for row in connection.execute(text(statement)).mappings()]
+                result = connection.execute(text(statement), self.parameters)
+                return [dict(row) for row in result.mappings()]
         except SQLAlchemyError as exc:
             raise ConnectorError(
                 "Could not read from SQL source. Check the connection, table, or query."

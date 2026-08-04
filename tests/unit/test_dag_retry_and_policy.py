@@ -1,11 +1,12 @@
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from nexolith.dag import DagExecutor, execute_dag, load_dag
 from nexolith.events import EventSink
 from nexolith.models import ExecutionResult
 from nexolith.state import DagRunStatus, StateStore, TaskAttemptStatus, TaskRunStatus
+from nexolith.types import Scalar
 
 
 def write_pipeline(path: Path, *, name: str) -> None:
@@ -58,14 +59,22 @@ class FlakyApplication:
         self._real = PipelineApplication()
         self._remaining_failures = dict(fail_task_times)
 
-    def run_pipeline(self, path: Path, *, event_sink: EventSink | None = None) -> ExecutionResult:
+    def run_pipeline(
+        self,
+        path: Path,
+        *,
+        parameter_overrides: Mapping[str, Scalar] | None = None,
+        event_sink: EventSink | None = None,
+    ) -> ExecutionResult:
         from nexolith.exceptions import ExecutionError
 
         for name, remaining in list(self._remaining_failures.items()):
             if path.name.startswith(name) and remaining > 0:
                 self._remaining_failures[name] -= 1
                 raise ExecutionError(f"Task '{name}' failed: simulated transient failure")
-        return self._real.run_pipeline(path, event_sink=event_sink)
+        return self._real.run_pipeline(
+            path, parameter_overrides=parameter_overrides, event_sink=event_sink
+        )
 
 
 def make_recording_sleep() -> tuple[list[float], Callable[[float], None]]:

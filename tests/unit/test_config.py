@@ -242,3 +242,168 @@ def test_existing_inline_query_pipeline_is_unaffected(tmp_path: Path) -> None:
     assert isinstance(config.source, SqlSourceConfig)
     assert config.source.query_file is None
     assert config.source.query == "SELECT id, status FROM items WHERE status = 'active'"
+
+
+# -- NXL-82: parameterized SQL queries --------------------------------------
+
+
+def test_static_parameter_executes_correctly_against_a_real_database(tmp_path: Path) -> None:
+    """A date-range-filtered extract -- the acceptance criteria's own worked
+    example -- using static YAML-declared parameter values, run against a
+    real sqlite database, not mocked."""
+    from nexolith.execution import DefaultPipelineRunner
+    from nexolith.models import ExecutionStatus
+
+    database = tmp_path / "orders.db"
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE orders (id INTEGER, created_at TEXT)")
+    connection.executemany(
+        "INSERT INTO orders VALUES (?, ?)",
+        [(1, "2026-01-05"), (2, "2026-02-15"), (3, "2026-03-20")],
+    )
+    connection.commit()
+    connection.close()
+
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        f"""
+name: date_range_extract
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query: >-
+    SELECT id, created_at FROM orders
+    WHERE created_at >= :start_date AND created_at < :end_date
+  parameters:
+    start_date: "2026-01-01"
+    end_date: "2026-03-01"
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+    config = load_pipeline(path)
+    assert isinstance(config.source, SqlSourceConfig)
+    assert config.source.parameters == {"start_date": "2026-01-01", "end_date": "2026-03-01"}
+
+    result = DefaultPipelineRunner().run(config)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.rows_read == 2
+
+
+def test_missing_required_parameter_caught_at_validation(tmp_path: Path) -> None:
+    """A parameter declared with no static value (`null`) and no override
+    supplied must fail at `load_pipeline` time, naming the parameter --
+    never a runtime driver error."""
+    database = _make_sqlite_db(tmp_path)
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        f"""
+name: needs_param
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query: "SELECT * FROM items WHERE status = :status"
+  parameters:
+    status: null
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="Missing required parameter.*status"):
+        load_pipeline(path)
+
+
+def test_missing_required_parameter_resolved_by_override(tmp_path: Path) -> None:
+    """The same declared-but-unset parameter, supplied via an override (the
+    mechanism `DagTaskConfig.parameters` uses), resolves cleanly."""
+    database = _make_sqlite_db(tmp_path)
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        f"""
+name: needs_param
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query: "SELECT * FROM items WHERE status = :status"
+  parameters:
+    status: null
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    config = load_pipeline(path, parameter_overrides={"status": "active"})
+    assert isinstance(config.source, SqlSourceConfig)
+    assert config.source.parameters == {"status": "active"}
+
+
+def test_unknown_parameter_override_is_rejected(tmp_path: Path) -> None:
+    database = _make_sqlite_db(tmp_path)
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        f"""
+name: no_params
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query: "SELECT * FROM items"
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="Unknown parameter override"):
+        load_pipeline(path, parameter_overrides={"status": "active"})
+
+
+def test_parameters_work_with_query_file(tmp_path: Path) -> None:
+    """Parameters apply identically whether the query is inline or
+    file-based (story 1 + story 2 composing correctly)."""
+    from nexolith.execution import DefaultPipelineRunner
+    from nexolith.models import ExecutionStatus
+
+    database = _make_sqlite_db(tmp_path)
+    query_dir = tmp_path / "queries"
+    query_dir.mkdir()
+    (query_dir / "by_status.sql").write_text(
+        "SELECT id, status FROM items WHERE status = :status", encoding="utf-8"
+    )
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(
+        f"""
+name: by_status
+source:
+  type: sqlite
+  connection_url: sqlite:///{database.as_posix()}
+  query_file: queries/by_status.sql
+  parameters:
+    status: "active"
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+    config = load_pipeline(path)
+    assert isinstance(config.source, SqlSourceConfig)
+    assert config.source.query == "SELECT id, status FROM items WHERE status = :status"
+    assert config.source.parameters == {"status": "active"}
+
+    result = DefaultPipelineRunner().run(config)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.rows_read == 2

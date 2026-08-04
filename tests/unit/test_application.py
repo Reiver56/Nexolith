@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ from nexolith.events import emit_event
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
 from nexolith.execution import DefaultPipelineRunner
 from nexolith.models import ExecutionResult, ExecutionStatus
-from nexolith.types import Rows
+from nexolith.types import Rows, Scalar
 
 
 class RecordingSink:
@@ -109,7 +110,7 @@ def test_application_runs_without_event_sink() -> None:
     config = pipeline_config()
     expected = ExecutionResult(pipeline_name=config.name, status=ExecutionStatus.SUCCEEDED)
     runner = FakeRunner(expected)
-    application = PipelineApplication(loader=lambda _: config, runner=runner)
+    application = PipelineApplication(loader=lambda _path, _overrides=None: config, runner=runner)
 
     result = application.run_pipeline(Path("pipeline.yaml"))
 
@@ -121,7 +122,7 @@ def test_application_emits_events_in_success_order() -> None:
     config = pipeline_config()
     sink = RecordingSink()
     application = PipelineApplication(
-        loader=lambda _: config,
+        loader=lambda _path, _overrides=None: config,
         runner=runner_with_source(Source()),
     )
 
@@ -150,7 +151,7 @@ def test_application_emits_failure_and_preserves_execution_error_chain() -> None
     config = pipeline_config()
     sink = RecordingSink()
     application = PipelineApplication(
-        loader=lambda _: config,
+        loader=lambda _path, _overrides=None: config,
         runner=runner_with_source(BrokenSource()),
     )
 
@@ -172,7 +173,9 @@ def test_application_preserves_configuration_error() -> None:
     original = ConfigurationError("controlled configuration failure")
     sink = RecordingSink()
 
-    def broken_loader(_: Path) -> PipelineConfig:
+    def broken_loader(
+        _path: Path, _overrides: Mapping[str, Scalar] | None = None
+    ) -> PipelineConfig:
         raise original
 
     application = PipelineApplication(loader=broken_loader)
@@ -197,7 +200,7 @@ def test_application_reports_and_preserves_unexpected_error() -> None:
     original = RuntimeError("controlled programming failure")
     sink = RecordingSink()
     application = PipelineApplication(
-        loader=lambda _: config,
+        loader=lambda _path, _overrides=None: config,
         runner=runner_with_source(UnexpectedBrokenSource(original)),
     )
 

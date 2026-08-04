@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -27,6 +27,7 @@ from nexolith.config.models import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.types import Scalar
 
 runner = CliRunner()
 type InputStep = str | BaseException | Callable[[], str]
@@ -385,7 +386,9 @@ def test_failed_open_preserves_previous_context(tmp_path: Path, invalid_kind: st
 def test_unreadable_pipeline_error_is_recoverable(tmp_path: Path) -> None:
     expected = ConfigurationError("Could not read pipeline file. Check file permissions.")
 
-    def unreadable_loader(_: Path) -> PipelineConfig:
+    def unreadable_loader(
+        _path: Path, _overrides: Mapping[str, Scalar] | None = None
+    ) -> PipelineConfig:
         raise expected
 
     application = PipelineApplication(loader=unreadable_loader)
