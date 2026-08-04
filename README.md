@@ -191,8 +191,65 @@ SQL sources accept either `table` or a read-only `query`. SQL destinations suppo
 - `filter`: compare a column with `equals`, `not_equals`, `greater_than`,
   `greater_than_or_equal`, `less_than`, `less_than_or_equal`, `contains`, `is_null`, or
   `is_not_null`.
+- `python_job`: run a user-supplied Python function in-process, as part of the pipeline's own
+  data flow. See [Python job steps](#python-job-steps) below.
 
-Filters are interpreted operations. Nexolith never evaluates YAML as Python code.
+Filters, `select`, `rename`, and `drop_nulls` are interpreted operations; Nexolith never
+evaluates YAML as Python code for them.
+
+### Python job steps
+
+> [!WARNING]
+> `python_job` runs your own local Python code with no sandboxing. It is a deliberate,
+> scoped exception to Nexolith's declarative design (see ADR-7), meant only for trusted
+> local code you already control -- never for code from an untrusted source. Prefer the
+> declarative transforms above whenever they can express the same logic.
+
+A `python_job` step references a local `.py` file and a documented entrypoint function:
+
+```yaml
+transformations:
+  - type: python_job
+    file: jobs/enrich_customers.py
+    entrypoint: run          # optional, defaults to "run"
+    parameters:
+      threshold: 10
+```
+
+`file` resolves relative to the pipeline YAML's own directory (same convention as
+`query_file` and DAG `pipeline:` references). The entrypoint must match:
+
+```python
+from nexolith.jobs import JobContext
+from nexolith.types import Rows
+
+
+def run(rows: Rows, context: JobContext) -> Rows:
+    ...
+    return rows
+```
+
+`rows` is exactly the same `list[dict]` shape that flows between every other transform step;
+the entrypoint receives it and must return data in that same shape. `context.parameters` carries
+the step's own static `parameters:` values (same `dict` shape as story 2's SQL parameters).
+There is no access to the pipeline configuration, connectors, or the wider application --
+the contract is intentionally minimal.
+
+Loading a job file is a normal Python import (`importlib.util.spec_from_file_location`), not
+`eval`/`exec` on a string -- but that also means the file's own top-level code (module-level
+statements, imports, decorators) runs exactly as it would for any Python import, both when
+`nexolith validate` confirms the entrypoint exists and again when the step actually executes.
+Keep job files free of expensive or unsafe top-level side effects; put all logic inside the
+entrypoint function.
+
+An exception raised inside a job's entrypoint fails the pipeline cleanly, the same way any
+other transformation error does: the original exception's message is never included in
+Nexolith's own error output (only its type name is), so a job's own logging accidentally
+containing something sensitive is not repeated back through Nexolith's error path.
+
+`python_job` is Model A -- in-process, exchanging Nexolith's own in-flight rows. It is not
+suitable for engines with their own distributed data model (e.g. PySpark); that is a
+separate, later capability (Model B).
 
 ## Environment variables
 

@@ -101,9 +101,30 @@ class FilterConfig(ComponentConfig):
         return self
 
 
+class PythonJobConfig(ComponentConfig):
+    """python_job (NXL-83, ADR-7): a deliberate, scoped exception to the
+    project's prior no-arbitrary-code-execution principle -- Model A only
+    (in-process; receives/returns Nexolith's own in-flight `Rows`). `file`
+    resolves relative to the pipeline YAML's own directory, same convention
+    as `query_file`/DAG `pipeline:` references. `entrypoint` names a
+    function in that file with the documented signature
+    `def <entrypoint>(rows: Rows, context: JobContext) -> Rows`, default
+    `"run"`. Trusted-local-code only, no sandboxing -- see
+    nexolith.jobs.loader for exactly what "dynamic import" does and does
+    not contain.
+    """
+
+    type: Literal["python_job"]
+    file: str
+    entrypoint: str = "run"
+    parameters: dict[str, Scalar] = Field(default_factory=dict)
+
+
 SourceConfig = CsvSourceConfig | SqlSourceConfig
 DestinationConfig = CsvDestinationConfig | SqlDestinationConfig
-TransformationConfig = SelectConfig | RenameConfig | DropNullsConfig | FilterConfig
+TransformationConfig = (
+    SelectConfig | RenameConfig | DropNullsConfig | FilterConfig | PythonJobConfig
+)
 
 
 class PipelineConfig(BaseModel):

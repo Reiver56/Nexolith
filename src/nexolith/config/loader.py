@@ -7,8 +7,9 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from nexolith.config.models import PipelineConfig, SqlSourceConfig
+from nexolith.config.models import PipelineConfig, PythonJobConfig, SqlSourceConfig
 from nexolith.exceptions import ConfigurationError
+from nexolith.jobs import load_job_module, resolve_entrypoint
 from nexolith.types import Scalar
 
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -71,7 +72,41 @@ def load_pipeline(
         raise ConfigurationError("Invalid pipeline configuration:\n" + "\n".join(errors)) from exc
     _resolve_query_file(config, path.parent)
     _resolve_parameters(config, parameter_overrides)
+    _resolve_python_jobs(config, path.parent)
     return config
+
+
+def _resolve_python_jobs(config: PipelineConfig, base_dir: Path) -> None:
+    """Resolve every `python_job` (NXL-83) step's `file` relative to the
+    pipeline YAML's own directory (same convention as `query_file`/DAG
+    `pipeline:` references), confirm the file exists, and confirm the
+    declared `entrypoint` exists and is callable -- without calling it.
+    Mutates `file` to the resolved absolute path so execution-time re-import
+    (nexolith.transformations.python_job.PythonJob.apply) is cwd-independent
+    too.
+
+    This necessarily imports the job file once here, at load time (running
+    its own top-level code, exactly as a normal Python import would -- see
+    nexolith.jobs.loader's docstring), and again at execution time when the
+    step actually runs. Accepted deliberately: catching a missing/misnamed
+    entrypoint at `nexolith validate` time, before any pipeline runs, is
+    worth one extra import of a file users are expected to keep import-safe
+    (ADR-7: trusted-local-code, no sandboxing -- an import happening twice
+    is a cost, not a new risk).
+    """
+    for step in config.transformations:
+        if not isinstance(step, PythonJobConfig):
+            continue
+        job_path = Path(step.file)
+        if not job_path.is_absolute():
+            job_path = base_dir / job_path
+        if not job_path.is_file():
+            raise ConfigurationError(
+                f"Python job file not found: {job_path}. Check the path and try again."
+            )
+        module = load_job_module(job_path)
+        resolve_entrypoint(module, step.entrypoint, job_path)
+        step.file = str(job_path)
 
 
 def _resolve_parameters(config: PipelineConfig, overrides: Mapping[str, Scalar] | None) -> None:
