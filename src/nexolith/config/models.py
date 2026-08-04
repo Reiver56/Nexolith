@@ -20,12 +20,23 @@ class SqlSourceConfig(ComponentConfig):
     type: Literal["sqlite", "postgresql"]
     connection_url: str
     query: str | None = None
+    # query_file (NXL-81): an alternative to inline `query`, resolved relative
+    # to the pipeline YAML's own directory -- same convention as the DAG
+    # format's `pipeline:` paths. Resolution and existence/readability
+    # checks happen in `nexolith.config.loader.load_pipeline` (mirroring how
+    # DAG pipeline references are resolved in the DAG validator, not the
+    # model itself), which then populates `query` with the file's contents
+    # so every downstream consumer keeps reading the same `query` field
+    # regardless of which one the user wrote.
+    query_file: str | None = None
     table: str | None = None
 
     @model_validator(mode="after")
     def require_query_or_table(self) -> "SqlSourceConfig":
-        if not self.query and not self.table:
-            raise ValueError("either 'query' or 'table' is required")
+        if self.query and self.query_file:
+            raise ValueError("'query' and 'query_file' are mutually exclusive; specify only one")
+        if not self.query and not self.query_file and not self.table:
+            raise ValueError("either 'query', 'query_file', or 'table' is required")
         return self
 
 
