@@ -55,6 +55,21 @@ class DagTaskConfig(BaseModel):
         return self
 
 
+class DagTriggerConfig(BaseModel):
+    """trigger (NXL-85): cross-DAG triggers -- a DAG's completion starts
+    another DAG, alongside or instead of interval scheduling. Only
+    `on_success_of` exists: the acceptance criteria asks for
+    success-triggers-downstream, the minimal set, not `on_failure_of`/
+    `on_completion_of` -- not built speculatively. A list, since a DAG can
+    have more than one upstream trigger source, each independently capable
+    of triggering it (the scheduler evaluates each on its own -- see
+    nexolith.scheduler.daemon).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    on_success_of: list[str] = Field(min_length=1)
+
+
 class DagConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1)
@@ -68,6 +83,16 @@ class DagConfig(BaseModel):
     # the acceptance criteria asks for documented justification before
     # adding one, and none has been needed yet.
     on_failure: Literal["skip", "block"] = "skip"
+    # trigger (NXL-85): declared on the downstream DAG, naming upstream
+    # DAG(s) by name -- not validated for existence here (a DAG file can't
+    # know what other DAGs the system knows about; an unknown/never-run
+    # upstream name is simply never satisfied, a benign no-op, not an
+    # error). Read fresh from this file on every scheduler poll tick
+    # (nexolith.scheduler.daemon._cross_dag_trigger_reactions), not
+    # persisted as its own config in the state store -- unlike `schedule`/
+    # `enabled`, which register_dag()'s own docstring already anticipated
+    # being settable independently of the file by some other mechanism.
+    trigger: DagTriggerConfig | None = None
 
     @model_validator(mode="after")
     def validate_task_graph_shape(self) -> "DagConfig":
@@ -87,6 +112,9 @@ class DagConfig(BaseModel):
                 raise ValueError(
                     f"task '{task.name}' depends_on unknown task(s): {', '.join(unknown)}"
                 )
+
+        if self.trigger is not None and self.name in self.trigger.on_success_of:
+            raise ValueError(f"DAG '{self.name}' cannot list itself as its own trigger source")
         return self
 
     @classmethod

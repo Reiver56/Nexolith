@@ -21,9 +21,16 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"schema_version", "dags", "dag_runs", "task_runs", "task_attempts"} <= tables
+        assert {
+            "schema_version",
+            "dags",
+            "dag_runs",
+            "task_runs",
+            "task_attempts",
+            "dag_trigger_reactions",
+        } <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
         conn.close()
     finally:
         store.close()
@@ -39,15 +46,15 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(3,)]
+    assert rows == [(4,)]
 
 
 def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
     """A database created before the 'skipped' status existed (schema_version
-    1) must upgrade cleanly on next open, all the way through schema_version
-    3: existing task_runs rows survive both rebuild-under-a-new-name
-    migrations, and both the 'skipped' and 'blocked' statuses become usable
-    immediately after.
+    1) must upgrade cleanly on next open, all the way through the current
+    schema_version: existing task_runs rows survive both rebuild-under-a-
+    new-name migrations, and both the 'skipped' and 'blocked' statuses
+    become usable immediately after.
     """
     db_path = tmp_path / "state.db"
     conn = sqlite3.connect(str(db_path))
@@ -99,8 +106,10 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
 
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()
-    assert version == 3
+    assert version == 4
+    assert "dag_trigger_reactions" in tables
 
 
 def test_register_and_read_back_a_dag(tmp_path: Path) -> None:
@@ -406,3 +415,89 @@ def test_a_reader_is_not_blocked_by_an_uncommitted_writer(tmp_path: Path) -> Non
     finally:
         writer.close()
         reader.close()
+
+
+def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Path) -> None:
+    """A database left at schema_version 3 (before dag_trigger_reactions
+    existed, NXL-85) must upgrade cleanly: existing rows survive, and the
+    new table becomes usable immediately after.
+    """
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (3);
+        CREATE TABLE dags (
+            name TEXT PRIMARY KEY, source_path TEXT NOT NULL, schedule TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE dag_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, dag_name TEXT NOT NULL REFERENCES dags(name),
+            status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+            trigger_reason TEXT NOT NULL, on_failure TEXT NOT NULL DEFAULT 'skip',
+            started_at TEXT NOT NULL, ended_at TEXT, error TEXT
+        );
+        CREATE TABLE task_runs (
+            dag_run_id INTEGER NOT NULL REFERENCES dag_runs(id), task_name TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK (status IN
+                    ('pending', 'running', 'succeeded', 'failed', 'skipped', 'blocked')),
+            started_at TEXT, ended_at TEXT, error TEXT,
+            PRIMARY KEY (dag_run_id, task_name)
+        );
+        CREATE TABLE task_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, dag_run_id INTEGER NOT NULL,
+            task_name TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+            started_at TEXT NOT NULL, ended_at TEXT, error TEXT,
+            FOREIGN KEY (dag_run_id, task_name) REFERENCES task_runs(dag_run_id, task_name)
+        );
+        INSERT INTO dags VALUES ('upstream', 'up.yaml', NULL, 1, 't0', 't0');
+        INSERT INTO dags VALUES ('downstream', 'down.yaml', NULL, 1, 't0', 't0');
+        INSERT INTO dag_runs
+            VALUES (1, 'upstream', 'succeeded', 'manual', 'skip', 't0', 't1', NULL);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = StateStore(db_path)
+    try:
+        run = store.get_dag_run(1)
+        assert run is not None
+        assert run.status is DagRunStatus.SUCCEEDED  # pre-existing row preserved
+
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") is None
+        store.record_trigger_reaction("downstream", "upstream", 1)
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") == 1
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(str(db_path))
+    version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    conn.close()
+    assert version == 4
+
+
+def test_record_trigger_reaction_upserts_in_place(tmp_path: Path) -> None:
+    """One row per (downstream, upstream) relationship, not one per
+    reaction event -- recording a second reaction updates the same row
+    rather than accumulating history the scheduler would otherwise have to
+    aggregate on every tick.
+    """
+    store = make_store(tmp_path)
+    try:
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") is None
+
+        store.record_trigger_reaction("downstream", "upstream", 1)
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") == 1
+
+        store.record_trigger_reaction("downstream", "upstream", 2)
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") == 2
+
+        # A different downstream reacting to the same upstream is a wholly
+        # separate relationship.
+        assert store.get_last_reacted_upstream_run_id("other_downstream", "upstream") is None
+    finally:
+        store.close()

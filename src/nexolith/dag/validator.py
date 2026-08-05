@@ -43,22 +43,18 @@ def _detect_cycle(tasks: list[DagTaskConfig]) -> list[str] | None:
     return None
 
 
-def load_dag(path: Path) -> DagConfig:
-    """Parse and fully validate a DAG file: YAML syntax, DAG-level structure
-    (non-empty, unique task names, no self-references, no dangling
-    depends_on targets -- all via DagConfig's own Pydantic validation),
-    cycle detection, and -- for every referenced pipeline -- that the file
-    exists and is individually valid. That last check reuses
-    `nexolith.config.load_pipeline` (the same function
-    `PipelineApplication.validate_pipeline()` calls) rather than
-    reimplementing pipeline validation; a referenced pipeline's own
-    `ConfigurationError` is preserved as the cause and folded into a
-    DAG-level message naming the task and file it came from.
-
-    `pipeline:` paths are resolved relative to the DAG file's own directory
-    (unless already absolute), so a DAG file and the pipelines it
-    references can be moved together as a unit, independent of the
-    caller's working directory.
+def read_dag_config(path: Path) -> DagConfig:
+    """Parse and structurally validate a DAG file -- YAML syntax, DAG-level
+    structure (non-empty, unique task names, no self-references, no
+    dangling `depends_on` targets, no self-triggering `trigger:`), all via
+    `DagConfig`'s own Pydantic validation -- WITHOUT `load_dag()`'s heavier
+    checks (cycle detection, and validating every referenced pipeline/
+    script, which can import a `python_job` file). Used by
+    `nexolith.scheduler.daemon` to cheaply read a DAG's own `trigger:`
+    declaration on every poll tick (NXL-85): a full `load_dag()` every few
+    seconds for every registered DAG would repeat real, sometimes-expensive
+    work (and side effects) that only actually matter once, at `nexolith
+    validate`/`run` time.
     """
     if not path.is_file():
         raise ConfigurationError(f"DAG file not found: {path}. Check the path and try again.")
@@ -76,8 +72,25 @@ def load_dag(path: Path) -> DagConfig:
         raise ConfigurationError(f"Invalid YAML in {path}{location}.") from exc
     if not isinstance(document, dict):
         raise ConfigurationError("DAG YAML must contain a mapping at its root")
+    return _validate_structure(document)
 
-    dag = _validate_structure(document)
+
+def load_dag(path: Path) -> DagConfig:
+    """Parse and fully validate a DAG file: everything `read_dag_config()`
+    already checks, plus cycle detection and -- for every referenced
+    pipeline -- that the file exists and is individually valid. That last
+    check reuses `nexolith.config.load_pipeline` (the same function
+    `PipelineApplication.validate_pipeline()` calls) rather than
+    reimplementing pipeline validation; a referenced pipeline's own
+    `ConfigurationError` is preserved as the cause and folded into a
+    DAG-level message naming the task and file it came from.
+
+    `pipeline:` paths are resolved relative to the DAG file's own directory
+    (unless already absolute), so a DAG file and the pipelines it
+    references can be moved together as a unit, independent of the
+    caller's working directory.
+    """
+    dag = read_dag_config(path)
     _check_for_cycles(dag)
     _validate_referenced_pipelines(dag, path.parent)
     return dag

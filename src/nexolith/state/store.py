@@ -156,6 +156,33 @@ _MIGRATIONS: list[tuple[int, str]] = [
             ON task_attempts(dag_run_id, task_name);
         """,
     ),
+    (
+        4,
+        """
+        -- Cross-DAG triggers (NXL-85). The trigger *declaration* (which
+        -- upstream DAGs, by name) lives in the downstream DAG's own YAML
+        -- file, re-read fresh on every scheduler poll tick -- not
+        -- duplicated into the store. What genuinely needs to be
+        -- persisted, and can't be derived from anything else, is
+        -- *reaction state*: for one (downstream, upstream) pair, the id
+        -- of the most recent upstream dag_runs row this downstream has
+        -- already triggered off of. Without it the scheduler could not
+        -- tell "upstream has a new completed run I haven't reacted to"
+        -- from "upstream's last completion already triggered me" --
+        -- a timestamp comparison alone can't distinguish those (a
+        -- successful run's started_at doesn't change after the fact, but
+        -- neither does knowing IF this downstream already reacted to it).
+        -- One row per relationship (not per reaction event): the latest
+        -- reacted run id is all due-ness evaluation ever needs, so this
+        -- upserts in place rather than growing an unbounded history table.
+        CREATE TABLE IF NOT EXISTS dag_trigger_reactions (
+            downstream_dag_name TEXT NOT NULL,
+            upstream_dag_name TEXT NOT NULL,
+            last_reacted_run_id INTEGER NOT NULL,
+            PRIMARY KEY (downstream_dag_name, upstream_dag_name)
+        );
+        """,
+    ),
 ]
 
 
@@ -426,6 +453,39 @@ class StateStore:
             (dag_run_id,),
         ).fetchall()
         return [_task_attempt_record(row) for row in rows]
+
+    # -- Cross-DAG trigger reactions (schema_version 4, NXL-85) --------------
+
+    def get_last_reacted_upstream_run_id(
+        self, downstream_dag_name: str, upstream_dag_name: str
+    ) -> int | None:
+        """None means this (downstream, upstream) relationship has never
+        triggered a run -- either it's new, or upstream has never
+        completed successfully yet.
+        """
+        row = self._conn.execute(
+            """
+            SELECT last_reacted_run_id FROM dag_trigger_reactions
+            WHERE downstream_dag_name = ? AND upstream_dag_name = ?
+            """,
+            (downstream_dag_name, upstream_dag_name),
+        ).fetchone()
+        return row["last_reacted_run_id"] if row is not None else None
+
+    def record_trigger_reaction(
+        self, downstream_dag_name: str, upstream_dag_name: str, upstream_run_id: int
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO dag_trigger_reactions
+                    (downstream_dag_name, upstream_dag_name, last_reacted_run_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(downstream_dag_name, upstream_dag_name) DO UPDATE SET
+                    last_reacted_run_id = excluded.last_reacted_run_id
+                """,
+                (downstream_dag_name, upstream_dag_name, upstream_run_id),
+            )
 
     # -- Queries ------------------------------------------------------------
 
