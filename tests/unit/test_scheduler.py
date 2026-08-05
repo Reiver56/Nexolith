@@ -638,3 +638,203 @@ tasks:
         assert scheduler.tick() == []  # no schedule and no trigger declared -- never due
     finally:
         store.close()
+
+
+# -- NXL-86: DAG priority resolves contention within one tick's due set -----
+
+
+def write_priority_dag(tmp_path: Path, *, name: str, priority: str | None = None) -> Path:
+    """A DAG file whose only content that matters here is `priority:` --
+    its task's `pipeline:` never has to point at a real file, since
+    `tick()`'s own due-ness/priority read (`read_dag_config`) never
+    validates referenced pipelines, only `load_dag()` does.
+    """
+    dag_path = tmp_path / f"{name}.yaml"
+    priority_line = f"priority: {priority}\n" if priority is not None else ""
+    dag_path.write_text(
+        f"""
+name: {name}
+{priority_line}tasks:
+  - name: only
+    pipeline: unused.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+    return dag_path
+
+
+def test_multiple_due_dags_execute_in_priority_order(tmp_path: Path) -> None:
+    """high before normal before low, proven via an explicit execution-
+    order log (make_fake_execute's `calls`) -- not just "doesn't crash".
+    Registered in an order that does not match priority order, so a
+    passing result can't be an accident of registration/iteration order.
+    """
+    store = make_store(tmp_path)
+    try:
+        low_path = write_priority_dag(tmp_path, name="low-dag", priority="low")
+        normal_path = write_priority_dag(tmp_path, name="normal-dag", priority="normal")
+        high_path = write_priority_dag(tmp_path, name="high-dag", priority="high")
+        critical_path = write_priority_dag(tmp_path, name="critical-dag", priority="critical")
+
+        store.register_dag("low-dag", low_path, "1s", enabled=True)
+        store.register_dag("critical-dag", critical_path, "1s", enabled=True)
+        store.register_dag("normal-dag", normal_path, "1s", enabled=True)
+        store.register_dag("high-dag", high_path, "1s", enabled=True)
+
+        calls: list[str] = []
+        scheduler = Scheduler(store, execute=make_fake_execute(store, calls))
+
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 4
+        assert calls == [str(critical_path), str(high_path), str(normal_path), str(low_path)]
+    finally:
+        store.close()
+
+
+def test_equal_priority_dags_tie_break_by_name_deterministically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        paths = {}
+        for name in ("charlie", "alpha", "bravo"):
+            paths[name] = write_priority_dag(tmp_path, name=name, priority="normal")
+            store.register_dag(name, paths[name], "1s", enabled=True)
+
+        clock = Clock(datetime.now(UTC))
+        monkeypatch.setattr("nexolith.state.store._now", lambda: clock.now().isoformat())
+        expected = [str(paths["alpha"]), str(paths["bravo"]), str(paths["charlie"])]
+
+        calls: list[str] = []
+        scheduler = Scheduler(store, execute=make_fake_execute(store, calls), now=clock.now)
+        scheduler.tick()
+        assert calls == expected
+
+        # Repeated independently (a fresh due-set decision, not a cached
+        # order) to confirm the tie-break is consistent, not incidental.
+        calls.clear()
+        clock.advance(timedelta(seconds=2))
+        scheduler.tick()
+        assert calls == expected
+    finally:
+        store.close()
+
+
+def test_dag_with_no_declared_priority_sorts_exactly_like_normal_priority(
+    tmp_path: Path,
+) -> None:
+    """Regression for Step 2's confirmed "today's behavior": before this
+    story, `list_dags()`'s own `ORDER BY name` was the only ordering that
+    ever existed, since tick() evaluated and executed each DAG inline, one
+    at a time, in that query's order. A DAG that never declares `priority:`
+    must default to exactly that -- proven here with an explicit
+    execution-order log across DAGs that mix "no priority: line at all"
+    with an explicit "priority: normal", which must be indistinguishable.
+    """
+    store = make_store(tmp_path)
+    try:
+        paths = {}
+        for name in ("bravo", "alpha"):
+            paths[name] = write_priority_dag(tmp_path, name=name, priority=None)
+            store.register_dag(name, paths[name], "1s", enabled=True)
+        paths["charlie"] = write_priority_dag(tmp_path, name="charlie", priority="normal")
+        store.register_dag("charlie", paths["charlie"], "1s", enabled=True)
+
+        calls: list[str] = []
+        scheduler = Scheduler(store, execute=make_fake_execute(store, calls))
+
+        scheduler.tick()
+
+        assert calls == [str(paths["alpha"]), str(paths["bravo"]), str(paths["charlie"])]
+    finally:
+        store.close()
+
+
+def test_priority_ordering_applies_across_interval_and_cross_dag_due_dags(
+    tmp_path: Path,
+) -> None:
+    """Two DAGs become due in the same tick through two different
+    mechanisms (NXL-85's cross-DAG trigger and plain interval scheduling)
+    with priorities that invert what plain alphabetical order would give --
+    proving priority ordering is applied uniformly to the whole due set,
+    regardless of which condition made each member of it due.
+    """
+    from nexolith.dag import execute_dag
+
+    source = tmp_path / "input.csv"
+    source.write_text("id,status\n1,ready\n", encoding="utf-8")
+    upstream_pipeline = tmp_path / "upstream_pipeline.yaml"
+    upstream_pipeline.write_text(
+        f"""
+name: upstream_pipeline
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "upstream_out.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    upstream_dag_path = tmp_path / "upstream_dag.yaml"
+    upstream_dag_path.write_text(
+        """
+name: upstream
+tasks:
+  - name: only
+    pipeline: upstream_pipeline.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+    # "a-interval" would sort before "z-downstream" by name alone, and it
+    # becomes due first (interval, no prior run) -- but it's low priority
+    # against the downstream's critical, so priority must still win.
+    interval_path = tmp_path / "a-interval.yaml"
+    interval_path.write_text(
+        """
+name: a-interval
+priority: low
+schedule: "1h"
+tasks:
+  - name: only
+    pipeline: unused.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+    downstream_path = tmp_path / "z-downstream.yaml"
+    downstream_path.write_text(
+        """
+name: z-downstream
+priority: critical
+trigger:
+  on_success_of: [upstream]
+tasks:
+  - name: only
+    pipeline: unused.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("a-interval", interval_path, "1h", enabled=True)
+        store.register_dag("z-downstream", downstream_path, None, enabled=True)
+
+        execute_dag(upstream_dag_path, store)  # real, outside the scheduler
+
+        calls: list[str] = []
+        scheduler = Scheduler(store, execute=make_fake_execute(store, calls))
+
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 2
+        assert calls == [str(downstream_path), str(interval_path)]
+    finally:
+        store.close()

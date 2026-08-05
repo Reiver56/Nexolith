@@ -16,6 +16,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 from nexolith.dag.executor import execute_dag
 from nexolith.dag.validator import read_dag_config
@@ -24,6 +25,20 @@ from nexolith.scheduler.interval import parse_interval
 from nexolith.state import DagRecord, DagRunStatus, StateStore
 
 logger = logging.getLogger(__name__)
+
+# priority (NXL-86): rank order for resolving contention when multiple DAGs
+# are due in the same tick -- higher runs first. Lives here, not on
+# DagConfig itself (see that model's own `priority` field comment), since
+# it's specifically about scheduling order. "normal" is the default and
+# sorts identically to every other DAG that never set a priority, which is
+# what keeps unset priority equivalent to today's plain by-name ordering.
+_PRIORITY_RANK: dict[str, int] = {"low": 0, "normal": 1, "high": 2, "critical": 3}
+
+
+class _DueDag(NamedTuple):
+    dag_record: DagRecord
+    priority: str
+    satisfied_upstreams: list[tuple[str, int]]
 
 
 def _default_execute(path: Path, store: StateStore) -> int:
@@ -55,10 +70,11 @@ class Scheduler:
 
     def tick(self) -> list[int]:
         """One evaluation pass over every registered DAG. Returns the
-        dag_run ids newly triggered this pass (empty if nothing was due).
-        A malformed schedule string, or a cross-DAG `trigger:` declaration
-        that can't be read, on one DAG is logged and skipped -- neither may
-        ever take down the whole daemon over one bad value.
+        dag_run ids newly triggered this pass, in the order they were
+        actually executed (empty if nothing was due). A malformed schedule
+        string, or a cross-DAG `trigger:`/`priority:` declaration that
+        can't be read, on one DAG is logged and skipped -- neither may ever
+        take down the whole daemon over one bad value.
 
         Two independent due-ness conditions (NXL-85): an interval schedule
         (`dag_record.schedule`, unchanged from v0.3.2 story 4) and cross-DAG
@@ -69,8 +85,23 @@ class Scheduler:
         before either condition is even evaluated, so it prevents duplicate
         concurrent execution the same way regardless of which condition (or
         both at once) made a DAG due.
+
+        Two-phase (NXL-86): every due-ness decision for every registered
+        DAG is made first, then the whole due set is sorted by priority
+        (`_PRIORITY_RANK`, higher first, tied DAGs by name) before any of
+        them actually execute -- resolving contention needs to see the
+        full batch to order it, which a single interleaved
+        evaluate-then-execute loop (the pre-NXL-86 shape) can't do. One
+        real consequence, not papered over: a DAG whose cross-DAG trigger
+        depends on another DAG that becomes due in this same tick no longer
+        sees that other DAG's completion until the *next* tick -- due-ness
+        for the whole batch is now decided before any execution happens,
+        where before, an earlier-executed DAG's fresh completion was
+        already visible to a later one evaluated further down the same
+        loop. Accepted: the acceptance criteria asks for a real, whole-batch
+        priority ordering, which requires exactly this.
         """
-        triggered: list[int] = []
+        due: list[_DueDag] = []
         running_dag_names = {run.dag_name for run in self._store.list_incomplete_dag_runs()}
         for dag_record in self._store.list_dags():
             if not dag_record.enabled or dag_record.name in running_dag_names:
@@ -89,15 +120,23 @@ class Scheduler:
                 else:
                     interval_due = self._is_due(dag_record, interval)
 
-            cross_dag_due, satisfied_upstreams = self._cross_dag_trigger_reactions(dag_record)
+            priority, cross_dag_due, satisfied_upstreams = self._read_priority_and_trigger_due(
+                dag_record
+            )
 
-            if not (interval_due or cross_dag_due):
-                continue
+            if interval_due or cross_dag_due:
+                due.append(_DueDag(dag_record, priority, satisfied_upstreams))
 
-            run_id = self._execute(Path(dag_record.source_path), self._store)
+        due.sort(key=lambda item: (-_PRIORITY_RANK[item.priority], item.dag_record.name))
+
+        triggered: list[int] = []
+        for item in due:
+            run_id = self._execute(Path(item.dag_record.source_path), self._store)
             triggered.append(run_id)
-            for upstream_name, upstream_run_id in satisfied_upstreams:
-                self._store.record_trigger_reaction(dag_record.name, upstream_name, upstream_run_id)
+            for upstream_name, upstream_run_id in item.satisfied_upstreams:
+                self._store.record_trigger_reaction(
+                    item.dag_record.name, upstream_name, upstream_run_id
+                )
         return triggered
 
     def _is_due(self, dag_record: DagRecord, interval: timedelta) -> bool:
@@ -107,41 +146,44 @@ class Scheduler:
         last_started = datetime.fromisoformat(latest.started_at)
         return self._now() - last_started >= interval
 
-    def _cross_dag_trigger_reactions(
+    def _read_priority_and_trigger_due(
         self, dag_record: DagRecord
-    ) -> tuple[bool, list[tuple[str, int]]]:
-        """Whether `dag_record` has at least one upstream DAG (declared via
-        its own `trigger.on_success_of`) with a completed, successful run
-        this downstream hasn't reacted to yet (NXL-85) -- and every
-        (upstream_name, upstream_run_id) pair newly satisfied at this exact
-        check. `tick()` marks all of them reacted at once when it triggers,
-        rather than just the first, so two upstreams completing close
-        together doesn't leave one still "unreacted" and force an
-        immediate, redundant re-trigger on the very next tick -- one
-        triggered run covers whatever combination of upstream completions
-        prompted it.
+    ) -> tuple[str, bool, list[tuple[str, int]]]:
+        """Reads `dag_record`'s own file once for two purposes at once
+        (NXL-85's `trigger.on_success_of` and NXL-86's `priority`, both
+        purely declarative, read fresh every tick, never persisted to the
+        store -- see DagConfig's own field comments): whether it has at
+        least one upstream DAG with a completed, successful run this
+        downstream hasn't reacted to yet, and its declared priority
+        ("normal" if the file can't be read at all, same as an unset
+        priority). Every (upstream_name, upstream_run_id) pair newly
+        satisfied at this exact check is returned too -- `tick()` marks all
+        of them reacted at once when it executes this DAG, rather than just
+        the first, so two upstreams completing close together doesn't leave
+        one still "unreacted" and force an immediate, redundant re-trigger
+        on the very next tick.
 
         A DAG file that doesn't exist is silently treated as having no
-        cross-DAG trigger -- most DAGs never declare one at all (including
-        every interval-only DAG in this test suite's own fixtures, several
-        of which use paths that were never meant to exist on disk), and
-        warning about that on every tick would be pure noise. A file that
-        exists but fails to parse/validate is a real misconfiguration and
-        is logged, matching the malformed-interval-schedule precedent
-        above.
+        cross-DAG trigger and default priority -- most DAGs never declare
+        either (including every interval-only DAG in this test suite's own
+        fixtures, several of which use paths that were never meant to exist
+        on disk), and warning about that on every tick would be pure noise.
+        A file that exists but fails to parse/validate is a real
+        misconfiguration and is logged, matching the malformed-interval-
+        schedule precedent above.
         """
         source_path = Path(dag_record.source_path)
         if not source_path.is_file():
-            return False, []
+            return "normal", False, []
         try:
             dag_config = read_dag_config(source_path)
         except ConfigurationError as exc:
             logger.warning(
                 "Skipping cross-DAG trigger check for DAG '%s': %s", dag_record.name, exc
             )
-            return False, []
+            return "normal", False, []
         if dag_config.trigger is None:
-            return False, []
+            return dag_config.priority, False, []
 
         satisfied: list[tuple[str, int]] = []
         for upstream_name in dag_config.trigger.on_success_of:
@@ -153,7 +195,7 @@ class Scheduler:
             )
             if last_reacted != latest_upstream.id:
                 satisfied.append((upstream_name, latest_upstream.id))
-        return bool(satisfied), satisfied
+        return dag_config.priority, bool(satisfied), satisfied
 
     def run(self, *, install_signal_handlers: bool = True, max_ticks: int | None = None) -> None:
         """Blocks until `stop()` is called (via a signal handler, another

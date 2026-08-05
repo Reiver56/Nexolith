@@ -105,6 +105,24 @@ class DagConfig(BaseModel):
     # persisted as its own config in the state store, unlike `schedule`
     # (above).
     trigger: DagTriggerConfig | None = None
+    # priority (NXL-86): resolves contention when multiple DAGs become due
+    # in the same poll tick -- higher priority runs first; it says nothing
+    # about how serious a failure is (that's severity, a separate later
+    # story, deliberately not conflated with this one even though both will
+    # live on DagConfig). An ordered Literal[str], not a Python enum.Enum:
+    # matches this exact model's own `on_failure` field precedent (a small,
+    # closed, YAML-declared set of options) rather than the runtime status
+    # enums in nexolith.state.models, a different category of value (DB rows
+    # with associated methods/comparisons, not a one-shot config choice).
+    # The rank ordering itself lives in nexolith.scheduler.daemon, since
+    # it's a scheduling-order concern, not a general config one. Default
+    # "normal": with every due DAG at the same priority, sorting by
+    # (priority, name) collapses to sorting by name alone -- today's exact
+    # ordering (nexolith.state.store.StateStore.list_dags() already orders
+    # by name), so a DAG that never sets this is completely unaffected.
+    # Read fresh from the file every tick, the same as `trigger` and for
+    # the same reason -- never persisted to the store.
+    priority: Literal["low", "normal", "high", "critical"] = "normal"
 
     @model_validator(mode="after")
     def validate_task_graph_shape(self) -> "DagConfig":
