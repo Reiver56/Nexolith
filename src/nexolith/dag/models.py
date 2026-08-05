@@ -83,15 +83,27 @@ class DagConfig(BaseModel):
     # the acceptance criteria asks for documented justification before
     # adding one, and none has been needed yet.
     on_failure: Literal["skip", "block"] = "skip"
+    # schedule (NXL-90): an interval string in the same format the
+    # scheduler daemon's own parser (nexolith.scheduler.interval,
+    # v0.3.2 story 4) already accepts, e.g. "5m". Format is validated with
+    # that exact parser at DAG-validation time (nexolith.dag.validator --
+    # not here, to avoid a nexolith.dag <-> nexolith.scheduler import cycle;
+    # see that module for why). `None` (the default) preserves today's
+    # behavior for any DAG that doesn't set it, cross-DAG-only DAGs (NXL-85)
+    # included. Populated into `dags.schedule` on a DAG's first registration
+    # only (nexolith.dag.executor.DagExecutor.run) -- editing `schedule:` in
+    # the file after that first run does not retroactively change an
+    # already-registered DAG's stored schedule, the same "never clobber"
+    # behavior that already applied before this field existed.
+    schedule: str | None = None
     # trigger (NXL-85): declared on the downstream DAG, naming upstream
     # DAG(s) by name -- not validated for existence here (a DAG file can't
     # know what other DAGs the system knows about; an unknown/never-run
     # upstream name is simply never satisfied, a benign no-op, not an
     # error). Read fresh from this file on every scheduler poll tick
     # (nexolith.scheduler.daemon._cross_dag_trigger_reactions), not
-    # persisted as its own config in the state store -- unlike `schedule`/
-    # `enabled`, which register_dag()'s own docstring already anticipated
-    # being settable independently of the file by some other mechanism.
+    # persisted as its own config in the state store, unlike `schedule`
+    # (above).
     trigger: DagTriggerConfig | None = None
 
     @model_validator(mode="after")

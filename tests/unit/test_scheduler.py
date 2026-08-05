@@ -473,3 +473,168 @@ def test_default_execute_uses_schedule_trigger_reason(
         assert run.trigger_reason == "schedule"
     finally:
         store.close()
+
+
+# -- NXL-90: a DAG-file-declared schedule, through the real loading path ----
+#
+# Every test above (and v0.3.2 story 4's own) writes a schedule straight
+# into the store via register_dag() -- often against a Path() that isn't
+# even a real file on disk -- which is precisely how it went unnoticed that
+# no real DAG YAML could ever declare a schedule at all (DagConfig had no
+# `schedule` field, and register_dag() was only ever called with
+# schedule=None). These tests instead write a real DAG file with a real
+# `schedule:` field and go through execute_dag() -- the same load_dag() +
+# DagExecutor.run() registration path production code uses -- to prove the
+# file's own value is what actually lands in the store and drives the
+# real, running scheduler.
+
+
+def write_scheduled_dag(tmp_path: Path, *, name: str, schedule: str) -> Path:
+    source = tmp_path / "input.csv"
+    source.write_text("id,status\n1,ready\n", encoding="utf-8")
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        f"""
+name: scheduled_pipeline
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "output.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path = tmp_path / "workflow.yaml"
+    dag_path.write_text(
+        f"""
+name: {name}
+schedule: "{schedule}"
+tasks:
+  - name: only
+    pipeline: pipeline.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+    return dag_path
+
+
+def test_a_dag_file_declared_schedule_is_registered_and_triggers_a_real_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nexolith.dag import execute_dag
+
+    dag_path = write_scheduled_dag(tmp_path, name="scheduled-dag", schedule="5m")
+
+    clock = Clock(datetime.now(UTC))
+    # Sync the store's own timestamps to the fake clock (same technique as
+    # test_not_yet_due_schedule_does_not_trigger) so the first real run's
+    # started_at lands on a timeline this test can deterministically
+    # advance, rather than needing to sleep 5 real minutes.
+    monkeypatch.setattr("nexolith.state.store._now", lambda: clock.now().isoformat())
+
+    store = make_store(tmp_path)
+    try:
+        # The real loading path: load_dag() validates `schedule: "5m"` with
+        # the real interval parser, then DagExecutor.run() registers the
+        # DAG using that file-declared value -- not one this test hands to
+        # register_dag() directly.
+        first_run_id = execute_dag(dag_path, store)
+        first_run = store.get_dag_run(first_run_id)
+        assert first_run is not None
+        assert first_run.status is DagRunStatus.SUCCEEDED
+
+        registered = store.get_dag("scheduled-dag")
+        assert registered is not None
+        assert registered.schedule == "5m"
+
+        scheduler = Scheduler(store, now=clock.now)  # real execute_dag, no injection
+
+        # Not due yet: the first run just happened.
+        assert scheduler.tick() == []
+
+        clock.advance(timedelta(minutes=5))
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 1
+        second_run = store.get_dag_run(triggered[0])
+        assert second_run is not None
+        assert second_run.dag_name == "scheduled-dag"
+        assert second_run.status is DagRunStatus.SUCCEEDED
+        assert second_run.trigger_reason == "schedule"
+        assert len(store.list_dag_runs("scheduled-dag")) == 2
+    finally:
+        store.close()
+
+
+def test_a_malformed_dag_file_declared_schedule_is_a_clear_validation_error(
+    tmp_path: Path,
+) -> None:
+    from nexolith.dag import execute_dag
+    from nexolith.exceptions import ConfigurationError
+
+    dag_path = write_scheduled_dag(tmp_path, name="broken-schedule-dag", schedule="5")
+
+    store = make_store(tmp_path)
+    try:
+        with pytest.raises(ConfigurationError, match="Invalid DAG schedule"):
+            execute_dag(dag_path, store)
+
+        # Never even reached registration -- the bad file never got a
+        # chance to poison the store with an unparseable schedule the
+        # scheduler would only fail on later, mid-tick.
+        assert store.get_dag("broken-schedule-dag") is None
+    finally:
+        store.close()
+
+
+def test_a_dag_without_a_declared_schedule_is_unaffected_by_this_fix(tmp_path: Path) -> None:
+    """A DAG that never sets `schedule:` (the cross-DAG-only case from the
+    previous story included) registers with schedule=None and is never
+    triggered by interval, exactly as before this fix -- schedule: is
+    purely additive.
+    """
+    from nexolith.dag import execute_dag
+
+    source = tmp_path / "input.csv"
+    source.write_text("id,status\n1,ready\n", encoding="utf-8")
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_path.write_text(
+        f"""
+name: unscheduled_pipeline
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {(tmp_path / "output.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path = tmp_path / "workflow.yaml"
+    dag_path.write_text(
+        """
+name: unscheduled-dag
+tasks:
+  - name: only
+    pipeline: pipeline.yaml
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+    store = make_store(tmp_path)
+    try:
+        execute_dag(dag_path, store)
+
+        registered = store.get_dag("unscheduled-dag")
+        assert registered is not None
+        assert registered.schedule is None
+
+        scheduler = Scheduler(store)
+        assert scheduler.tick() == []  # no schedule and no trigger declared -- never due
+    finally:
+        store.close()

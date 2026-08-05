@@ -72,7 +72,9 @@ def read_dag_config(path: Path) -> DagConfig:
         raise ConfigurationError(f"Invalid YAML in {path}{location}.") from exc
     if not isinstance(document, dict):
         raise ConfigurationError("DAG YAML must contain a mapping at its root")
-    return _validate_structure(document)
+    dag = _validate_structure(document)
+    _validate_schedule(dag)
+    return dag
 
 
 def load_dag(path: Path) -> DagConfig:
@@ -106,6 +108,34 @@ def _validate_structure(document: dict[str, Any]) -> DagConfig:
             prefix = f"{location}: " if location else ""
             errors.append(f"{prefix}{error['msg']}")
         raise ConfigurationError("Invalid DAG configuration:\n" + "\n".join(errors)) from exc
+
+
+def _validate_schedule(dag: DagConfig) -> None:
+    """Validate `schedule:` (NXL-90) with the scheduler daemon's own real
+    interval parser -- not a second implementation of the same format --
+    so a malformed value is a clear `nexolith validate`/`load_dag()` error,
+    never a runtime scheduler failure discovered only once a poll tick
+    actually tries to parse it.
+
+    The import is deliberately deferred to call time, not this module's
+    top level: `nexolith.scheduler.daemon` already imports
+    `nexolith.dag.executor`/`nexolith.dag.validator` at its own module
+    level (to call `execute_dag()`/`read_dag_config()`), so an eager
+    top-level `from nexolith.scheduler.interval import parse_interval`
+    here would make `nexolith.dag` and `nexolith.scheduler` import each
+    other -- a real circular import, not a hypothetical one (confirmed by
+    tracing the actual chain, not assumed). Deferring until this function
+    actually runs sidesteps it: by then both packages have long finished
+    their own top-level imports.
+    """
+    if dag.schedule is None:
+        return
+    from nexolith.scheduler.interval import parse_interval
+
+    try:
+        parse_interval(dag.schedule)
+    except ConfigurationError as exc:
+        raise ConfigurationError(f"Invalid DAG schedule: {exc}") from exc
 
 
 def _check_for_cycles(dag: DagConfig) -> None:

@@ -149,11 +149,15 @@ class DagExecutor:
         base_dir = path.parent
         if self._store.get_dag(dag.name) is None:
             # First time this DAG has been executed under this name: register
-            # it so dag_runs' foreign key to dags is satisfiable. An already
-            # -registered DAG (e.g. with a real schedule set by a later CLI
-            # story) is left untouched -- this must never clobber it back to
-            # an unscheduled registration on every run.
-            self._store.register_dag(dag.name, path, schedule=None)
+            # it so dag_runs' foreign key to dags is satisfiable, using the
+            # DAG file's own declared `schedule:` (NXL-90; already validated
+            # against the real interval format by load_dag()/read_dag_config()
+            # before dag ever reaches here) -- not always None as before that
+            # story. An already-registered DAG is left untouched on every
+            # subsequent run, same as always: this must never clobber a
+            # schedule back to whatever the file happened to say on this
+            # particular run, deliberate and unchanged by this fix.
+            self._store.register_dag(dag.name, path, schedule=dag.schedule)
 
         ordered = _topological_order(dag.tasks)
         dag_run_id = self._store.start_dag_run(
