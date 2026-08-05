@@ -7,7 +7,13 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from nexolith.config.models import PipelineConfig, PythonJobConfig, SqlSourceConfig
+from nexolith.config.models import (
+    CsvDestinationConfig,
+    CsvSourceConfig,
+    PipelineConfig,
+    PythonJobConfig,
+    SqlSourceConfig,
+)
 from nexolith.exceptions import ConfigurationError
 from nexolith.jobs import load_job_module, resolve_entrypoint
 from nexolith.types import Scalar
@@ -73,7 +79,32 @@ def load_pipeline(
     _resolve_query_file(config, path.parent)
     _resolve_parameters(config, parameter_overrides)
     _resolve_python_jobs(config, path.parent)
+    _resolve_csv_paths(config, path.parent)
     return config
+
+
+def _resolve_csv_paths(config: PipelineConfig, base_dir: Path) -> None:
+    """Resolve `CsvSourceConfig`/`CsvDestinationConfig` `path:` relative to
+    the pipeline YAML's own directory (NXL-89) -- the same convention
+    already established for `query_file`, `python_job`'s `file:`, and DAG
+    `pipeline:`/`script:`. Previously these paths resolved only against the
+    caller's cwd (a bug: `connectors/csv.py` takes `path:` exactly as
+    given, with no `base_dir` concept at all), inconsistent with every
+    other file-reference convention in the project. An absolute path is
+    left untouched either way.
+
+    No existence check here, unlike `query_file` -- that mirrors `path:`'s
+    own pre-fix behavior (never checked at load time) and `validate`'s own
+    documented "without reading or writing data" contract; only the base
+    the relative path resolves against changes, not when the file is
+    actually read.
+    """
+    for component in (config.source, config.destination):
+        if not isinstance(component, CsvSourceConfig | CsvDestinationConfig):
+            continue
+        candidate = Path(component.path)
+        if not candidate.is_absolute():
+            component.path = str(base_dir / candidate)
 
 
 def _resolve_python_jobs(config: PipelineConfig, base_dir: Path) -> None:

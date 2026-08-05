@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from nexolith.config import load_pipeline
-from nexolith.config.models import SqlSourceConfig
+from nexolith.config.models import CsvDestinationConfig, CsvSourceConfig, SqlSourceConfig
 from nexolith.exceptions import ConfigurationError
 
 
@@ -73,7 +73,11 @@ def test_environment_variable_substitution(
     prefix_lines = prefix.splitlines()
     prefix_lines[-1] = "  path: ${NEXOLITH_TEST_PATH}"
     path.write_text("\n".join(prefix_lines) + "\ntransformations:" + suffix, encoding="utf-8")
-    assert load_pipeline(path).source.path == "resolved.csv"  # type: ignore[union-attr]
+    # NXL-89: CSV paths now resolve relative to the pipeline YAML's own
+    # directory (here, tmp_path) after env substitution, the same as every
+    # other file-reference convention -- no longer left as the raw
+    # ${VAR}-substituted string.
+    assert Path(load_pipeline(path).source.path) == tmp_path / "resolved.csv"  # type: ignore[union-attr]
 
 
 def _make_sqlite_db(tmp_path: Path) -> Path:
@@ -407,3 +411,82 @@ destination:
     result = DefaultPipelineRunner().run(config)
     assert result.status is ExecutionStatus.SUCCEEDED
     assert result.rows_read == 2
+
+
+# -- NXL-89: CsvSource/CsvDestination path resolution ------------------------
+
+
+def test_csv_paths_resolve_relative_to_pipeline_directory_not_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors the exact pattern already used to prove query_file resolution
+    (story 1): load from an absolute pipeline path while cwd is a completely
+    unrelated directory, and confirm both source and destination CSV paths
+    resolve against the pipeline YAML's own directory, not cwd."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    source = project_dir / "input.csv"
+    source.write_text("id,name\n1,Ada\n2,Grace\n", encoding="utf-8")
+    pipeline_path = project_dir / "pipeline.yaml"
+    pipeline_path.write_text(
+        """
+name: csv_relative
+source:
+  type: csv
+  path: input.csv
+transformations: []
+destination:
+  type: csv
+  path: output.csv
+""",
+        encoding="utf-8",
+    )
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    config = load_pipeline(pipeline_path)
+
+    assert isinstance(config.source, CsvSourceConfig)
+    assert isinstance(config.destination, CsvDestinationConfig)
+    assert Path(config.source.path) == source
+    assert Path(config.destination.path) == project_dir / "output.csv"
+
+    from nexolith.execution import DefaultPipelineRunner
+    from nexolith.models import ExecutionStatus
+
+    result = DefaultPipelineRunner().run(config)
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.rows_read == 2
+    assert (project_dir / "output.csv").is_file()
+    assert not (elsewhere / "output.csv").exists()
+
+
+def test_csv_absolute_paths_are_unaffected_by_the_relative_path_fix(tmp_path: Path) -> None:
+    source = tmp_path / "abs_input.csv"
+    source.write_text("id,name\n1,Ada\n", encoding="utf-8")
+    dest = tmp_path / "abs_output.csv"
+    pipeline_dir = tmp_path / "pipelines"
+    pipeline_dir.mkdir()
+    pipeline_path = pipeline_dir / "pipeline.yaml"
+    pipeline_path.write_text(
+        f"""
+name: csv_absolute
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {dest.as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+    config = load_pipeline(pipeline_path)
+
+    assert isinstance(config.source, CsvSourceConfig)
+    assert isinstance(config.destination, CsvDestinationConfig)
+    assert Path(config.source.path) == source
+    assert Path(config.destination.path) == dest

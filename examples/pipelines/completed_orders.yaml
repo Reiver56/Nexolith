@@ -2,7 +2,7 @@ name: completed_orders
 
 source:
   type: csv
-  path: examples/data/orders.csv
+  path: ../data/orders.csv
 
 transformations:
   - type: filter
@@ -17,4 +17,4 @@ transformations:
 
 destination:
   type: csv
-  path: build/completed_orders.csv
+  path: ../../build/completed_orders.csv

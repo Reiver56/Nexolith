@@ -2,8 +2,11 @@
 
 A worked example of a layered bronze/silver/gold pipeline pattern, starting from raw CSV
 ingestion, orchestrated as a single Nexolith DAG (NXL-84). Self-contained: CSV files only, no
-Docker, no database. Run everything from the **repository root** -- every path in this example
-is written relative to it, matching `examples/pipelines/`'s own existing convention.
+Docker, no database. Every CSV `path:` inside a pipeline YAML here is relative to that YAML's own
+directory (NXL-89) -- the same convention `query_file`/`python_job`'s `file:`/DAG
+`pipeline:`/`script:` already use -- so the `pipelines/` and `jobs/` directories are portable as a
+unit. The DAG itself (`dag.yaml`) is still invoked with a path relative to wherever you run
+Nexolith from, same as any other DAG file.
 
 ## What bronze/silver/gold mean here
 
@@ -32,33 +35,34 @@ aggregation query) -- there's nothing about the pattern itself that excludes it.
 ## How one layer's output becomes the next layer's input
 
 The convention this example confirms, using only what already exists -- no new engine
-capability: **a fixed, coordinated path**. Bronze's `destination.path` and silver's
-`source.path` are the literal same string (`examples/medallion/bronze/orders.csv`); silver's
-`destination.path` and gold's `silver_path` parameter are the same string again
-(`examples/medallion/silver/orders.csv`). The DAG's `depends_on` (`silver` depends on `bronze`,
+capability: **a fixed, coordinated path**. Bronze's `destination.path` (`../bronze/orders.csv`)
+and silver's `source.path` (also `../bronze/orders.csv`, both relative to `pipelines/`) name the
+same real file; silver's `destination.path` (`../silver/orders.csv`) and gold's `silver_path`
+parameter (`examples/medallion/silver/orders.csv`, relative to wherever the DAG itself is
+invoked from) name the same file again. The DAG's `depends_on` (`silver` depends on `bronze`,
 `gold` depends on `silver`) guarantees the producer always finishes writing before the consumer
 runs. Confirmed for real, not faked: the DAG below was actually executed end-to-end, and
 silver's own output file is what gold's script actually opened and aggregated -- see the
 Verification section.
 
-### A confirmed gap: CSV path resolution is not pipeline-directory-relative
+### A gap this example surfaced, since fixed (NXL-89)
 
-Building this convention for real surfaced a genuine inconsistency, not papered over here:
-`query_file` (NXL-81), `python_job`'s `file:` (NXL-83), and a DAG's `pipeline:`/`script:`
-(NXL-88) are all resolved **relative to the referencing YAML's own directory** -- move the
-directory, they still work. CSV (and SQL) source/destination `path:`/`connection_url` fields
-are **not**: `nexolith.connectors.csv.CsvSource`/`CsvDestination` take the given path exactly
-as written, resolved only against the process's current working directory (confirmed by reading
-`connectors/csv.py` -- no `base_dir` parameter exists anywhere in that path). That's precisely
-why this whole example is written with repo-root-relative paths and documented as needing to run
-from the repository root, rather than being movable as a self-contained unit the way a DAG file
-and its pipelines already are.
+Building this convention for real originally surfaced a genuine inconsistency: `query_file`
+(NXL-81), `python_job`'s `file:` (NXL-83), and a DAG's `pipeline:`/`script:` (NXL-88) all
+resolved relative to the referencing YAML's own directory, but CSV source/destination `path:`
+resolved only against the process's current working directory (`connectors/csv.py` had no
+`base_dir` concept at all) -- confirmed by reading the code, then reproduced for real by loading
+this exact example from an unrelated working directory and watching the read fail. Filed and
+fixed as NXL-89: `CsvSource`/`CsvDestination` paths now resolve relative to the pipeline YAML's
+own directory, exactly like the others. This example's own `bronze_orders.yaml`/
+`silver_orders.yaml` paths were rewritten (`examples/medallion/bronze/orders.csv` ->
+`../bronze/orders.csv`, etc.) as part of that fix -- the `pipelines/` directory is now genuinely
+portable, not just correct by cwd coincidence.
 
-**Follow-up scoped, not built here:** resolve CSV/SQL `path:` fields relative to the pipeline
-YAML's own directory (falling back to CWD only for an already-absolute path), the same way
-`query_file`/`python_job`'s `file:` already do. Deliberately not built in this story --
-the acceptance criteria asked to confirm a working convention or name a real gap, not to
-speculatively extend engine capability before confirming it's actually needed.
+A DAG task's `parameters:` (used here by the gold script for `silver_path`/`out_dir`) are
+arbitrary values with no Nexolith-side path resolution at all -- a script does its own I/O with
+whatever string it's given. That's unaffected by NXL-89 and unrelated to the CSV fix: it's why
+`dag.yaml`'s `silver_path`/`out_dir` stay relative to wherever the DAG itself is invoked from.
 
 ## Running it
 
