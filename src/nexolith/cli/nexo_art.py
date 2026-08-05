@@ -29,6 +29,12 @@ WHITE: tuple[int, int, int] = (0xFF, 0xFF, 0xFF)
 GREEN: tuple[int, int, int] = (0x57, 0xF2, 0x87)  # Discord green
 RED: tuple[int, int, int] = (0xED, 0x42, 0x45)  # Discord red
 DIM: tuple[int, int, int] = (0x8A, 0x8F, 0xA3)
+# Reserved specifically for DAG severity labeling (NXL-87, cli/runs_render.py)
+# -- distinct from RED above, which already means "this run failed" on the
+# same row; severity needs its own scale so "critical, failed" and "low,
+# failed" don't render identically. No amber/yellow tone existed in this
+# palette before this story (confirmed by reading this file, not assumed).
+AMBER: tuple[int, int, int] = (0xFA, 0xA6, 0x1A)
 
 _PALETTE: dict[str, tuple[int, int, int]] = {
     "B": BLURPLE,  # body

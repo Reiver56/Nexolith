@@ -70,6 +70,15 @@ class DagRunRecord:
     # database) so existing positional construction of this dataclass
     # elsewhere in the codebase keeps working unchanged.
     on_failure: str = "skip"
+    # The DAG's declared severity at the moment THIS run started
+    # (schema_version 5, NXL-87) -- same reasoning and same technique as
+    # on_failure above: snapshotted at run-start time, not read from the
+    # DAG file's current setting, so a past run's history stays accurate
+    # even if the file's severity changes later (unlike schedule/trigger/
+    # priority, deliberately read fresh every time -- severity answers
+    # "how serious was this failure", a question about a specific run in
+    # the past, not "what should happen right now").
+    severity: str = "medium"
 
 
 @dataclass(frozen=True, slots=True)

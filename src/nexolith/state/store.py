@@ -183,6 +183,23 @@ _MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        5,
+        """
+        -- DAG severity classification (NXL-87). Severity is recorded with
+        -- the run it belongs to -- the value declared in the DAG file at
+        -- the moment this run started, not whatever the file says now --
+        -- exactly the same reasoning schema_version 3 already established
+        -- for dag_runs.on_failure. Same technique too: a plain ALTER TABLE
+        -- ADD COLUMN, added in Python before this script runs (see
+        -- _add_dag_runs_severity_column_if_missing / _ensure_schema),
+        -- since SQLite has no "ADD COLUMN IF NOT EXISTS" and this
+        -- migration needs no table rebuild (no CHECK constraint here
+        -- either, matching on_failure's own precedent -- validity is
+        -- enforced by DagConfig's Literal[...] type before a value ever
+        -- reaches this column).
+        """,
+    ),
 ]
 
 
@@ -204,6 +221,14 @@ def _add_dag_runs_on_failure_column_if_missing(conn: sqlite3.Connection) -> None
         conn.execute("ALTER TABLE dag_runs ADD COLUMN on_failure TEXT NOT NULL DEFAULT 'skip'")
 
 
+def _add_dag_runs_severity_column_if_missing(conn: sqlite3.Connection) -> None:
+    """Same technique and same reason as `_add_dag_runs_on_failure_column_if_missing`
+    (schema_version 3) -- see that function's docstring."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(dag_runs)").fetchall()}
+    if "severity" not in columns:
+        conn.execute("ALTER TABLE dag_runs ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
     existing = conn.execute("SELECT version FROM schema_version").fetchone()
@@ -214,6 +239,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             continue
         if version == 3:
             _add_dag_runs_on_failure_column_if_missing(conn)
+        elif version == 5:
+            _add_dag_runs_severity_column_if_missing(conn)
         conn.executescript(script)
         with conn:
             if has_row:
@@ -303,6 +330,7 @@ class StateStore:
         *,
         trigger_reason: str,
         on_failure: str = "skip",
+        severity: str = "medium",
     ) -> int:
         """Record a DAG run starting, pre-creating every one of its tasks as
         'pending' in the same transaction. Recording the full expected task
@@ -317,16 +345,19 @@ class StateStore:
         file, so a past run's history stays accurate even if the file's
         policy changes later. Defaults to 'skip' -- today's only behavior
         before this field existed -- so a caller that doesn't pass it gets
-        exactly the pre-existing default.
+        exactly the pre-existing default. `severity` (NXL-87) is the same
+        idea for how serious a failure of this run is to the business --
+        snapshotted here, not read from the file later, for the same reason.
         """
         now = _now()
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO dag_runs (dag_name, status, trigger_reason, on_failure, started_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO dag_runs
+                    (dag_name, status, trigger_reason, on_failure, severity, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (dag_name, DagRunStatus.RUNNING.value, trigger_reason, on_failure, now),
+                (dag_name, DagRunStatus.RUNNING.value, trigger_reason, on_failure, severity, now),
             )
             dag_run_id = cursor.lastrowid
             assert dag_run_id is not None
@@ -556,6 +587,7 @@ def _dag_run_record(row: sqlite3.Row) -> DagRunRecord:
         ended_at=row["ended_at"],
         error=row["error"],
         on_failure=row["on_failure"],
+        severity=row["severity"],
     )
 
 

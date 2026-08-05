@@ -667,3 +667,95 @@ def test_retry_attempt_rendering_is_safe_under_a_real_non_utf8_encoding() -> Non
 
     assert "attempt 1" in output
     assert "attempt 2" in output
+
+
+# -- NXL-87: severity rendering -------------------------------------------
+
+
+def test_runs_show_distinguishes_a_failed_critical_dag_from_a_failed_low_one_styled() -> None:
+    """Both rows report the same run status (failed) -- what must differ is
+    the severity label and its color, so a critical failure visually stands
+    out from a low one, not just repeats the same red 'failed' text twice.
+    """
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    critical_run = DagRunRecord(
+        1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom", severity="critical"
+    )
+    low_run = DagRunRecord(
+        2, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom", severity="low"
+    )
+
+    critical_output = render_run_detail(critical_run, [], _STYLED_CONTEXT)
+    low_output = render_run_detail(low_run, [], _STYLED_CONTEXT)
+
+    critical_severity_line = next(
+        line for line in critical_output.splitlines() if "Severity" in line
+    )
+    low_severity_line = next(line for line in low_output.splitlines() if "Severity" in line)
+    # RED (critical) and DIM (low) are different ANSI color codes -- the
+    # two runs' "Severity: ..." lines must be colored differently, not just
+    # both contain the word "some color".
+    assert "\x1b[38;2;237;66;69m" in critical_severity_line  # RED
+    assert "\x1b[38;2;138;143;163m" in low_severity_line  # DIM
+    assert "\x1b[38;2;237;66;69m" not in low_severity_line
+    assert "\x1b[38;2;138;143;163m" not in critical_severity_line
+
+
+def test_runs_show_severity_is_plain_and_unambiguous_without_color() -> None:
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    critical_run = DagRunRecord(
+        1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom", severity="critical"
+    )
+    low_run = DagRunRecord(
+        2, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom", severity="low"
+    )
+
+    critical_output = render_run_detail(critical_run, [], _PLAIN_CONTEXT)
+    low_output = render_run_detail(low_run, [], _PLAIN_CONTEXT)
+
+    assert "\x1b[" not in critical_output
+    assert "\x1b[" not in low_output
+    # The "Severity: <word>" label already disambiguates without color --
+    # matching how "Policy: <word>" already does today, not a new bracketed
+    # marker (that convention is for bare, unlabeled symbols like the task
+    # markers; a labeled panel row doesn't need it too).
+    assert "Severity: critical" in critical_output
+    assert "Severity: low" in low_output
+
+
+def test_runs_list_renders_a_severity_column_distinctly_styled_and_plain() -> None:
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    runs = [
+        DagRunRecord(
+            1, "etl-a", DagRunStatus.FAILED, "manual", "t0", "t1", None, severity="critical"
+        ),
+        DagRunRecord(2, "etl-b", DagRunStatus.FAILED, "manual", "t0", "t1", None, severity="low"),
+    ]
+
+    plain_output = render_runs_list(runs, _PLAIN_CONTEXT)
+    styled_output = render_runs_list(runs, _STYLED_CONTEXT)
+
+    assert "SEVERITY" in plain_output  # column header present
+    assert "critical" in plain_output
+    assert "low" in plain_output
+    assert "\x1b[" not in plain_output
+
+    assert "\x1b[38;2;237;66;69m" in styled_output  # RED, the critical row
+    assert "\x1b[38;2;138;143;163m" in styled_output  # DIM, the low row
+
+
+def test_a_medium_severity_run_renders_with_no_severity_color(tmp_path: Path) -> None:
+    """medium (the default) is deliberately uncolored -- the unremarkable
+    baseline, nothing to draw the eye to. Confirmed by checking severity's
+    own value never appears wrapped in an escape code, not just that some
+    color exists somewhere in the output (the status itself is still red).
+    """
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    run = DagRunRecord(1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")  # default medium
+    output = render_run_detail(run, [], _STYLED_CONTEXT)
+
+    assert "Severity: medium" in output  # plain, no ANSI wrapping around "medium"

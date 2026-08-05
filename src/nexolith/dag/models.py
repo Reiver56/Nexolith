@@ -123,6 +123,24 @@ class DagConfig(BaseModel):
     # Read fresh from the file every tick, the same as `trigger` and for
     # the same reason -- never persisted to the store.
     priority: Literal["low", "normal", "high", "critical"] = "normal"
+    # severity (NXL-87): how serious a failure of THIS DAG is to the
+    # business -- a completely separate axis from `priority` above
+    # (execution order) and from `on_failure` (downstream task-propagation
+    # policy within one run). Deliberately different wording/scale
+    # ("low"/"medium"/"high"/"critical", not priority's "low"/"normal"/
+    # "high"/"critical") so the two are never visually or verbally
+    # confusable in a DAG file. Unlike schedule/trigger/priority (all read
+    # fresh from the file every scheduler tick, never persisted), severity
+    # answers a question about a specific run in the past ("how serious
+    # was THAT failure"), not "what should happen right now" -- so it is
+    # snapshotted into dag_runs.severity at run-start time instead
+    # (nexolith.dag.executor.DagExecutor.run, schema_version 5), the same
+    # design already established for on_failure. A `runs show` for last
+    # week's run reports the severity declared at the time, unaffected by
+    # any later edit to this file. Purely a classification label: setting
+    # this triggers no alerting or automated action anywhere in Nexolith
+    # (that is the separate, not-yet-authorized Nexo Metro initiative).
+    severity: Literal["low", "medium", "high", "critical"] = "medium"
 
     @model_validator(mode="after")
     def validate_task_graph_shape(self) -> "DagConfig":

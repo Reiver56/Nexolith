@@ -296,3 +296,57 @@ tasks:
     # The underlying PipelineConfig validation error (missing 'destination')
     # must actually surface, not be swallowed by the DAG-level wrapping.
     assert "destination" in message
+
+
+# -- NXL-87: severity ---------------------------------------------------
+
+
+def test_dag_with_no_declared_severity_defaults_to_medium(tmp_path: Path) -> None:
+    write_pipeline(tmp_path / "a.yaml", name="a")
+    write_dag(
+        tmp_path / "workflow.yaml",
+        """
+name: no_severity
+tasks:
+  - name: a
+    pipeline: a.yaml
+    depends_on: []
+""",
+    )
+    dag = load_dag(tmp_path / "workflow.yaml")
+    assert dag.severity == "medium"
+
+
+def test_dag_can_declare_each_severity_level(tmp_path: Path) -> None:
+    write_pipeline(tmp_path / "a.yaml", name="a")
+    for level in ("low", "medium", "high", "critical"):
+        write_dag(
+            tmp_path / "workflow.yaml",
+            f"""
+name: severity_{level}
+severity: {level}
+tasks:
+  - name: a
+    pipeline: a.yaml
+    depends_on: []
+""",
+        )
+        dag = load_dag(tmp_path / "workflow.yaml")
+        assert dag.severity == level
+
+
+def test_invalid_severity_value_is_rejected(tmp_path: Path) -> None:
+    write_pipeline(tmp_path / "a.yaml", name="a")
+    write_dag(
+        tmp_path / "workflow.yaml",
+        """
+name: bad_severity
+severity: urgent
+tasks:
+  - name: a
+    pipeline: a.yaml
+    depends_on: []
+""",
+    )
+    with pytest.raises(ConfigurationError, match="Invalid DAG configuration"):
+        load_dag(tmp_path / "workflow.yaml")

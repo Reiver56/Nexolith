@@ -165,6 +165,7 @@ class DagExecutor:
             [task.name for task in ordered],
             trigger_reason=trigger_reason,
             on_failure=dag.on_failure,
+            severity=dag.severity,
         )
 
         failed_tasks: set[str] = set()

@@ -10,7 +10,7 @@ that print and exit, not a live session.
 from collections import defaultdict
 from datetime import datetime
 
-from nexolith.cli.nexo_art import BLURPLE, DIM, GREEN, RED, WHITE
+from nexolith.cli.nexo_art import AMBER, BLURPLE, DIM, GREEN, RED, WHITE
 from nexolith.cli.render_context import RenderContext
 from nexolith.state import (
     DagRunRecord,
@@ -84,7 +84,22 @@ _ATTEMPT_COLOR = {
     TaskAttemptStatus.FAILED: RED,
 }
 
-_LIST_COLUMNS = ("ID", "DAG", "STATUS", "STARTED", "ENDED")
+# Severity colors (NXL-87): a DAG's own declared how-serious-is-a-failure
+# label, rendered alongside (not instead of) the run's status -- RED above
+# already means "this run failed" on the same row, so severity needs its
+# own scale for "critical, failed" and "low, failed" to read differently.
+# "medium" (the default) intentionally carries no color -- the unremarkable
+# baseline, nothing to draw the eye to, the same "color absence means
+# nothing special" convention PENDING/SKIPPED/BLOCKED task statuses already
+# use. "low" reuses DIM for the same reason those do: recede, don't alarm.
+_SEVERITY_COLOR: dict[str, tuple[int, int, int] | None] = {
+    "critical": RED,
+    "high": AMBER,
+    "medium": None,
+    "low": DIM,
+}
+
+_LIST_COLUMNS = ("ID", "DAG", "STATUS", "SEVERITY", "STARTED", "ENDED")
 
 
 def render_runs_list(runs: list[DagRunRecord], render_context: RenderContext) -> str:
@@ -92,19 +107,28 @@ def render_runs_list(runs: list[DagRunRecord], render_context: RenderContext) ->
         return "No DAG runs recorded yet."
 
     rows = [
-        (str(run.id), run.dag_name, run.status.value, run.started_at, run.ended_at or "-")
+        (
+            str(run.id),
+            run.dag_name,
+            run.status.value,
+            run.severity,
+            run.started_at,
+            run.ended_at or "-",
+        )
         for run in runs
     ]
     widths = [
-        max(len(_LIST_COLUMNS[i]), max((len(row[i]) for row in rows), default=0)) for i in range(5)
+        max(len(_LIST_COLUMNS[i]), max((len(row[i]) for row in rows), default=0)) for i in range(6)
     ]
 
     def format_row(
-        values: tuple[str, str, str, str, str], color: tuple[int, int, int] | None
+        values: tuple[str, str, str, str, str, str],
+        colors: dict[int, tuple[int, int, int]],
     ) -> str:
         cells = []
         for index, value in enumerate(values):
-            if index == 2 and color is not None and not render_context.plain:
+            color = colors.get(index)
+            if color is not None and not render_context.plain:
                 cells.append(
                     _colorize(value, color, bold=True) + " " * (widths[index] - len(value))
                 )
@@ -112,9 +136,16 @@ def render_runs_list(runs: list[DagRunRecord], render_context: RenderContext) ->
                 cells.append(value.ljust(widths[index]))
         return "  ".join(cells)
 
-    lines = [format_row(_LIST_COLUMNS, None)]
+    lines = [format_row(_LIST_COLUMNS, {})]
     for run, row in zip(runs, rows, strict=True):
-        lines.append(format_row(row, _DAG_RUN_COLOR.get(run.status)))
+        colors: dict[int, tuple[int, int, int]] = {}
+        status_color = _DAG_RUN_COLOR.get(run.status)
+        if status_color is not None:
+            colors[2] = status_color
+        severity_color = _SEVERITY_COLOR.get(run.severity)
+        if severity_color is not None:
+            colors[3] = severity_color
+        lines.append(format_row(row, colors))
     return "\n".join(lines)
 
 
@@ -159,11 +190,13 @@ def render_run_detail(
     """
     plain = render_context.plain
     status_color = None if plain else _DAG_RUN_COLOR.get(run.status)
+    severity_color = None if plain else _SEVERITY_COLOR.get(run.severity)
     panel_rows: list[tuple[str, str, tuple[int, int, int] | None]] = [
         ("Status", run.status.value, status_color),
         ("DAG", run.dag_name, None),
         ("Trigger", run.trigger_reason, None),
         ("Policy", run.on_failure, None),
+        ("Severity", run.severity, severity_color),
         ("Started", run.started_at, None),
         ("Ended", run.ended_at or "(in progress)", None),
     ]

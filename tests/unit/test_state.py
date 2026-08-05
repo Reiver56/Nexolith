@@ -30,7 +30,7 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
             "dag_trigger_reactions",
         } <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 4
+        assert version == 5
         conn.close()
     finally:
         store.close()
@@ -46,7 +46,7 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(4,)]
+    assert rows == [(5,)]
 
 
 def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
@@ -95,6 +95,7 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
         run = store.get_dag_run(1)
         assert run is not None
         assert run.on_failure == "skip"  # backfilled default for a pre-existing row
+        assert run.severity == "medium"  # backfilled default for a pre-existing row
 
         store.skip_task_run(1, "x")
         assert store.list_task_runs(1)[0].status is TaskRunStatus.SKIPPED
@@ -108,7 +109,7 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()
-    assert version == 4
+    assert version == 5
     assert "dag_trigger_reactions" in tables
 
 
@@ -477,7 +478,7 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     conn.close()
-    assert version == 4
+    assert version == 5
 
 
 def test_record_trigger_reaction_upserts_in_place(tmp_path: Path) -> None:
