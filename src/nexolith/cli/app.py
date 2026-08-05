@@ -15,6 +15,7 @@ from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
+from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import render_error
 from nexolith.cli.interactive import run_interactive_session
 from nexolith.cli.render_context import detect_render_context
@@ -28,6 +29,7 @@ from nexolith.cli.scheduler_render import (
     render_scheduler_stopped,
     render_windows_stop_caveat,
 )
+from nexolith.dag import execute_dag, load_dag
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 from nexolith.scheduler import (
@@ -39,7 +41,7 @@ from nexolith.scheduler import (
     stop_process,
     write_pidfile,
 )
-from nexolith.state import StateStore
+from nexolith.state import DagRunStatus, StateStore
 
 app = typer.Typer(
     help="Build data flows that last.",
@@ -99,7 +101,16 @@ def diagnostics() -> None:
 
 @app.command()
 def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
-    """Validate a pipeline YAML file without running it."""
+    """Validate a pipeline or DAG YAML file without running it."""
+    if detect_document_kind(path) is DocumentKind.DAG:
+        try:
+            dag = load_dag(path)
+        except ConfigurationError as exc:
+            _show_error(exc)
+            raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+        task_label = "task" if len(dag.tasks) == 1 else "tasks"
+        typer.echo(f"DAG '{dag.name}' is valid ({len(dag.tasks)} {task_label}).")
+        return
     try:
         config = validate_pipeline(path)
     except ConfigurationError as exc:
@@ -110,8 +121,27 @@ def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)])
 
 @app.command()
 def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
-    """Run a pipeline YAML file."""
+    """Run a pipeline or DAG YAML file."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if detect_document_kind(path) is DocumentKind.DAG:
+        store = StateStore()
+        try:
+            try:
+                run_id = execute_dag(path, store)
+            except ConfigurationError as exc:
+                _show_error(exc)
+                raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+            dag_run = store.get_dag_run(run_id)
+            if dag_run is None:
+                raise RuntimeError(f"DAG run {run_id} was not recorded")
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        typer.echo(render_run_detail(dag_run, tasks, detect_render_context(), attempts))
+        if dag_run.status is DagRunStatus.FAILED:
+            raise typer.Exit(code=ExitCode.EXECUTION_ERROR)
+        return
     try:
         result = run_pipeline(path)
     except ConfigurationError as exc:

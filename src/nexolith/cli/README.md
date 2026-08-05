@@ -42,7 +42,9 @@ Rich rendering remain out of scope. `/logs` also remains out of scope until pers
 history exists.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
-and `nexolith --version`.
+and `nexolith --version`. `validate` and `run` accept either a single-pipeline YAML document or the
+established DAG format. DAG runs use the existing DAG executor, persist their run and task records,
+and print the same detail view available through `nexolith runs show`.
 Presentation belongs here. The classic `validate` and `run` commands are thin adapters over the
 shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
 
