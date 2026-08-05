@@ -198,9 +198,7 @@ class DagExecutor:
                 def run_pipeline_attempt(
                     task: DagTaskConfig = task, path: Path = pipeline_path
                 ) -> ExecutionResult:
-                    return self._application.run_pipeline(
-                        path, parameter_overrides=task.parameters
-                    )
+                    return self._application.run_pipeline(path, parameter_overrides=task.parameters)
 
                 success, error = self._run_with_retries(dag_run_id, task, run_pipeline_attempt)
             self._store.complete_task_run(dag_run_id, task.name, success=success, error=error)

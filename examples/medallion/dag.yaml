@@ -1,0 +1,14 @@
+name: medallion_orders
+tasks:
+  - name: bronze
+    pipeline: pipelines/bronze_orders.yaml
+    depends_on: []
+  - name: silver
+    pipeline: pipelines/silver_orders.yaml
+    depends_on: [bronze]
+  - name: gold
+    script: jobs/revenue_reports.py
+    depends_on: [silver]
+    parameters:
+      silver_path: examples/medallion/silver/orders.csv
+      out_dir: examples/medallion/gold

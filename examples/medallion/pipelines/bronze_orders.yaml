@@ -1,0 +1,8 @@
+name: bronze_orders
+source:
+  type: csv
+  path: examples/medallion/data/raw_orders.csv
+transformations: []
+destination:
+  type: csv
+  path: examples/medallion/bronze/orders.csv

@@ -16,3 +16,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+examples/medallion/bronze/
+examples/medallion/silver/
+examples/medallion/gold/
