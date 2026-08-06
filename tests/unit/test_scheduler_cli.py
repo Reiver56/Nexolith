@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from nexolith.cli.app import app
+from nexolith.cli.nexo_art import DIM, RED, _ansi_256_index
 from nexolith.cli.render_context import RenderContext
 from nexolith.cli.runs_render import render_run_detail, render_runs_list
 from nexolith.cli.scheduler_render import SchedulerStatus, render_scheduler_status
@@ -565,6 +566,50 @@ def test_render_run_detail_styled_mode_has_escape_codes_and_unicode_border() -> 
     assert "╭" in output
 
 
+# -- NXL-100: runs show under all three real color tiers --------------------
+
+
+def test_run_detail_renders_genuinely_differently_across_all_three_color_tiers() -> None:
+    """The story's own explicit ask: at least one real renderer, tested
+    under all three tiers, confirming each produces genuinely different,
+    tier-appropriate output -- not just that truecolor and 'plain' differ
+    (already covered elsewhere), but that the new standard (256-color)
+    middle tier is real and distinct from both.
+    """
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    run = DagRunRecord(1, "etl", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+
+    truecolor_ctx = RenderContext(is_tty=True, color_enabled=True, width=200, truecolor=True)
+    standard_ctx = RenderContext(is_tty=True, color_enabled=True, width=200, truecolor=False)
+    plain_ctx = RenderContext(is_tty=False, color_enabled=True, width=200)
+
+    truecolor_output = render_run_detail(run, [], truecolor_ctx)
+    standard_output = render_run_detail(run, [], standard_ctx)
+    plain_output = render_run_detail(run, [], plain_ctx)
+
+    # All three genuinely differ from each other.
+    assert truecolor_output != standard_output
+    assert standard_output != plain_output
+    assert truecolor_output != plain_output
+
+    # Tier-appropriate encoding, checked precisely, not just "contains an
+    # escape code somewhere":
+    assert "\x1b[38;2;" in truecolor_output  # real 24-bit
+    assert "\x1b[38;5;" not in truecolor_output
+
+    assert "\x1b[38;5;" in standard_output  # 256-color approximation
+    assert "\x1b[38;2;" not in standard_output
+
+    assert "\x1b[" not in plain_output  # no color at all
+    assert "+" in plain_output  # ASCII border, not Unicode box-drawing
+
+    # But the actual, visible content (status/DAG name/etc.) is identical
+    # across all three -- only the color encoding differs, never the text.
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+    assert ansi_re.sub("", truecolor_output) == ansi_re.sub("", standard_output)
+
+
 # -- NXL-93: bordered panel width/padding ------------------------------------
 #
 # Found by a user during manual v0.3.3 testing: short lines ("Status:",
@@ -880,11 +925,16 @@ def test_runs_show_distinguishes_a_failed_critical_dag_from_a_failed_low_one_sty
     low_severity_line = next(line for line in low_output.splitlines() if "Severity" in line)
     # RED (critical) and DIM (low) are different ANSI color codes -- the
     # two runs' "Severity: ..." lines must be colored differently, not just
-    # both contain the word "some color".
-    assert "\x1b[38;2;237;66;69m" in critical_severity_line  # RED
-    assert "\x1b[38;2;138;143;163m" in low_severity_line  # DIM
-    assert "\x1b[38;2;237;66;69m" not in low_severity_line
-    assert "\x1b[38;2;138;143;163m" not in critical_severity_line
+    # both contain the word "some color". Computed via the real 256-color
+    # index (_STYLED_CONTEXT.truecolor is False, NXL-100's standard tier),
+    # not hand-hardcoded, so this doesn't silently stop testing anything
+    # real if the tier default or the mapping algorithm ever changes.
+    red_sgr = f"\x1b[38;5;{_ansi_256_index(RED)}m"
+    dim_sgr = f"\x1b[38;5;{_ansi_256_index(DIM)}m"
+    assert red_sgr in critical_severity_line
+    assert dim_sgr in low_severity_line
+    assert red_sgr not in low_severity_line
+    assert dim_sgr not in critical_severity_line
 
 
 def test_runs_show_severity_is_plain_and_unambiguous_without_color() -> None:
@@ -928,8 +978,8 @@ def test_runs_list_renders_a_severity_column_distinctly_styled_and_plain() -> No
     assert "low" in plain_output
     assert "\x1b[" not in plain_output
 
-    assert "\x1b[38;2;237;66;69m" in styled_output  # RED, the critical row
-    assert "\x1b[38;2;138;143;163m" in styled_output  # DIM, the low row
+    assert f"\x1b[38;5;{_ansi_256_index(RED)}m" in styled_output  # RED, the critical row
+    assert f"\x1b[38;5;{_ansi_256_index(DIM)}m" in styled_output  # DIM, the low row
 
 
 def test_a_medium_severity_run_renders_with_no_severity_color(tmp_path: Path) -> None:

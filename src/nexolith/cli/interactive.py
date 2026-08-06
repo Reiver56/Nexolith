@@ -2,7 +2,7 @@
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -142,7 +142,7 @@ def render_splash(render_context: RenderContext | None = None) -> str:
             return f"{render_nexo_kitty_protocol()}\n{SPLASH}"
         except Exception:
             pass
-    return f"{render_nexo_panel()}\n{SPLASH}"
+    return f"{render_nexo_panel(render_context)}\n{SPLASH}"
 
 
 def render_help() -> str:
@@ -245,6 +245,16 @@ class InteractiveSession:
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
+        # NXL-100: the classic loop's default writer (print) goes straight
+        # to a real terminal stream, which can render whatever ANSI tier
+        # self.render_context says it can. The full-screen session's own
+        # writer (see set_output_writer) targets a plain-text prompt_toolkit
+        # TextArea buffer instead -- that widget has no ANSI interpretation
+        # at all, at any color depth, so anything with embedded escape
+        # codes written there shows up as literal text regardless of tier.
+        # True by default (matches every existing caller's real behavior
+        # today, including every test that never sets this explicitly).
+        self._output_ansi_capable = True
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
         self._presenter: OperationPresenter = presenter or ClassicOperationPresenter(self._write)
@@ -276,11 +286,19 @@ class InteractiveSession:
             _sys.stderr.write(f"render_context.use_kitty: {self.render_context.use_kitty!r}\n")
             _sys.stderr.write("=== end debug ===\n")
 
-    def set_output_writer(self, writer: OutputWriter) -> None:
+    def set_output_writer(self, writer: OutputWriter, *, ansi_capable: bool = True) -> None:
         """Redirect where this session's output goes, e.g. to a full-screen
         session's scrollable log instead of the classic loop's direct writes.
+
+        `ansi_capable=False` (NXL-100) marks a sink that cannot interpret
+        embedded ANSI escape codes at all -- e.g. the full-screen session's
+        plain-text output log -- so `_output_render_context()` forces plain
+        rendering for anything written through it, regardless of what this
+        session's own `render_context` otherwise detected. Defaults to True,
+        matching every caller before this story (a real terminal stream).
         """
         self._write = writer
+        self._output_ansi_capable = ansi_capable
 
     def set_presenter(self, presenter: OperationPresenter) -> None:
         """Redirect how `/validate`/`/run` progress and outcomes are shown,
@@ -439,7 +457,23 @@ class InteractiveSession:
             attempts = store.list_run_attempts(run_id)
         finally:
             store.close()
-        self._write(render_run_detail(dag_run, tasks, self.render_context, attempts))
+        self._write(render_run_detail(dag_run, tasks, self._output_render_context(), attempts))
+
+    def _output_render_context(self) -> RenderContext:
+        """The render context to use for anything about to go through
+        `self._write()` -- `self.render_context` unchanged when the current
+        output sink can actually render ANSI, or a plain-forced copy when
+        it can't (NXL-100: the full-screen session's output log is a plain
+        prompt_toolkit TextArea with zero ANSI interpretation, at any color
+        tier -- unlike the status area/header, which render through
+        prompt_toolkit's own style system and degrade color depth safely on
+        their own, confirmed directly). `self.render_context` itself is
+        left untouched either way -- the status area and header still use
+        it directly and still get real color.
+        """
+        if self._output_ansi_capable:
+            return self.render_context
+        return replace(self.render_context, forced_plain=True)
 
     def _show_runs(self, value: str) -> None:
         """`/runs` (list) and `/runs <id>` (show) -- reuses `runs_render.py`'s
@@ -453,7 +487,7 @@ class InteractiveSession:
                 runs = store.list_recent_dag_runs(20)
             finally:
                 store.close()
-            self._write(render_runs_list(runs, self.render_context))
+            self._write(render_runs_list(runs, self._output_render_context()))
             return
 
         try:
@@ -472,7 +506,7 @@ class InteractiveSession:
             attempts = store.list_run_attempts(run_id)
         finally:
             store.close()
-        self._write(render_run_detail(run, tasks, self.render_context, attempts))
+        self._write(render_run_detail(run, tasks, self._output_render_context(), attempts))
 
     def _scheduler_command(self, value: str) -> None:
         subcommand = value.strip()
@@ -493,16 +527,15 @@ class InteractiveSession:
     def _scheduler_status(self) -> None:
         pidfile_path = default_pidfile_path()
         record = read_pidfile(pidfile_path)
+        render_context = self._output_render_context()
         if record is None or not is_process_alive(record.pid):
             if record is not None:
                 remove_pidfile(pidfile_path)
-            self._write(
-                render_scheduler_status(SchedulerStatus(False, None, None), self.render_context)
-            )
+            self._write(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
             return
         self._write(
             render_scheduler_status(
-                SchedulerStatus(True, record.pid, record.started_at), self.render_context
+                SchedulerStatus(True, record.pid, record.started_at), render_context
             )
         )
 

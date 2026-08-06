@@ -11,7 +11,7 @@ import textwrap
 from collections import defaultdict
 from datetime import datetime
 
-from nexolith.cli.nexo_art import AMBER, BLURPLE, DIM, GREEN, RED, WHITE
+from nexolith.cli.nexo_art import AMBER, BLURPLE, DIM, GREEN, RED, WHITE, colorize
 from nexolith.cli.render_context import RenderContext
 from nexolith.state import (
     DagRunRecord,
@@ -21,15 +21,6 @@ from nexolith.state import (
     TaskRunRecord,
     TaskRunStatus,
 )
-
-_RESET = "\x1b[0m"
-
-
-def _colorize(text: str, rgb: tuple[int, int, int], *, bold: bool = False) -> str:
-    red, green, blue = rgb
-    prefix = "\x1b[1m" if bold else ""
-    return f"{prefix}\x1b[38;2;{red};{green};{blue}m{text}{_RESET}"
-
 
 _DAG_RUN_COLOR = {
     DagRunStatus.RUNNING: BLURPLE,
@@ -131,7 +122,8 @@ def render_runs_list(runs: list[DagRunRecord], render_context: RenderContext) ->
             color = colors.get(index)
             if color is not None and not render_context.plain:
                 cells.append(
-                    _colorize(value, color, bold=True) + " " * (widths[index] - len(value))
+                    colorize(value, color, render_context, bold=True)
+                    + " " * (widths[index] - len(value))
                 )
             else:
                 cells.append(value.ljust(widths[index]))
@@ -176,22 +168,24 @@ def _wrap_panel_row(
 
 
 def _panel_lines(
-    rows: list[tuple[str, str, tuple[int, int, int] | None]], *, plain: bool, max_width: int
+    rows: list[tuple[str, str, tuple[int, int, int] | None]], render_context: RenderContext
 ) -> list[str]:
-    """NXL-93: `max_width` bounds every rendered line's total visible width
-    (border characters and their single-space margins included) so the
-    panel never exceeds the real terminal's own width. Before this, a
-    value long enough to make the panel wider than the terminal (any
-    Error message of a few dozen words) was still correctly padded to its
-    OWN unbounded computed width -- but the terminal's own line-wrap then
-    broke that string across multiple physical rows at an arbitrary
-    column, landing the right border character in a different column on
-    each wrapped row and producing exactly the misaligned-rectangle
-    appearance reported: the string was never actually mis-padded, the
-    panel was simply wider than the screen displaying it. Long values now
-    wrap onto their own bordered, padded continuation lines instead.
+    """NXL-93: `render_context.width` bounds every rendered line's total
+    visible width (border characters and their single-space margins
+    included) so the panel never exceeds the real terminal's own width.
+    Before this, a value long enough to make the panel wider than the
+    terminal (any Error message of a few dozen words) was still correctly
+    padded to its OWN unbounded computed width -- but the terminal's own
+    line-wrap then broke that string across multiple physical rows at an
+    arbitrary column, landing the right border character in a different
+    column on each wrapped row and producing exactly the
+    misaligned-rectangle appearance reported: the string was never
+    actually mis-padded, the panel was simply wider than the screen
+    displaying it. Long values now wrap onto their own bordered, padded
+    continuation lines instead.
     """
-    interior_width = max(4, max_width - 4)  # "│ " + content + " │"
+    plain = render_context.plain
+    interior_width = max(4, render_context.width - 4)  # "│ " + content + " │"
     pieces: list[tuple[str, str, tuple[int, int, int] | None]] = []
     for label, value, color in rows:
         pieces.extend(_wrap_panel_row(label, value, color, interior_width))
@@ -204,13 +198,15 @@ def _panel_lines(
         body = [f"| {line.ljust(width)} |" for line in plain_lines]
         return [border, *body, border]
 
-    top = _colorize("╭" + "─" * (width + 2) + "╮", BLURPLE)
-    bottom = _colorize("╰" + "─" * (width + 2) + "╯", BLURPLE)
-    side = _colorize("│", BLURPLE)
+    top = colorize("╭" + "─" * (width + 2) + "╮", BLURPLE, render_context)
+    bottom = colorize("╰" + "─" * (width + 2) + "╯", BLURPLE, render_context)
+    side = colorize("│", BLURPLE, render_context)
     body = []
     for (prefix, chunk, color), plain_line in zip(pieces, plain_lines, strict=True):
         pad = " " * (width - len(plain_line))
-        chunk_text = _colorize(chunk, color, bold=True) if color is not None else chunk
+        chunk_text = (
+            colorize(chunk, color, render_context, bold=True) if color is not None else chunk
+        )
         body.append(f"{side} {prefix}{chunk_text}{pad} {side}")
     return [top, *body, bottom]
 
@@ -273,17 +269,19 @@ def render_run_detail(
     if run.error:
         panel_rows.append(("Error", run.error, None if plain else RED))
 
-    lines = _panel_lines(panel_rows, plain=plain, max_width=render_context.width)
+    lines = _panel_lines(panel_rows, render_context)
 
     partial_success_note = _partial_success_note(run, tasks)
     if partial_success_note is not None:
         lines.append("")
         lines.append(
-            partial_success_note if plain else _colorize(partial_success_note, AMBER, bold=True)
+            partial_success_note
+            if plain
+            else colorize(partial_success_note, AMBER, render_context, bold=True)
         )
 
     lines.append("")
-    lines.append("Tasks:" if plain else _colorize("Tasks:", WHITE, bold=True))
+    lines.append("Tasks:" if plain else colorize("Tasks:", WHITE, render_context, bold=True))
 
     if not tasks:
         lines.append("  (no tasks recorded)")
@@ -303,8 +301,8 @@ def render_run_detail(
             marker = _PLAIN_TASK_MARKER[task.status]
         else:
             color = _TASK_COLOR[task.status]
-            marker = _colorize(_TASK_MARKER[task.status], color, bold=True)
-            status_text = _colorize(task.status.value, color) + " " * (
+            marker = colorize(_TASK_MARKER[task.status], color, render_context, bold=True)
+            status_text = colorize(task.status.value, color, render_context) + " " * (
                 status_width - len(task.status.value)
             )
         row = f"  {marker} {name}  {status_text}  {duration}"
@@ -314,18 +312,20 @@ def render_run_detail(
 
         task_attempts = attempts_by_task.get(task.task_name, [])
         if len(task_attempts) > 1:
-            lines.extend(_render_attempt_lines(task_attempts, plain=plain))
+            lines.extend(_render_attempt_lines(task_attempts, render_context))
 
     return "\n".join(lines)
 
 
-def _render_attempt_lines(attempts: list[TaskAttemptRecord], *, plain: bool) -> list[str]:
+def _render_attempt_lines(
+    attempts: list[TaskAttemptRecord], render_context: RenderContext
+) -> list[str]:
     lines = []
     for attempt in attempts:
         duration = _format_duration(attempt.started_at, attempt.ended_at)
         status_text = attempt.status.value
-        if not plain:
-            status_text = _colorize(status_text, _ATTEMPT_COLOR[attempt.status])
+        if not render_context.plain:
+            status_text = colorize(status_text, _ATTEMPT_COLOR[attempt.status], render_context)
         line = f"      attempt {attempt.attempt_number}: {status_text} ({duration})"
         if attempt.error:
             line += f" - {attempt.error}"

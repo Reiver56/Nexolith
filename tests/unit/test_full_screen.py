@@ -517,6 +517,45 @@ def test_runs_list_and_show_render_correctly_inside_full_screen(tmp_path: Path) 
     assert "Severity: medium" in output_log
 
 
+def test_output_log_commands_never_contain_raw_ansi_even_on_a_truecolor_session(
+    tmp_path: Path,
+) -> None:
+    """NXL-100 regression, distinct from the truecolor-vs-256-color bug:
+    found while fixing it, this is a second, architecturally separate real
+    bug -- `output_area` is a plain prompt_toolkit `TextArea`/`Buffer` with
+    zero ANSI interpretation at ANY color depth (confirmed directly: even a
+    correctly-tiered 256-color code would still show up as literal text
+    there, unlike the header/status area, which render through
+    prompt_toolkit's own style system and degrade safely on their own).
+    So /runs, /scheduler status, and a DAG /run must write plain text to
+    the output log regardless of how capable the session's own
+    render_context otherwise is -- confirmed here against a genuinely
+    truecolor-signaling session specifically, the case most likely to leak
+    a raw escape code if this regression ever reappears.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    truecolor_session = InteractiveSession(
+        render_context=RenderContext(is_tty=True, color_enabled=True, width=200, truecolor=True)
+    )
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {dag_path}\n/run\n/runs\n/runs 1\n/scheduler status\n/exit\n",
+        session=truecolor_session,
+    )
+
+    assert "\x1b[" not in output_log
+    # Confirm this isn't just an empty/failed capture -- the real content
+    # is there, just genuinely unstyled.
+    assert "Status: succeeded" in output_log
+    assert "ID" in output_log and "SEVERITY" in output_log
+    assert "Scheduler:" in output_log and "not running" in output_log
+
+
 def test_runs_list_with_no_runs_recorded_yet_in_full_screen() -> None:
     output_log = run_with_keys_capturing_output_log("/runs\n/exit\n")
 

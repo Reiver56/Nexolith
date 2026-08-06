@@ -72,7 +72,7 @@ def run_full_screen_session(
             Document(new_text, cursor_position=len(new_text)), bypass_readonly=True
         )
 
-    active_session.set_output_writer(append_output)
+    active_session.set_output_writer(append_output, ansi_capable=False)
 
     status_state = status_state or StatusAreaState()
     status_window = Window(
@@ -104,7 +104,7 @@ def run_full_screen_session(
     input_field.accept_handler = on_submit
 
     header = Window(
-        content=FormattedTextControl(ANSI(render_nexo_panel())),
+        content=FormattedTextControl(ANSI(render_nexo_panel(render_context))),
         height=_PANEL_HEIGHT,
         dont_extend_height=True,
     )

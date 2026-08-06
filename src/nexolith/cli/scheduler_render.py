@@ -5,16 +5,8 @@ fallback) rather than a new visual language for this story's commands.
 
 from dataclasses import dataclass
 
-from nexolith.cli.nexo_art import DIM, GREEN
+from nexolith.cli.nexo_art import DIM, GREEN, colorize
 from nexolith.cli.render_context import RenderContext
-
-_RESET = "\x1b[0m"
-
-
-def _colorize(text: str, rgb: tuple[int, int, int], *, bold: bool = False) -> str:
-    red, green, blue = rgb
-    prefix = "\x1b[1m" if bold else ""
-    return f"{prefix}\x1b[38;2;{red};{green};{blue}m{text}{_RESET}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +18,11 @@ class SchedulerStatus:
 
 def render_scheduler_status(status: SchedulerStatus, render_context: RenderContext) -> str:
     if status.running:
-        label = "running" if render_context.plain else _colorize("running", GREEN, bold=True)
+        label = (
+            "running"
+            if render_context.plain
+            else colorize("running", GREEN, render_context, bold=True)
+        )
         lines = [f"Scheduler: {label}"]
         if status.pid is not None:
             lines.append(f"PID: {status.pid}")
@@ -34,7 +30,7 @@ def render_scheduler_status(status: SchedulerStatus, render_context: RenderConte
             lines.append(f"Started: {status.started_at}")
         return "\n".join(lines)
 
-    label = "not running" if render_context.plain else _colorize("not running", DIM)
+    label = "not running" if render_context.plain else colorize("not running", DIM, render_context)
     return f"Scheduler: {label}"
 
 

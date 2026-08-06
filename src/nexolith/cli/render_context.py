@@ -26,6 +26,18 @@ class RenderContext:
     forced_plain: bool = False
     encoding_safe: bool = True
     kitty_graphics: bool = False
+    # NXL-100: real 24-bit ("truecolor") support, detected separately from
+    # `color_enabled` (which only gates whether ANY color happens at all,
+    # via NO_COLOR). A terminal can be perfectly color-capable at 16/256
+    # colors while having no idea what to do with a raw `38;2;r;g;b`
+    # sequence -- several real ones print it back as literal text instead
+    # of degrading it themselves, which is the whole bug this field exists
+    # to prevent. Defaults to False: the safe assumption when detection is
+    # uncertain is "no truecolor," never the reverse -- the failure mode of
+    # wrongly assuming truecolor (broken literal escape codes on screen) is
+    # strictly worse than wrongly assuming standard color (a slightly less
+    # precise, but always-valid, 256-color approximation).
+    truecolor: bool = False
 
     @property
     def plain(self) -> bool:
@@ -74,7 +86,55 @@ def detect_render_context(
         forced_plain=forced_plain,
         encoding_safe=_can_encode_block_characters(active_stream),
         kitty_graphics=_detect_kitty_graphics(active_environ),
+        truecolor=_detect_truecolor(active_environ),
     )
+
+
+# Terminal apps independently confirmed (by their own docs/changelogs, not
+# just a rumor) to render 24-bit color correctly regardless of what COLORTERM
+# happens to be set to -- COLORTERM is a convention, not something every
+# truecolor-capable terminal actually sets. Deliberately short: an app not
+# listed here still gets truecolor via COLORTERM/TERM below if it sets
+# either; this list exists only to cover ones that reliably don't.
+_TRUECOLOR_TERM_PROGRAMS = frozenset({"iTerm.app", "WezTerm", "vscode"})
+
+
+def _detect_truecolor(environ: Mapping[str, str]) -> bool:
+    """Real-world heuristic (the same shape `supports-color`/`chalk`-style
+    libraries in other ecosystems use), biased toward the safe answer when
+    uncertain: assume NO truecolor rather than risk a terminal that prints
+    an unrecognized `38;2;r;g;b` sequence back as literal text (NXL-100 --
+    found via exactly that happening in a real terminal where none of these
+    signals were present at all).
+
+    Checked, in order:
+    1. `COLORTERM` is `truecolor` or `24bit` -- the closest thing to a
+       standard signal for this, when a terminal bothers to set it.
+    2. `WT_SESSION` is present -- Windows Terminal sets this to a session
+       GUID and has supported truecolor since its first release; on
+       Windows, where `COLORTERM` is frequently unset even in fully
+       truecolor-capable terminals, this is the single most reliable real
+       signal available.
+    3. `TERM_PROGRAM` names a terminal app independently known to render
+       truecolor correctly (see `_TRUECOLOR_TERM_PROGRAMS`).
+    4. `TERM` itself advertises it directly (`xterm-24bit`, `xterm-direct`,
+       or any value containing `direct`) -- rare, but a real, unambiguous
+       signal when present.
+
+    Anything else: False. No real TTY, `conhost` with none of the above set,
+    an unrecognized `TERM`, or a completely bare environment (e.g. an
+    embedded/agent-driven pseudo-terminal, the exact scenario that
+    surfaced this bug) all fall through to the safe default.
+    """
+    colorterm = environ.get("COLORTERM", "").lower()
+    if colorterm in ("truecolor", "24bit"):
+        return True
+    if "WT_SESSION" in environ:
+        return True
+    if environ.get("TERM_PROGRAM") in _TRUECOLOR_TERM_PROGRAMS:
+        return True
+    term = environ.get("TERM", "")
+    return term in ("xterm-24bit", "xterm-direct") or "direct" in term
 
 
 _KITTY_TERM_PROGRAMS = frozenset({"WezTerm"})

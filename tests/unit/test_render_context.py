@@ -184,3 +184,149 @@ def test_use_kitty_is_false_when_plain_even_if_kitty_graphics_detected() -> None
     assert context.kitty_graphics is True
     assert context.plain is True
     assert context.use_kitty is False
+
+
+# -- NXL-100: truecolor detection ----------------------------------------
+#
+# Found via a real terminal that rendered a raw 24-bit `38;2;r;g;b` ANSI
+# sequence as literal text instead of degrading it -- RenderContext had no
+# concept of "color-capable but not truecolor-capable" at all, so every
+# renderer assumed truecolor the moment any color was enabled. The
+# heuristic here is deliberately biased toward "no truecolor" when
+# uncertain: a wrongly-assumed truecolor produces broken literal escape
+# codes on screen; a wrongly-assumed standard tier only produces a
+# slightly less precise (but always valid) 256-color approximation.
+
+
+def test_no_truecolor_signal_present_defaults_to_no_truecolor() -> None:
+    """The exact real-world scenario that surfaced this bug: a genuinely
+    bare environment with none of COLORTERM/TERM_PROGRAM/TERM/WT_SESSION
+    set at all (confirmed directly against the reporting user's real
+    PowerShell session -- none of these were present). Color must still be
+    enabled (this terminal is otherwise fully capable -- wide, a real TTY,
+    UTF-8) -- only truecolor specifically must default to False.
+    """
+    context = detect_render_context(stream=FakeStream(is_a_tty=True), environ=wide_environ())
+
+    assert context.truecolor is False
+    assert context.plain is False  # color still happens -- just not truecolor
+    assert context.color_enabled is True
+
+
+def test_colorterm_truecolor_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(COLORTERM="truecolor")
+    )
+
+    assert context.truecolor is True
+
+
+def test_colorterm_24bit_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(COLORTERM="24bit")
+    )
+
+    assert context.truecolor is True
+
+
+def test_colorterm_value_is_case_insensitive() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(COLORTERM="TrueColor")
+    )
+
+    assert context.truecolor is True
+
+
+def test_colorterm_set_to_an_unrelated_value_is_not_truecolor() -> None:
+    """Some terminals historically set COLORTERM to a non-empty value that
+    isn't 'truecolor'/'24bit' (e.g. a legacy 'yes'/'1') -- only the two
+    real, specific values count."""
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(COLORTERM="yes")
+    )
+
+    assert context.truecolor is False
+
+
+def test_wt_session_presence_is_detected_regardless_of_value() -> None:
+    """Windows Terminal sets WT_SESSION to a session GUID and has supported
+    truecolor since its first release -- on Windows, where COLORTERM is
+    frequently unset even in fully truecolor-capable terminals, this is
+    the single most reliable real signal (matching KITTY_WINDOW_ID's own
+    presence-not-value convention above)."""
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(WT_SESSION="")
+    )
+
+    assert context.truecolor is True
+
+
+def test_truecolor_term_program_iterm_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM_PROGRAM="iTerm.app")
+    )
+
+    assert context.truecolor is True
+
+
+def test_truecolor_term_program_vscode_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM_PROGRAM="vscode")
+    )
+
+    assert context.truecolor is True
+
+
+def test_unrelated_term_program_is_not_truecolor() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM_PROGRAM="Apple_Terminal")
+    )
+
+    assert context.truecolor is False
+
+
+def test_term_xterm_24bit_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM="xterm-24bit")
+    )
+
+    assert context.truecolor is True
+
+
+def test_term_xterm_direct_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM="xterm-direct")
+    )
+
+    assert context.truecolor is True
+
+
+def test_term_containing_direct_anywhere_is_detected() -> None:
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM="screen-direct")
+    )
+
+    assert context.truecolor is True
+
+
+def test_plain_xterm_term_alone_is_not_truecolor() -> None:
+    """The single most common TERM value on real systems -- must not be
+    mistaken for a truecolor signal on its own."""
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True), environ=wide_environ(TERM="xterm-256color")
+    )
+
+    assert context.truecolor is False
+
+
+def test_no_color_env_var_still_disables_color_even_with_truecolor_signals() -> None:
+    """NO_COLOR must remain the ultimate override -- unaffected by this
+    story, confirmed explicitly against a genuinely truecolor-signaling
+    environment, not just an ordinary one."""
+    context = detect_render_context(
+        stream=FakeStream(is_a_tty=True),
+        environ=wide_environ(COLORTERM="truecolor", NO_COLOR="1"),
+    )
+
+    assert context.truecolor is True  # detected correctly...
+    assert context.plain is True  # ...but NO_COLOR still wins, unchanged

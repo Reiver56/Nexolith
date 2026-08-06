@@ -151,7 +151,7 @@ def test_render_splash_falls_back_to_plain_text_in_degraded_conditions() -> None
 
 
 def test_render_splash_shows_bordered_panel_on_a_capable_non_kitty_terminal() -> None:
-    capable = RenderContext(is_tty=True, color_enabled=True, width=200)
+    capable = RenderContext(is_tty=True, color_enabled=True, width=200, truecolor=True)
 
     rendered = render_splash(capable)
 
@@ -177,7 +177,9 @@ def test_render_splash_uses_kitty_protocol_when_detected() -> None:
 def test_render_splash_falls_back_to_ansi_tier_when_kitty_rendering_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    kitty_capable = RenderContext(is_tty=True, color_enabled=True, width=200, kitty_graphics=True)
+    kitty_capable = RenderContext(
+        is_tty=True, color_enabled=True, width=200, kitty_graphics=True, truecolor=True
+    )
 
     def broken_kitty_renderer() -> str:
         raise RuntimeError("simulated tier-1 failure")
