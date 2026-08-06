@@ -7,6 +7,7 @@ visual language for these commands. Plain static ANSI strings here, not
 that print and exit, not a live session.
 """
 
+import textwrap
 from collections import defaultdict
 from datetime import datetime
 
@@ -153,10 +154,49 @@ def render_run_not_found(run_id: int) -> str:
     return f"No DAG run found with id {run_id}."
 
 
+def _wrap_panel_row(
+    label: str, value: str, color: tuple[int, int, int] | None, interior_width: int
+) -> list[tuple[str, str, tuple[int, int, int] | None]]:
+    """One row -> one or more `(prefix, chunk, color)` pieces. A short
+    value (the common case) always produces exactly one piece with
+    `prefix = "{label}: "`, identical to this function not existing at
+    all. A value too long to fit `interior_width` wraps onto continuation
+    pieces instead, each using a same-width blank indent in place of
+    repeating the label, so every piece can be padded and bordered by the
+    same uniform logic regardless of whether it's a row's first line or a
+    continuation of one.
+    """
+    prefix = f"{label}: "
+    indent = " " * len(prefix)
+    budget = max(1, interior_width - len(prefix))
+    chunks = textwrap.wrap(value, width=budget) or [""]
+    pieces = [(prefix, chunks[0], color)]
+    pieces.extend((indent, chunk, color) for chunk in chunks[1:])
+    return pieces
+
+
 def _panel_lines(
-    rows: list[tuple[str, str, tuple[int, int, int] | None]], *, plain: bool
+    rows: list[tuple[str, str, tuple[int, int, int] | None]], *, plain: bool, max_width: int
 ) -> list[str]:
-    plain_lines = [f"{label}: {value}" for label, value, _color in rows]
+    """NXL-93: `max_width` bounds every rendered line's total visible width
+    (border characters and their single-space margins included) so the
+    panel never exceeds the real terminal's own width. Before this, a
+    value long enough to make the panel wider than the terminal (any
+    Error message of a few dozen words) was still correctly padded to its
+    OWN unbounded computed width -- but the terminal's own line-wrap then
+    broke that string across multiple physical rows at an arbitrary
+    column, landing the right border character in a different column on
+    each wrapped row and producing exactly the misaligned-rectangle
+    appearance reported: the string was never actually mis-padded, the
+    panel was simply wider than the screen displaying it. Long values now
+    wrap onto their own bordered, padded continuation lines instead.
+    """
+    interior_width = max(4, max_width - 4)  # "│ " + content + " │"
+    pieces: list[tuple[str, str, tuple[int, int, int] | None]] = []
+    for label, value, color in rows:
+        pieces.extend(_wrap_panel_row(label, value, color, interior_width))
+
+    plain_lines = [f"{prefix}{chunk}" for prefix, chunk, _color in pieces]
     width = max(len(line) for line in plain_lines)
 
     if plain:
@@ -168,10 +208,10 @@ def _panel_lines(
     bottom = _colorize("╰" + "─" * (width + 2) + "╯", BLURPLE)
     side = _colorize("│", BLURPLE)
     body = []
-    for (label, value, color), plain_line in zip(rows, plain_lines, strict=True):
+    for (prefix, chunk, color), plain_line in zip(pieces, plain_lines, strict=True):
         pad = " " * (width - len(plain_line))
-        value_text = _colorize(value, color, bold=True) if color is not None else value
-        body.append(f"{side} {label}: {value_text}{pad} {side}")
+        chunk_text = _colorize(chunk, color, bold=True) if color is not None else chunk
+        body.append(f"{side} {prefix}{chunk_text}{pad} {side}")
     return [top, *body, bottom]
 
 
@@ -203,7 +243,7 @@ def render_run_detail(
     if run.error:
         panel_rows.append(("Error", run.error, None if plain else RED))
 
-    lines = _panel_lines(panel_rows, plain=plain)
+    lines = _panel_lines(panel_rows, plain=plain, max_width=render_context.width)
     lines.append("")
     lines.append("Tasks:" if plain else _colorize("Tasks:", WHITE, bold=True))
 

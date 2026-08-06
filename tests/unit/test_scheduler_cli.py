@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import subprocess
 import sys
 import time
@@ -562,6 +563,110 @@ def test_render_run_detail_styled_mode_has_escape_codes_and_unicode_border() -> 
     output = render_run_detail(run, tasks, _STYLED_CONTEXT)
     assert "\x1b[" in output
     assert "╭" in output
+
+
+# -- NXL-93: bordered panel width/padding ------------------------------------
+#
+# Found by a user during manual v0.3.3 testing: short lines ("Status:",
+# "DAG:") next to a long "Error:" line made the right border look
+# misaligned. Investigated directly (not assumed): the underlying string
+# WAS already correctly padded to its own computed width in every case --
+# the real bug is that width had no ceiling at all, so a sufficiently long
+# Error value made the panel wider than any real terminal, and the
+# terminal's OWN line-wrap (not Nexolith's padding math) is what broke the
+# visual rectangle, landing the border character at a different column on
+# each wrapped physical row. Fixed by capping the panel to
+# `render_context.width` and wrapping long values onto their own bordered,
+# padded continuation lines instead of ever exceeding it.
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_panel_line_widths(output: str) -> list[int]:
+    """Every border/body line's real, visible (ANSI-stripped) character
+    width, in the order they appear -- what a user's own terminal actually
+    renders per row width-wise, independent of styled vs. plain mode's
+    different border characters (`|`/`+` vs `│`/`╭`/`╰`).
+    """
+    widths = []
+    for line in output.split("\n"):
+        visible = _ANSI_RE.sub("", line)
+        if visible[:1] in {"|", "+", "│", "╭", "╰"}:
+            widths.append(len(visible))
+    return widths
+
+
+def test_run_detail_panel_lines_all_share_identical_visible_width() -> None:
+    """The user's real observed case: short Status/DAG lines next to a
+    much longer Error line. Every rendered border/body line must measure
+    the exact same visible width, in both plain and styled mode -- styled
+    mode's ANSI color codes must not be counted."""
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    long_error = (
+        "Task 'only' failed: Pipeline 'broken_pipeline' failed: Could not read "
+        "CSV file '/tmp/nxl93/does_not_exist.csv'. Check the path and permissions."
+    )
+    run = DagRunRecord(1, "medallion_orders", DagRunStatus.FAILED, "manual", _T0, _T1, long_error)
+    tasks = [TaskRunRecord(1, "only", TaskRunStatus.FAILED, _T0, _T1, "boom")]
+
+    for context in (_PLAIN_CONTEXT, _STYLED_CONTEXT):
+        output = render_run_detail(run, tasks, context)
+        widths = _visible_panel_line_widths(output)
+        assert len(widths) >= 3  # top/bottom border plus at least one body line
+        assert len(set(widths)) == 1, f"misaligned panel widths: {widths}"
+
+
+def test_run_detail_panel_wraps_long_lines_to_the_render_context_width() -> None:
+    """A value long enough to overflow a real terminal must wrap onto
+    bordered, padded continuation lines rather than ever exceeding
+    render_context.width -- confirmed at a realistic terminal width (80),
+    in both plain and styled mode, with the full error text preserved
+    (wrapped, never truncated or dropped)."""
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    long_error = (
+        "Task 'only' failed: Pipeline 'broken_pipeline' failed: Could not read "
+        "CSV file '/tmp/nxl93/does_not_exist.csv'. Check the path and permissions."
+    )
+    run = DagRunRecord(1, "medallion_orders", DagRunStatus.FAILED, "manual", _T0, _T1, long_error)
+    tasks = [TaskRunRecord(1, "only", TaskRunStatus.FAILED, _T0, _T1, "boom")]
+
+    narrow_plain = RenderContext(is_tty=False, color_enabled=True, width=80, forced_plain=True)
+    narrow_styled = RenderContext(is_tty=True, color_enabled=True, width=80)
+
+    for context in (narrow_plain, narrow_styled):
+        output = render_run_detail(run, tasks, context)
+        widths = _visible_panel_line_widths(output)
+        assert len(set(widths)) == 1
+        assert widths[0] <= 80
+        # The error text survived, just wrapped across multiple lines --
+        # not truncated, not dropped.
+        plain_output = _ANSI_RE.sub("", output)
+        for word in ("broken_pipeline", "does_not_exist.csv", "permissions"):
+            assert word in plain_output
+        assert "Error:" in plain_output
+        # 8 rows (Status/DAG/Trigger/Policy/Severity/Started/Ended/Error)
+        # plus top/bottom border = 10 lines if nothing wrapped; the long
+        # Error value genuinely needed at least one extra continuation line.
+        assert len(widths) > 10
+
+
+def test_run_detail_panel_stays_tight_when_content_is_short() -> None:
+    """Regression: the width cap must not force every panel out to the
+    full terminal width when nothing needs wrapping -- a panel with only
+    short values still shrinks to fit its own content, exactly as before
+    this fix, even against a very wide render context."""
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "etl", DagRunStatus.SUCCEEDED, "manual", _T0, _T1, None)
+    tasks = [TaskRunRecord(1, "a", TaskRunStatus.SUCCEEDED, _T0, _T1, None)]
+
+    wide_context = RenderContext(is_tty=True, color_enabled=True, width=500)
+    output = render_run_detail(run, tasks, wide_context)
+    widths = _visible_panel_line_widths(output)
+    assert len(set(widths)) == 1
+    assert widths[0] < 100  # nowhere near the 500-wide cap
 
 
 # -- NXL-80: UnicodeEncodeError in plain-mode task-status markers ----------
