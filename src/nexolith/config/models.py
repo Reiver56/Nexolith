@@ -60,7 +60,7 @@ class SqlDestinationConfig(ComponentConfig):
     type: Literal["sqlite", "postgresql"]
     connection_url: str
     table: str
-    mode: Literal["append", "replace", "fail"] = "fail"
+    mode: Literal["append", "replace", "fail", "truncate"] = "fail"
 
 
 class SelectConfig(ComponentConfig):

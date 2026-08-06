@@ -239,6 +239,195 @@ def test_existing_type_inference_unaffected(
     assert types["label"] == "character varying"
 
 
+# -- NXL-96: truncate mode ---------------------------------------------------
+#
+# truncate empties a table's rows in place (via DELETE FROM, not the SQL
+# TRUNCATE statement -- see SqlDestination's own docstring for the real,
+# investigated reason) without dropping/recreating the table, so real
+# constraints (FK/PK/CHECK) from a pre-migrated schema survive a write that
+# replace would otherwise destroy.
+
+
+def test_truncate_preserves_constraints_and_replaces_rows(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}" ('
+                "id INTEGER PRIMARY KEY, "
+                "status TEXT NOT NULL CHECK (status IN ('active', 'inactive'))"
+                ")"
+            )
+        )
+        connection.execute(text(f"INSERT INTO \"{table_name}\" (id, status) VALUES (1, 'active')"))
+
+    SqlDestination(postgres_url, table_name, "truncate").write([{"id": 2, "status": "inactive"}])
+
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 2, "status": "inactive"}]
+    assert inspect(postgres_engine).get_pk_constraint(table_name)["constrained_columns"] == ["id"]
+    assert len(inspect(postgres_engine).get_check_constraints(table_name)) == 1
+
+    # The CHECK constraint really did survive -- a value it forbids must
+    # still fail, exactly as it would have before this write.
+    with pytest.raises(ConnectorError):
+        SqlDestination(postgres_url, table_name, "truncate").write(
+            [{"id": 3, "status": "not-a-valid-status"}]
+        )
+
+
+def test_truncate_preserves_foreign_key_from_another_table(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """truncate on a table nothing else references -- the common case (a
+    fact/staging table with an FK pointing OUT, not one pointed AT)."""
+    parent = f"{table_name}_p"
+    with postgres_engine.begin() as connection:
+        connection.execute(text(f'CREATE TABLE "{parent}" (id INTEGER PRIMARY KEY)'))
+        connection.execute(text(f'INSERT INTO "{parent}" (id) VALUES (1), (2)'))
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}" ('
+                "id INTEGER PRIMARY KEY, "
+                f'parent_id INTEGER NOT NULL REFERENCES "{parent}"(id)'
+                ")"
+            )
+        )
+        connection.execute(text(f'INSERT INTO "{table_name}" (id, parent_id) VALUES (10, 1)'))
+
+    try:
+        SqlDestination(postgres_url, table_name, "truncate").write([{"id": 20, "parent_id": 2}])
+        assert fetch_rows(postgres_engine, table_name) == [{"id": 20, "parent_id": 2}]
+        assert inspect(postgres_engine).get_foreign_keys(table_name)[0]["referred_table"] == parent
+
+        # The FK really did survive -- referencing a nonexistent parent
+        # must still fail.
+        with pytest.raises(ConnectorError):
+            SqlDestination(postgres_url, table_name, "truncate").write(
+                [{"id": 30, "parent_id": 999}]
+            )
+    finally:
+        with postgres_engine.begin() as connection:
+            connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+            connection.execute(text(f'DROP TABLE IF EXISTS "{parent}"'))
+
+
+def test_truncate_fk_referenced_table_no_conflict_succeeds(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """The real behavior when the table being truncated is itself
+    referenced by another table's FK -- confirmed directly, not assumed.
+    A raw SQL TRUNCATE refuses unconditionally in this situation (a
+    schema-level check: the constraint merely being declared is enough,
+    regardless of whether any row currently conflicts). DELETE FROM (what
+    truncate mode actually runs) has no such schema-level restriction: the
+    referencing child table here is empty -- the FK is declared but no row
+    currently depends on the parent row being deleted -- so the write
+    succeeds cleanly, something a plain TRUNCATE could not do at all
+    without CASCADE (which would also delete rows from the child table)."""
+    child = f"{table_name}_c"
+    with postgres_engine.begin() as connection:
+        connection.execute(text(f'CREATE TABLE "{table_name}" (id INTEGER PRIMARY KEY)'))
+        connection.execute(text(f'INSERT INTO "{table_name}" (id) VALUES (1)'))
+        connection.execute(
+            text(
+                f'CREATE TABLE "{child}" ('
+                "id INTEGER PRIMARY KEY, "
+                f'parent_id INTEGER NOT NULL REFERENCES "{table_name}"(id)'
+                ")"
+            )
+        )
+        # child stays empty -- no row currently references parent id 1.
+
+    try:
+        SqlDestination(postgres_url, table_name, "truncate").write([{"id": 2}])
+        assert fetch_rows(postgres_engine, table_name) == [{"id": 2}]
+    finally:
+        with postgres_engine.begin() as connection:
+            connection.execute(text(f'DROP TABLE IF EXISTS "{child}"'))
+            connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+
+
+def test_truncate_fk_referenced_table_real_conflict_fails(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """Same setup, but the child table has a real row referencing the
+    parent row about to be deleted. DELETE FROM raises a normal foreign
+    key violation (wrapped as ConnectorError) -- the correct, expected
+    relational-integrity behavior, not silently bypassed via CASCADE --
+    and the original data is left intact, since the delete and insert
+    share one transaction.
+
+    Notably, this fails even though the new data reinserts the exact same
+    id the child row depends on (`{"id": 1}`, identical to what's already
+    there) -- confirmed directly, not assumed: Postgres checks a (default,
+    non-deferrable) foreign key constraint immediately when the DELETE
+    statement runs, not deferred until COMMIT, so a delete-then-reinsert
+    of the same key within one transaction does not dodge the check. Only
+    an explicitly `DEFERRABLE INITIALLY DEFERRED` constraint would allow
+    that -- not something Nexolith can assume about a schema it didn't
+    create.
+    """
+    child = f"{table_name}_c"
+    with postgres_engine.begin() as connection:
+        connection.execute(text(f'CREATE TABLE "{table_name}" (id INTEGER PRIMARY KEY)'))
+        connection.execute(text(f'INSERT INTO "{table_name}" (id) VALUES (1)'))
+        connection.execute(
+            text(
+                f'CREATE TABLE "{child}" ('
+                "id INTEGER PRIMARY KEY, "
+                f'parent_id INTEGER NOT NULL REFERENCES "{table_name}"(id)'
+                ")"
+            )
+        )
+        connection.execute(text(f'INSERT INTO "{child}" (id, parent_id) VALUES (100, 1)'))
+
+    try:
+        with pytest.raises(ConnectorError):
+            SqlDestination(postgres_url, table_name, "truncate").write([{"id": 1}])
+
+        # Original data untouched -- the failed delete rolled back.
+        assert fetch_rows(postgres_engine, table_name) == [{"id": 1}]
+        assert fetch_rows(postgres_engine, child) == [{"id": 100, "parent_id": 1}]
+    finally:
+        with postgres_engine.begin() as connection:
+            connection.execute(text(f'DROP TABLE IF EXISTS "{child}"'))
+            connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
+
+
+def test_truncate_on_nonexistent_table_creates_it_like_replace(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """truncate against a table that doesn't exist yet has nothing to
+    clear -- it creates the table fresh, same as replace/append do."""
+    assert (
+        SqlDestination(postgres_url, table_name, "truncate").write([{"id": 1, "name": "fresh"}])
+        == 1
+    )
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 1, "name": "fresh"}]
+
+
+def test_other_modes_unaffected_by_truncate_addition(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """Regression: adding `truncate` must not change append/replace/fail's
+    own behavior -- exercise all three against the same table in sequence,
+    same as the existing dedicated tests above, as one direct check that
+    nothing about the shared _prepare_table/write path shifted."""
+    SqlDestination(postgres_url, table_name, "fail").write([{"id": 1, "name": "first"}])
+    with pytest.raises(ConnectorError, match="already exists"):
+        SqlDestination(postgres_url, table_name, "fail").write([{"id": 2, "name": "second"}])
+
+    SqlDestination(postgres_url, table_name, "append").write([{"id": 2, "name": "second"}])
+    assert fetch_rows(postgres_engine, table_name) == [
+        {"id": 1, "name": "first"},
+        {"id": 2, "name": "second"},
+    ]
+
+    SqlDestination(postgres_url, table_name, "replace").write([{"id": 10, "other": "col"}])
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 10, "other": "col"}]
+
+
 def test_csv_to_postgresql_pipeline_end_to_end(
     tmp_path: Path,
     postgres_url: str,

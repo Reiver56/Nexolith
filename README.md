@@ -179,9 +179,18 @@ without arguments and starts the interactive shell instead.
 
 SQL sources accept either `table` or a read-only `query`. SQL destinations support:
 
-- `append`: insert into an existing table, or create it when absent.
-- `replace`: drop an existing table, recreate it from the incoming columns, then insert.
-- `fail`: stop if the table already exists.
+- `append`: insert into an existing table, or create it when absent. Never clears existing rows.
+- `replace`: drop an existing table, recreate it from the incoming columns, then insert. Destroys
+  any real schema the table had -- foreign keys, primary keys, check constraints included. Only
+  safe for a table Nexolith itself owns outright (e.g. a throwaway staging table); never safe
+  against a real, pre-migrated, constrained schema.
+- `fail`: stop if the table already exists at all -- a pure existence check, not a schema or
+  content check. Unusable against a pre-migrated schema where the table legitimately exists
+  before the first run.
+- `truncate`: clear the table's existing rows in place (via `DELETE FROM`, not the SQL `TRUNCATE`
+  statement -- see `SqlDestination`'s docstring for why), then insert. Schema and constraints are
+  left untouched. The safe alternative to `replace` for a properly-migrated, constrained
+  destination schema.
 
 ## Transformations
 
