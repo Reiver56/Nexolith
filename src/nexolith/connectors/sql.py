@@ -1,3 +1,5 @@
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import MetaData, Table, create_engine, inspect, text
@@ -56,7 +58,7 @@ class SqlDestination:
             metadata.clear()
             exists = False
         if not exists:
-            from sqlalchemy import Column, Float, Integer, String
+            from sqlalchemy import Column, Date, DateTime, Float, Integer, Numeric, String
 
             def column_type(value: Any) -> Any:
                 if isinstance(value, bool):
@@ -65,6 +67,30 @@ class SqlDestination:
                     return Integer()
                 if isinstance(value, float):
                     return Float()
+                if isinstance(value, Decimal):
+                    # Unconstrained Numeric -- no fixed precision/scale.
+                    # Against Postgres this creates a plain `numeric`
+                    # column, which stores exact values at whatever
+                    # precision/scale they arrive at (arbitrary, not
+                    # rounded) -- the only choice that doesn't risk
+                    # silently truncating a value we have no schema-level
+                    # information to bound (this is inferred from live
+                    # data, not a declared schema). SQLAlchemy's `Numeric`
+                    # already returns `Decimal` on read back, matching the
+                    # type being written.
+                    return Numeric()
+                if isinstance(value, datetime):
+                    # datetime.datetime is itself a `date` subclass, so
+                    # this check must come before the plain `date` one
+                    # below -- same ordering principle as bool-before-int
+                    # above. timezone=True/False is chosen from the actual
+                    # value rather than always defaulting to naive: a
+                    # source column with tz data (e.g. Postgres
+                    # TIMESTAMPTZ) must not silently lose its offset by
+                    # landing in a TIMESTAMP WITHOUT TIME ZONE column.
+                    return DateTime(timezone=value.tzinfo is not None)
+                if isinstance(value, date):
+                    return Date()
                 return String()
 
             table = Table(

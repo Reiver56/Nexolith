@@ -1,6 +1,8 @@
 import logging
 import re
 from collections.abc import Iterator
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -54,6 +56,18 @@ def fetch_rows(engine: Engine, table_name: str, order_by: str = "id") -> list[di
             text(f'SELECT * FROM "{table_name}" ORDER BY "{order_by}"')
         ).mappings()
         return [dict(row) for row in result]
+
+
+def column_data_types(engine: Engine, table_name: str) -> dict[str, str]:
+    with engine.connect() as connection:
+        result = connection.execute(
+            text(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_name = :table_name"
+            ),
+            {"table_name": table_name},
+        )
+        return {row[0]: row[1] for row in result}
 
 
 def assert_sensitive_values_absent(text_value: str, sensitive_values: list[str]) -> None:
@@ -111,6 +125,118 @@ def test_postgresql_fail_keeps_existing_data(
         SqlDestination(postgres_url, table_name, "fail").write([{"id": 2, "name": "new"}])
 
     assert fetch_rows(postgres_engine, table_name) == original
+
+
+# -- NXL-97: Decimal/datetime/date column type inference --------------------
+#
+# Before the fix, _prepare_table's type inference only recognized
+# bool/int/float -- Decimal and datetime/date silently fell back to
+# String(), so these columns were created as `character varying`. The write
+# itself never failed; the damage only showed up later, the first time
+# something tried to aggregate the column at the SQL level. Every test here
+# checks information_schema.columns directly (not just that the write
+# succeeded) and, for the aggregation test, actually runs SUM/MIN/MAX
+# against the written columns -- that's the real, concrete failure this
+# fix closes (found via the SQL enrichment chain example: SUM(text) raised
+# psycopg.errors.UndefinedFunction).
+
+
+def test_decimal_value_gets_a_real_numeric_column(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    rows: Rows = [{"id": 1, "total": Decimal("68557.51")}]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    assert column_data_types(postgres_engine, table_name)["total"] == "numeric"
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 1, "total": Decimal("68557.51")}]
+
+
+def test_naive_datetime_gets_timestamp_without_time_zone(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    naive = datetime(2026, 7, 19, 0, 10, 17)
+    rows: Rows = [{"id": 1, "occurred_at": naive}]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    assert column_data_types(postgres_engine, table_name)["occurred_at"] == (
+        "timestamp without time zone"
+    )
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 1, "occurred_at": naive}]
+
+
+def test_timezone_aware_datetime_gets_timestamp_with_time_zone(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """A source value carrying real timezone info (e.g. a Postgres
+    TIMESTAMPTZ column read back via psycopg) must not silently lose its
+    offset by landing in a TIMESTAMP WITHOUT TIME ZONE column."""
+    aware = datetime(2026, 7, 19, 0, 10, 17, tzinfo=UTC)
+    rows: Rows = [{"id": 1, "occurred_at": aware}]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    assert column_data_types(postgres_engine, table_name)["occurred_at"] == (
+        "timestamp with time zone"
+    )
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 1, "occurred_at": aware}]
+
+
+def test_date_value_gets_a_real_date_column(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    rows: Rows = [{"id": 1, "activated_on": date(2026, 7, 19)}]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    assert column_data_types(postgres_engine, table_name)["activated_on"] == "date"
+    assert fetch_rows(postgres_engine, table_name) == [{"id": 1, "activated_on": date(2026, 7, 19)}]
+
+
+def test_aggregation_works_on_decimal_and_datetime_columns(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """The real downstream consequence the bug caused: SUM/MIN/MAX against
+    a Decimal/datetime column written by SqlDestination used to fail
+    outright (`function sum(character varying) does not exist`), not just
+    produce a wrong answer -- the column type itself was unusable for
+    aggregation. This must now work, and produce the correct answer."""
+    rows: Rows = [
+        {"id": 1, "amount": Decimal("10.50"), "occurred_at": datetime(2026, 7, 19, 0, 10, 17)},
+        {"id": 2, "amount": Decimal("20.00"), "occurred_at": datetime(2026, 7, 20, 15, 28, 0)},
+        {"id": 3, "amount": Decimal("30.25"), "occurred_at": datetime(2026, 7, 18, 9, 10, 18)},
+    ]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    with postgres_engine.connect() as connection:
+        total, earliest, latest = connection.execute(
+            text(f'SELECT SUM(amount), MIN(occurred_at), MAX(occurred_at) FROM "{table_name}"')
+        ).one()
+
+    assert total == Decimal("60.75")
+    assert earliest == datetime(2026, 7, 18, 9, 10, 18)
+    assert latest == datetime(2026, 7, 20, 15, 28, 0)
+
+
+def test_existing_type_inference_unaffected(
+    postgres_engine: Engine, table_name: str, postgres_url: str
+) -> None:
+    """Regression: adding Decimal/datetime/date handling must not change
+    inference for the types that already worked correctly."""
+    rows: Rows = [
+        {
+            "id": 1,
+            "is_active": True,
+            "count": 3,
+            "ratio": 1.5,
+            "label": "unchanged",
+        }
+    ]
+    SqlDestination(postgres_url, table_name, "replace").write(rows)
+
+    types = column_data_types(postgres_engine, table_name)
+    assert types["id"] == "integer"
+    assert types["is_active"] == "integer"
+    assert types["count"] == "integer"
+    assert types["ratio"] == "double precision"
+    assert types["label"] == "character varying"
 
 
 def test_csv_to_postgresql_pipeline_end_to_end(
