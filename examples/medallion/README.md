@@ -38,8 +38,8 @@ The convention this example confirms, using only what already exists -- no new e
 capability: **a fixed, coordinated path**. Bronze's `destination.path` (`../bronze/orders.csv`)
 and silver's `source.path` (also `../bronze/orders.csv`, both relative to `pipelines/`) name the
 same real file; silver's `destination.path` (`../silver/orders.csv`) and gold's `silver_path`
-parameter (`examples/medallion/silver/orders.csv`, relative to wherever the DAG itself is
-invoked from) name the same file again. The DAG's `depends_on` (`silver` depends on `bronze`,
+parameter (`../silver/orders.csv`, relative to `jobs/` -- see the NXL-92 note below) name the
+same file again. The DAG's `depends_on` (`silver` depends on `bronze`,
 `gold` depends on `silver`) guarantees the producer always finishes writing before the consumer
 runs. Confirmed for real, not faked: the DAG below was actually executed end-to-end, and
 silver's own output file is what gold's script actually opened and aggregated -- see the
@@ -61,28 +61,32 @@ portable, not just correct by cwd coincidence.
 
 A DAG task's `parameters:` (used here by the gold script for `silver_path`/`out_dir`) are
 arbitrary values with no Nexolith-side path resolution at all -- a script does its own I/O with
-whatever string it's given. That's unaffected by NXL-89 and unrelated to the CSV fix: it's why
-`dag.yaml`'s `silver_path`/`out_dir` stay relative to wherever the DAG itself is invoked from.
+whatever string it's given. That's unaffected by NXL-89 and unrelated to the CSV fix.
+
+### A second gap this example surfaced, since fixed (NXL-92)
+
+`dag.yaml` originally gave `silver_path`/`out_dir` as repo-root-relative strings
+(`examples/medallion/silver/orders.csv`), and `jobs/revenue_reports.py` opened them as-is --
+correct only when `nexolith run` happens to be invoked from the repository root. Found by a user
+running `cd examples/medallion && nexolith run dag.yaml`: a real `FileNotFoundError`, reproduced
+before fixing. Since a DAG task's `parameters:` get no Nexolith-side resolution at all (by
+design -- unchanged here), the fix lives entirely in this example: `dag.yaml` now gives
+`silver_path`/`out_dir` relative to `jobs/` (`../silver/orders.csv`, `../gold`, siblings of
+`jobs/` under `examples/medallion/`), and `revenue_reports.py` resolves them against
+`Path(__file__).parent` -- its own fixed file location -- instead of trusting the process's
+current working directory. The DAG file path you pass to `nexolith run` is still resolved
+relative to wherever you invoke it from (unchanged, and unrelated to this fix); only the two
+parameter values inside the gold task stopped depending on it.
 
 ## Running it
 
 ```bash
-uv run python -c "
-from pathlib import Path
-from nexolith.dag import execute_dag
-from nexolith.state import StateStore
-
-store = StateStore(Path('build/medallion_state.db'))
-try:
-    run_id = execute_dag(Path('examples/medallion/dag.yaml'), store)
-    print(store.get_dag_run(run_id).status)
-finally:
-    store.close()
-"
+nexolith run examples/medallion/dag.yaml
 ```
 
-(No CLI command triggers a DAG directly yet -- same as the TEC reference dataset's own
-documented workaround.) Inspect `examples/medallion/bronze/orders.csv`,
+Works from any directory -- the repository root, `examples/medallion` itself, or anywhere else --
+as long as the path you give `nexolith run` correctly points at `dag.yaml` (relative to your own
+current directory, or absolute). Inspect `examples/medallion/bronze/orders.csv`,
 `examples/medallion/silver/orders.csv`, and `examples/medallion/gold/*.csv` afterward; all three
 are generated output, gitignored, safe to delete and regenerate.
 

@@ -78,3 +78,47 @@ def test_bronze_silver_gold_dag_runs_end_to_end_with_correct_data_at_every_layer
         "completed": ("6", "511.90"),
         "cancelled": ("1", "75.50"),
     }
+
+
+def test_gold_task_runs_when_invoked_from_examples_medallion_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NXL-92 regression: the gold script's `silver_path`/`out_dir`
+    parameters used to be repo-root-relative strings opened as-is, so
+    running `nexolith run dag.yaml` from inside `examples/medallion`
+    itself (not the repo root) failed with a real `FileNotFoundError` --
+    reproduced before fixing. The fix resolves those parameters against
+    the script's own `Path(__file__).parent`, so this must succeed with
+    the exact same real output regardless of cwd.
+    """
+    repository_root = Path(__file__).parents[2]
+    shutil.copytree(repository_root / "examples", tmp_path / "examples")
+    monkeypatch.chdir(tmp_path / "examples" / "medallion")
+
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = execute_dag(Path("dag.yaml"), store)
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        assert run.status is DagRunStatus.SUCCEEDED
+    finally:
+        store.close()
+
+    by_customer = {
+        row["customer_id"]: row["completed_revenue"]
+        for row in _read_csv(Path("gold/revenue_by_customer.csv"))
+    }
+    assert by_customer == {
+        "101": "99.80",
+        "102": "152.10",
+        "103": "60.00",
+        "105": "200.00",
+    }
+    by_status = {
+        row["status"]: (row["order_count"], row["total_amount"])
+        for row in _read_csv(Path("gold/revenue_by_status.csv"))
+    }
+    assert by_status == {
+        "completed": ("6", "511.90"),
+        "cancelled": ("1", "75.50"),
+    }
