@@ -215,6 +215,36 @@ def _panel_lines(
     return [top, *body, bottom]
 
 
+def _partial_success_note(run: DagRunRecord, tasks: list[TaskRunRecord]) -> str | None:
+    """NXL-95: `on_failure: skip` (the default policy) only blocks a
+    failed task's own transitive dependents -- an independent branch that
+    already succeeded, or succeeds alongside the failure, keeps its real,
+    persisted effects (rows written, files created) regardless of the
+    DAG's own overall `failed` status. Found via FonoLink: `score_churn`
+    inserted real rows into `churn_scores` while the DAG it belonged to
+    was recorded as `failed` because the unrelated `detect_fraud` task
+    failed. Rendering-only: this does not change `on_failure: skip`'s
+    actual execution/propagation logic at all, only what `runs show`
+    prints alongside a `Status: failed` a reader could otherwise
+    reasonably (but wrongly) read as "nothing happened."
+
+    Returns `None` for every other case -- a fully successful run, a
+    failed run where nothing at all succeeded (every task genuinely did
+    nothing), and a still-`running` run -- so the common case stays exactly
+    as uncluttered as before this story.
+    """
+    if run.status is not DagRunStatus.FAILED:
+        return None
+    succeeded = sum(1 for task in tasks if task.status is TaskRunStatus.SUCCEEDED)
+    if succeeded == 0:
+        return None
+    task_word = "task" if len(tasks) == 1 else "tasks"
+    return (
+        f"Partial: {succeeded} of {len(tasks)} {task_word} succeeded before this run failed -- "
+        "they may have made real, persisted changes despite the overall failure."
+    )
+
+
 def render_run_detail(
     run: DagRunRecord,
     tasks: list[TaskRunRecord],
@@ -244,6 +274,14 @@ def render_run_detail(
         panel_rows.append(("Error", run.error, None if plain else RED))
 
     lines = _panel_lines(panel_rows, plain=plain, max_width=render_context.width)
+
+    partial_success_note = _partial_success_note(run, tasks)
+    if partial_success_note is not None:
+        lines.append("")
+        lines.append(
+            partial_success_note if plain else _colorize(partial_success_note, AMBER, bold=True)
+        )
+
     lines.append("")
     lines.append("Tasks:" if plain else _colorize("Tasks:", WHITE, bold=True))
 

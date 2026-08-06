@@ -669,6 +669,86 @@ def test_run_detail_panel_stays_tight_when_content_is_short() -> None:
     assert widths[0] < 100  # nowhere near the 500-wide cap
 
 
+# -- NXL-95: "partial success" note on a failed run with real side effects --
+#
+# Found via the FonoLink stress test: on_failure: skip only blocks a
+# failed task's own transitive dependents -- an independent branch that
+# succeeded keeps its real, persisted effects regardless of the DAG's own
+# overall `failed` status (score_churn inserted real rows while its DAG
+# was recorded failed because the unrelated detect_fraud task failed). A
+# user glancing at `Status: failed` alone could reasonably assume nothing
+# happened. Rendering-only fix: on_failure: skip's actual execution/
+# propagation logic is untouched by any test in this section.
+
+
+def test_failed_run_with_a_succeeded_task_shows_partial_success_note() -> None:
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "partial_failure_demo", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+    tasks = [
+        TaskRunRecord(1, "independent_success", TaskRunStatus.SUCCEEDED, _T0, _T1, None),
+        TaskRunRecord(1, "independent_failure", TaskRunStatus.FAILED, _T0, _T1, "boom"),
+    ]
+
+    plain_output = render_run_detail(run, tasks, _PLAIN_CONTEXT)
+    styled_output = render_run_detail(run, tasks, _STYLED_CONTEXT)
+
+    assert "Partial: 1 of 2 tasks succeeded" in plain_output
+    assert "\x1b[" not in _ANSI_RE.sub("", plain_output)  # sanity: truly plain
+
+    styled_plain_text = _ANSI_RE.sub("", styled_output)
+    assert "Partial: 1 of 2 tasks succeeded" in styled_plain_text
+    # The note itself is actually colorized in styled mode, not just present
+    # as plain text alongside ANSI codes elsewhere in the output.
+    partial_line = next(line for line in styled_output.split("\n") if "Partial:" in line)
+    assert "\x1b[" in partial_line
+
+
+def test_failed_run_with_no_succeeded_tasks_shows_no_partial_note() -> None:
+    """Don't clutter the common case: a failed run where every task
+    genuinely failed or was skipped has nothing partial to report."""
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "bad_dag", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+    tasks = [
+        TaskRunRecord(1, "a", TaskRunStatus.FAILED, _T0, _T1, "boom"),
+        TaskRunRecord(1, "b", TaskRunStatus.SKIPPED, None, _T1, None),
+    ]
+
+    plain_output = render_run_detail(run, tasks, _PLAIN_CONTEXT)
+    styled_output = render_run_detail(run, tasks, _STYLED_CONTEXT)
+
+    assert "Partial" not in plain_output
+    assert "Partial" not in styled_output
+
+
+def test_fully_successful_run_shows_no_partial_note() -> None:
+    from nexolith.state.models import DagRunRecord, DagRunStatus, TaskRunRecord, TaskRunStatus
+
+    run = DagRunRecord(1, "ok_dag", DagRunStatus.SUCCEEDED, "manual", _T0, _T1, None)
+    tasks = [
+        TaskRunRecord(1, "a", TaskRunStatus.SUCCEEDED, _T0, _T1, None),
+        TaskRunRecord(1, "b", TaskRunStatus.SUCCEEDED, _T0, _T1, None),
+    ]
+
+    plain_output = render_run_detail(run, tasks, _PLAIN_CONTEXT)
+    styled_output = render_run_detail(run, tasks, _STYLED_CONTEXT)
+
+    assert "Partial" not in plain_output
+    assert "Partial" not in styled_output
+
+
+def test_failed_run_with_no_tasks_recorded_shows_no_partial_note() -> None:
+    """Edge case: a failed run with an empty task list (nothing recorded
+    at all) has nothing to report as partially succeeded."""
+    from nexolith.state.models import DagRunRecord, DagRunStatus
+
+    run = DagRunRecord(1, "empty_dag", DagRunStatus.FAILED, "manual", _T0, _T1, "boom")
+    output = render_run_detail(run, [], _PLAIN_CONTEXT)
+    assert "Partial" not in output
+    assert "(no tasks recorded)" in output
+
+
 # -- NXL-80: UnicodeEncodeError in plain-mode task-status markers ----------
 #
 # The bug: RenderContext.plain gated whether the task-status marker got
