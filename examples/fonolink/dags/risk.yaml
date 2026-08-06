@@ -1,0 +1,13 @@
+name: fonolink_risk
+priority: high
+severity: high
+trigger:
+  on_success_of: [fonolink_billing]
+tasks:
+  - name: detect_fraud
+    pipeline: ../pipelines/detect_fraud.yaml
+    depends_on: []
+
+  - name: score_churn
+    pipeline: ../pipelines/score_churn.yaml
+    depends_on: []

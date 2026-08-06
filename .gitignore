@@ -19,3 +19,6 @@ build/
 examples/medallion/bronze/
 examples/medallion/silver/
 examples/medallion/gold/
+examples/fonolink/data/
+examples/fonolink/state/
+examples/fonolink/state_cascade_demo/

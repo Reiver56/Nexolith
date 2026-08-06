@@ -1,0 +1,21 @@
+name: detect_fraud
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query: >-
+    SELECT
+      subscriber_id,
+      occurred_at::date AS day,
+      COALESCE(SUM(duration_or_volume) FILTER (WHERE call_type = 'data'), 0) AS data_mb,
+      COALESCE(COUNT(*) FILTER (WHERE call_type = 'voice'), 0) AS voice_calls,
+      MAX(id) AS sample_cdr_id
+    FROM cdr_raw
+    GROUP BY subscriber_id, occurred_at::date
+transformations:
+  - type: python_job
+    file: ../jobs/detect_fraud_job.py
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: fraud_flags
+  mode: append

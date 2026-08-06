@@ -1,0 +1,19 @@
+name: generate_invoices
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query: >-
+    SELECT subscriber_id, period, SUM(amount) AS total_amount
+    FROM billing_charges
+    WHERE period = :period
+    GROUP BY subscriber_id, period
+  parameters:
+    period: "2026-08"
+transformations:
+  - type: python_job
+    file: ../jobs/generate_invoices_job.py
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: invoices
+  mode: append

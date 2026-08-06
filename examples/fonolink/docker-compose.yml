@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${FONOLINK_POSTGRES_DB:-fonolink}
+      POSTGRES_USER: ${FONOLINK_POSTGRES_USER:-fonolink}
+      POSTGRES_PASSWORD: ${FONOLINK_POSTGRES_PASSWORD:-fonolink}
+    ports:
+      - "${FONOLINK_POSTGRES_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    volumes:
+      - fonolink-postgres:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+volumes:
+  fonolink-postgres:

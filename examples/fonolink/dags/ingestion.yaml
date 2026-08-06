@@ -1,0 +1,34 @@
+name: fonolink_ingestion
+schedule: "1h"
+priority: normal
+severity: medium
+tasks:
+  - name: ingest_cdr
+    pipeline: ../pipelines/ingest_cdr.yaml
+    depends_on: []
+
+  - name: aggregate_usage
+    pipeline: ../pipelines/aggregate_usage.yaml
+    depends_on: [ingest_cdr]
+
+  - name: provision_sim
+    pipeline: ../pipelines/provision_sim.yaml
+    depends_on: []
+
+  - name: confirm_activation
+    script: ../jobs/confirm_activation_script.py
+    depends_on: [provision_sim]
+    parameters:
+      # DAG task parameters carry no Nexolith-side path resolution at all
+      # (unlike pipeline:/script:/file:) -- a script does its own I/O with
+      # whatever string it's given, evaluated against wherever `nexolith
+      # run`/the scheduler daemon is actually invoked from. Repo-root-
+      # relative here, matching the medallion example's own gold-script
+      # convention exactly: this whole example is documented as run from
+      # the repository root.
+      database_url: postgresql://fonolink:fonolink@localhost:5434/fonolink
+      confirmations_path: examples/fonolink/data/activation_confirmations.csv
+
+  - name: ingest_support_tickets
+    pipeline: ../pipelines/ingest_support_tickets.yaml
+    depends_on: []
