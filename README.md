@@ -128,13 +128,19 @@ nexolith run path/to/pipeline.yaml
 Running `nexolith` without a subcommand opens the Nexo interactive session — full-screen, with a
 colored pixel-art panel header and tab-completion, on a capable terminal; a plain-text line loop
 otherwise (`NO_COLOR`, no real TTY, or a narrow terminal). Use `/help` to list its currently
-available commands, `/open <path>` to select or replace a valid pipeline (path completion included
-in full-screen mode), `/validate` and `/run` to operate on it, `/open` to show the current
-selection, `/clear` to remove it, and `/exit` to leave. The selected filename appears in the
-prompt and the context lasts only for the current process. Validation and execution report
-observable pipeline phases as plain text; successful runs finish with the real status, row counts,
-and duration. Expected failures keep the session usable, and `Ctrl+C` returns to the prompt after
-interrupting the current synchronous operation.
+available commands, `/open <path>` to select or replace a valid pipeline or DAG file (path
+completion included in full-screen mode; DAG files are recognized the same way `nexolith
+validate`/`run` recognize them), `/validate` and `/run` to operate on whichever is currently open,
+`/open` to show the current selection, `/clear` to remove it, and `/exit` to leave. `/runs` lists
+recent DAG runs and `/runs <id>` shows one in full detail — the same rendering `nexolith runs
+list`/`runs show` produce. `/scheduler status` reports whether the scheduler daemon is running and
+`/scheduler stop` stops one; starting the daemon (`/scheduler start`) is deliberately not offered
+from inside the session, since it runs as its own long-lived foreground process and would block
+the session's event loop — start it from a separate terminal with `nexolith scheduler start`
+instead. The selected filename appears in the prompt and the context lasts only for the current
+process. Validation and execution report observable pipeline phases as plain text; successful runs
+finish with the real status, row counts, and duration. Expected failures keep the session usable,
+and `Ctrl+C` returns to the prompt after interrupting the current synchronous operation.
 
 `diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
 information without exposing environment variables, usernames, hostnames, filesystem paths, or

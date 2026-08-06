@@ -11,8 +11,18 @@ from collections.abc import Iterable
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
 
-COMMANDS: tuple[str, ...] = ("/help", "/open", "/validate", "/run", "/clear", "/exit")
+COMMANDS: tuple[str, ...] = (
+    "/help",
+    "/open",
+    "/validate",
+    "/run",
+    "/runs",
+    "/scheduler",
+    "/clear",
+    "/exit",
+)
 _PATH_COMMANDS = frozenset({"/open"})
+_SCHEDULER_SUBCOMMANDS: tuple[str, ...] = ("status", "stop")
 
 
 class NexolithCompleter(Completer):
@@ -37,11 +47,18 @@ class NexolithCompleter(Completer):
         command = text[:first_space]
         if command in _PATH_COMMANDS:
             yield from self._complete_path(text[first_space + 1 :])
+        elif command == "/scheduler":
+            yield from self._complete_scheduler_subcommand(text[first_space + 1 :])
 
     def _complete_command(self, partial: str) -> Iterable[Completion]:
         for command in COMMANDS:
             if command.startswith(partial):
                 yield Completion(command, start_position=-len(partial))
+
+    def _complete_scheduler_subcommand(self, partial: str) -> Iterable[Completion]:
+        for subcommand in _SCHEDULER_SUBCOMMANDS:
+            if subcommand.startswith(partial):
+                yield Completion(subcommand, start_position=-len(partial))
 
     def _complete_path(self, path_prefix: str) -> Iterable[Completion]:
         # A sub-document containing only the path portion, with its cursor at

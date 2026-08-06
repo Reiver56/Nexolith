@@ -93,5 +93,29 @@ def test_non_open_commands_get_no_path_completion(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "pipeline.yaml").write_text("name: x\n", encoding="utf-8")
 
-    for command in ("/validate", "/run", "/help", "/clear", "/exit"):
+    for command in ("/validate", "/run", "/runs", "/help", "/clear", "/exit"):
         assert completions_for(f"{command} pipe") == []
+
+
+# -- NXL-99: /runs and /scheduler completion --------------------------------
+
+
+def test_bare_slash_includes_the_new_v033_parity_commands() -> None:
+    assert "/runs" in COMMANDS
+    assert "/scheduler" in COMMANDS
+    assert completions_for("/runs") == ["/runs"]
+    assert completions_for("/sched") == ["/scheduler"]
+
+
+def test_scheduler_subcommand_completion_offers_status_and_stop() -> None:
+    assert completions_for("/scheduler ") == ["status", "stop"]
+    assert completions_for("/scheduler st") == ["status", "stop"]
+    assert completions_for("/scheduler sto") == ["stop"]
+
+
+def test_scheduler_subcommand_completion_does_not_offer_start() -> None:
+    """Deliberate: /scheduler start is a recognized-but-rejected command
+    (see test_interactive_cli.py's
+    test_scheduler_start_is_rejected_with_a_helpful_hint), not a real
+    completable action -- it must not appear as a completion suggestion."""
+    assert "start" not in completions_for("/scheduler ")

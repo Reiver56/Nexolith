@@ -1,5 +1,7 @@
 """Minimal, testable interactive CLI session."""
 
+import sys
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -7,32 +9,62 @@ from typing import Protocol
 
 from nexolith.application import PipelineApplication
 from nexolith.cli.context import SelectedPipeline, SessionContext
+from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
 from nexolith.cli.nexo_art import render_nexo_panel
 from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
 from nexolith.cli.render_context import RenderContext, detect_render_context
+from nexolith.cli.runs_render import render_run_detail, render_run_not_found, render_runs_list
+from nexolith.cli.scheduler_render import (
+    SchedulerStatus,
+    render_scheduler_not_running,
+    render_scheduler_status,
+    render_scheduler_stop_uncertain,
+    render_scheduler_stopped,
+    render_windows_stop_caveat,
+)
 from nexolith.config import PipelineConfig
+from nexolith.dag import execute_dag, load_dag
 from nexolith.events import EventSink, PipelineOperation
 from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
 from nexolith.models import ExecutionResult
+from nexolith.scheduler import (
+    default_pidfile_path,
+    is_process_alive,
+    read_pidfile,
+    remove_pidfile,
+    stop_process,
+)
+from nexolith.state import StateStore
 
 DEFAULT_PROMPT = "nexolith> "
 SPLASH = "Nexo - Nexolith interactive session\nType /help for available commands."
 HELP = (
     "Available commands:\n"
     "  /help  Show available commands.\n"
-    "  /open <path>  Open or replace the current pipeline.\n"
-    "  /open  Show the current pipeline.\n"
-    "  /clear  Clear the current pipeline.\n"
-    "  /validate  Validate the current pipeline.\n"
-    "  /run  Run the current pipeline.\n"
+    "  /open <path>  Open or replace the current pipeline or DAG.\n"
+    "  /open  Show the current pipeline or DAG.\n"
+    "  /clear  Clear the current pipeline or DAG.\n"
+    "  /validate  Validate the current pipeline or DAG.\n"
+    "  /run  Run the current pipeline or DAG.\n"
+    "  /runs  List recent DAG runs.\n"
+    "  /runs <id>  Show detail for one DAG run.\n"
+    "  /scheduler status  Report whether the scheduler daemon is running.\n"
+    "  /scheduler stop  Stop a running scheduler daemon.\n"
     "  /exit  Exit the interactive session.\n"
-    "Operations use the pipeline currently shown in the prompt."
+    "Operations use the pipeline or DAG currently shown in the prompt.\n"
+    "The scheduler itself is started from a separate terminal "
+    "(nexolith scheduler start) -- it runs as its own long-lived process."
 )
 GOODBYE = "Goodbye."
 NO_PIPELINE = "No pipeline is currently open."
+_SCHEDULER_START_HINT = (
+    "Start the scheduler in its own terminal: nexolith scheduler start. "
+    "It runs as a long-lived foreground process, so it can't run inside "
+    "this session without blocking it."
+)
 
 
 class InteractiveCommand(StrEnum):
@@ -42,6 +74,8 @@ class InteractiveCommand(StrEnum):
     CLEAR = "clear"
     VALIDATE = "validate"
     RUN = "run"
+    RUNS = "runs"
+    SCHEDULER = "scheduler"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -71,6 +105,18 @@ def parse_command(value: str) -> ParsedCommand:
         return ParsedCommand(InteractiveCommand.VALIDATE)
     if command == "/run":
         return ParsedCommand(InteractiveCommand.RUN)
+    if command == "/runs":
+        return ParsedCommand(InteractiveCommand.RUNS)
+    if command.startswith("/runs"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/runs" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.RUNS, parts[1])
+    if command == "/scheduler":
+        return ParsedCommand(InteractiveCommand.SCHEDULER)
+    if command.startswith("/scheduler"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/scheduler" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.SCHEDULER, parts[1])
     if command == "/exit":
         return ParsedCommand(InteractiveCommand.EXIT)
     return ParsedCommand(InteractiveCommand.UNKNOWN, command)
@@ -206,6 +252,29 @@ class InteractiveSession:
         # timeline, summary, /validate highlighting) share one consistent capability
         # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
         self.render_context = render_context or detect_render_context()
+        if __import__("os").environ.get("NEXOLITH_DEBUG_RENDER"):
+            import sys as _sys
+
+            _sys.stderr.write("=== NEXOLITH_DEBUG_RENDER (temporary, not committed) ===\n")
+            _sys.stderr.write(f"sys.stdout type: {type(_sys.stdout)!r}\n")
+            _sys.stderr.write(f"sys.stdout is sys.__stdout__: {_sys.stdout is _sys.__stdout__!r}\n")
+            _sys.stderr.write(f"sys.stdout.isatty(): {_sys.stdout.isatty()!r}\n")
+            _sys.stderr.write(f"sys.stdout.encoding: {getattr(_sys.stdout, 'encoding', None)!r}\n")
+            _sys.stderr.write(f"self._write is builtins.print: {self._write is print!r}\n")
+            for _field in (
+                "is_tty",
+                "color_enabled",
+                "width",
+                "forced_plain",
+                "encoding_safe",
+                "kitty_graphics",
+            ):
+                _sys.stderr.write(
+                    f"render_context.{_field}: {getattr(self.render_context, _field)!r}\n"
+                )
+            _sys.stderr.write(f"render_context.plain: {self.render_context.plain!r}\n")
+            _sys.stderr.write(f"render_context.use_kitty: {self.render_context.use_kitty!r}\n")
+            _sys.stderr.write("=== end debug ===\n")
 
     def set_output_writer(self, writer: OutputWriter) -> None:
         """Redirect where this session's output goes, e.g. to a full-screen
@@ -254,6 +323,12 @@ class InteractiveSession:
         if command.kind is InteractiveCommand.RUN:
             self._run_pipeline()
             return True
+        if command.kind is InteractiveCommand.RUNS:
+            self._show_runs(command.text)
+            return True
+        if command.kind is InteractiveCommand.SCHEDULER:
+            self._scheduler_command(command.text)
+            return True
         if command.kind is InteractiveCommand.EXIT:
             self._write(GOODBYE)
             return False
@@ -268,7 +343,12 @@ class InteractiveSession:
         requested_path = Path(value)
         try:
             resolved_path = requested_path.resolve()
-            self._application.validate_pipeline(requested_path)
+            if detect_document_kind(requested_path) is DocumentKind.DAG:
+                load_dag(requested_path)
+                kind_label = "DAG"
+            else:
+                self._application.validate_pipeline(requested_path)
+                kind_label = "Pipeline"
         except ConfigurationError as error:
             self._write(f"Could not open pipeline: {error}")
             return
@@ -277,7 +357,7 @@ class InteractiveSession:
             return
 
         self.context.select(requested_path, resolved_path)
-        self._write(f"Pipeline opened: {requested_path}")
+        self._write(f"{kind_label} opened: {requested_path}")
 
     def _clear_pipeline(self) -> None:
         if self.context.clear():
@@ -288,6 +368,9 @@ class InteractiveSession:
     def _validate_pipeline(self) -> None:
         pipeline = self._require_pipeline()
         if pipeline is None:
+            return
+        if detect_document_kind(pipeline.resolved_path) is DocumentKind.DAG:
+            self._validate_dag(pipeline)
             return
         sink = self._presenter.event_sink(PipelineOperation.VALIDATE)
         try:
@@ -303,6 +386,9 @@ class InteractiveSession:
         pipeline = self._require_pipeline()
         if pipeline is None:
             return
+        if detect_document_kind(pipeline.resolved_path) is DocumentKind.DAG:
+            self._run_dag(pipeline)
+            return
         sink = self._presenter.event_sink(PipelineOperation.RUN)
         try:
             result = self._application.run_pipeline(pipeline.resolved_path, event_sink=sink)
@@ -312,6 +398,146 @@ class InteractiveSession:
             self._presenter.show_error(error, pipeline, PipelineOperation.RUN)
         else:
             self._presenter.show_result(result)
+
+    def _validate_dag(self, pipeline: SelectedPipeline) -> None:
+        """DAG validation has no event stream to drive the presenter's step
+        timeline (`load_dag()` is a single synchronous parse+check, not a
+        `PipelineApplication`-style operation) -- written directly to the
+        output log instead, matching the classic CLI's own DAG `validate`
+        branch (a single echoed line, no progress display there either).
+        """
+        try:
+            dag = load_dag(pipeline.resolved_path)
+        except KeyboardInterrupt:
+            self._write("Validation interrupted.")
+            return
+        except ConfigurationError as error:
+            self._write(render_operation_error(error, pipeline))
+            return
+        task_label = "task" if len(dag.tasks) == 1 else "tasks"
+        self._write(f"DAG '{dag.name}' is valid ({len(dag.tasks)} {task_label}).")
+
+    def _run_dag(self, pipeline: SelectedPipeline) -> None:
+        """Reuses `execute_dag()` and `render_run_detail()` exactly as the
+        classic CLI's `run` command does for a DAG file -- same state store,
+        same recorded run, same rendering (bordered panel, severity,
+        partial-success note, retry attempts, width-capped wrapping).
+        """
+        store = StateStore()
+        try:
+            try:
+                run_id = execute_dag(pipeline.resolved_path, store)
+            except KeyboardInterrupt:
+                self._write("Execution interrupted.")
+                return
+            except ConfigurationError as error:
+                self._write(render_operation_error(error, pipeline))
+                return
+            dag_run = store.get_dag_run(run_id)
+            assert dag_run is not None
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        self._write(render_run_detail(dag_run, tasks, self.render_context, attempts))
+
+    def _show_runs(self, value: str) -> None:
+        """`/runs` (list) and `/runs <id>` (show) -- reuses `runs_render.py`'s
+        rendering exactly, the same functions `nexolith runs list`/`runs show`
+        call, so severity, the partial-success note, retry attempts, and
+        width-capped wrapping all render identically here.
+        """
+        if not value:
+            store = StateStore()
+            try:
+                runs = store.list_recent_dag_runs(20)
+            finally:
+                store.close()
+            self._write(render_runs_list(runs, self.render_context))
+            return
+
+        try:
+            run_id = int(value)
+        except ValueError:
+            self._write(f"Usage: /runs [id] -- '{value}' is not a valid run id.")
+            return
+
+        store = StateStore()
+        try:
+            run = store.get_dag_run(run_id)
+            if run is None:
+                self._write(render_run_not_found(run_id))
+                return
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        self._write(render_run_detail(run, tasks, self.render_context, attempts))
+
+    def _scheduler_command(self, value: str) -> None:
+        subcommand = value.strip()
+        if not subcommand:
+            self._write("Usage: /scheduler status|stop")
+            return
+        if subcommand == "status":
+            self._scheduler_status()
+            return
+        if subcommand == "stop":
+            self._scheduler_stop()
+            return
+        if subcommand == "start":
+            self._write(_SCHEDULER_START_HINT)
+            return
+        self._write(f"Unknown scheduler command: {subcommand}. Use /scheduler status or stop.")
+
+    def _scheduler_status(self) -> None:
+        pidfile_path = default_pidfile_path()
+        record = read_pidfile(pidfile_path)
+        if record is None or not is_process_alive(record.pid):
+            if record is not None:
+                remove_pidfile(pidfile_path)
+            self._write(
+                render_scheduler_status(SchedulerStatus(False, None, None), self.render_context)
+            )
+            return
+        self._write(
+            render_scheduler_status(
+                SchedulerStatus(True, record.pid, record.started_at), self.render_context
+            )
+        )
+
+    def _scheduler_stop(self) -> None:
+        """Mirrors the classic CLI's `scheduler stop` exactly: a bounded
+        ~2s poll for the target process to actually exit. That's a real,
+        synchronous block on this session's single thread for up to two
+        seconds -- consistent with `/validate`/`/run` already blocking
+        synchronously for however long real pipeline execution takes; not a
+        new category of blocking this session didn't already accept.
+        """
+        pidfile_path = default_pidfile_path()
+        record = read_pidfile(pidfile_path)
+        if record is None:
+            self._write(render_scheduler_not_running())
+            return
+        if not is_process_alive(record.pid):
+            remove_pidfile(pidfile_path)
+            self._write(render_scheduler_not_running())
+            return
+
+        if sys.platform == "win32":
+            self._write(render_windows_stop_caveat())
+        stop_process(record.pid)
+
+        for _ in range(20):  # ~2s budget for the process to actually exit
+            if not is_process_alive(record.pid):
+                break
+            time.sleep(0.1)
+
+        remove_pidfile(pidfile_path)
+        if is_process_alive(record.pid):
+            self._write(render_scheduler_stop_uncertain(record.pid))
+        else:
+            self._write(render_scheduler_stopped(record.pid))
 
     def _require_pipeline(self) -> SelectedPipeline | None:
         if self.context.pipeline is None:

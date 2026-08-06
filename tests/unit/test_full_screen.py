@@ -1,23 +1,44 @@
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.document import Document
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.output import DummyOutput
 
+from nexolith.cli.completion import NexolithCompleter
 from nexolith.cli.full_screen import _DIVIDER_COLOR, _divider, run_full_screen_session
 from nexolith.cli.interactive import InteractiveSession
 from nexolith.cli.nexo_art import BLURPLE
 from nexolith.cli.render_context import RenderContext
 from nexolith.cli.status_area import StatusAreaState
+from nexolith.scheduler import default_pidfile_path, is_process_alive, write_pidfile
 
 _CAPABLE = RenderContext(is_tty=True, color_enabled=True, width=200)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@pytest.fixture(autouse=True)
+def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test in this file gets its own state directory -- never the
+    real user's %LOCALAPPDATA%\\Nexolith. Needed for this story's /runs and
+    /scheduler commands, which open a real StateStore/pidfile at the
+    default location unless overridden.
+    """
+    state_dir = tmp_path / "full_screen_state"
+    monkeypatch.setenv("NEXOLITH_STATE_DIR", str(state_dir))
+    return state_dir
 
 
 def run_with_keys(
@@ -35,6 +56,41 @@ def run_with_keys(
         with create_app_session(input=pipe_input, output=DummyOutput()):
             run_full_screen_session(_CAPABLE, session=active_session, status_state=status_state)
     return active_session
+
+
+def run_with_keys_capturing_output_log(
+    keys: str,
+    *,
+    session: InteractiveSession | None = None,
+    status_state: StatusAreaState | None = None,
+) -> str:
+    """Like `run_with_keys`, but also returns the real, final scrollable
+    output log text -- what a user would actually see for commands (like
+    /help, /runs, /scheduler) that write through the plain output log
+    rather than the status area. `output_area` is the only read-only
+    Buffer-backed window in the layout (the input field isn't read-only;
+    the header/status controls have no Buffer at all), so it's identified
+    that way rather than needing `run_full_screen_session` to expose it.
+    """
+    active_session = session or InteractiveSession(render_context=_CAPABLE)
+    captured: dict[str, str] = {}
+    original_dispatch = active_session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        for window in get_app().layout.find_all_windows():
+            buffer = getattr(window.content, "buffer", None)
+            if buffer is not None and bool(buffer.read_only()):
+                captured["text"] = buffer.document.text
+        return result
+
+    active_session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(keys)
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=active_session, status_state=status_state)
+    return captured.get("text", "")
 
 
 def write_pipeline(path: Path, source: Path, destination: Path) -> None:
@@ -380,3 +436,160 @@ def test_scroll_events_route_to_the_output_log_not_input_history(
 
     assert scroll_calls == [("up", output_area_window_id)]
     assert history_calls == []
+
+
+# -- NXL-99: full-screen parity (scheduler, runs, DAG) ----------------------
+
+
+def write_dag(dag_path: Path, pipeline_path: Path, source: Path, destination: Path) -> None:
+    source.write_text("id,status\n1,ready\n2,done\n", encoding="utf-8")
+    pipeline_path.write_text(
+        f"""
+name: full_screen_dag_task
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {destination.as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: full_screen_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def test_open_validate_run_a_dag_end_to_end_in_full_screen(tmp_path: Path) -> None:
+    """DAG support end-to-end through the real full-screen machinery, not
+    just the classic loop: /open detects the DAG (detect_document_kind()),
+    /validate calls load_dag() directly (no event stream, so no status-area
+    timeline for this), /run reuses execute_dag()/render_run_detail() --
+    real state recorded, real file written by the DAG's own task.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    output_log = run_with_keys_capturing_output_log(f"/open {dag_path}\n/validate\n/run\n/exit\n")
+
+    plain_output = _ANSI_RE.sub("", output_log)
+    assert "DAG opened:" in output_log
+    assert "DAG 'full_screen_dag' is valid (1 task)." in output_log
+    assert "Status: succeeded" in plain_output  # styled mode colors just the value
+    assert "DAG: full_screen_dag" in output_log
+    assert "only" in plain_output and "succeeded" in plain_output
+    assert destination.is_file()
+    assert destination.read_text(encoding="utf-8").strip().splitlines() == [
+        "id,status",
+        "1,ready",
+        "2,done",
+    ]
+
+
+def test_runs_list_and_show_render_correctly_inside_full_screen(tmp_path: Path) -> None:
+    """/runs and /runs <id> reuse the real runs_render.py output inside the
+    full-screen session's own scrollable log."""
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {dag_path}\n/run\n/runs\n/runs 1\n/exit\n"
+    )
+
+    plain_output = _ANSI_RE.sub("", output_log)
+    assert "ID" in output_log and "DAG" in output_log and "SEVERITY" in output_log
+    assert "Status: succeeded" in plain_output  # styled mode colors just the value
+    assert "Trigger: manual" in output_log
+    assert "Severity: medium" in output_log
+
+
+def test_runs_list_with_no_runs_recorded_yet_in_full_screen() -> None:
+    output_log = run_with_keys_capturing_output_log("/runs\n/exit\n")
+
+    assert "No DAG runs recorded yet." in output_log
+
+
+def test_scheduler_status_not_running_renders_correctly_in_full_screen() -> None:
+    output_log = run_with_keys_capturing_output_log("/scheduler status\n/exit\n")
+
+    assert "Scheduler:" in output_log
+    assert "not running" in output_log
+
+
+def test_scheduler_status_running_for_a_real_process_in_full_screen() -> None:
+    """Real separate process, real PID in the marker file -- matching the
+    classic-loop and classic-CLI equivalents of this exact check."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+
+        output_log = run_with_keys_capturing_output_log("/scheduler status\n/exit\n")
+
+        assert "running" in output_log
+        assert str(proc.pid) in output_log
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_scheduler_stop_genuinely_terminates_a_real_process_in_full_screen() -> None:
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+        assert is_process_alive(proc.pid) is True
+
+        output_log = run_with_keys_capturing_output_log("/scheduler stop\n/exit\n")
+
+        proc.wait(timeout=5)
+        assert is_process_alive(proc.pid) is False
+        assert "stopped" in output_log.lower()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_scheduler_start_is_rejected_in_full_screen_without_hanging_the_session() -> None:
+    """The real point of this test: /scheduler start must not hang the
+    full-screen event loop (Scheduler.run() blocks forever by design) --
+    confirmed by the session actually reaching /exit normally afterward,
+    not just that the hint text appears."""
+    session = InteractiveSession(render_context=_CAPABLE)
+
+    output_log = run_with_keys_capturing_output_log("/scheduler start\n/exit\n", session=session)
+
+    assert "nexolith scheduler start" in output_log
+    assert session.context.pipeline is None  # session ended cleanly, nothing hung
+
+
+def test_completion_menu_offers_the_new_v033_parity_commands() -> None:
+    """/help text and the completion menu both surface /runs and
+    /scheduler -- confirmed via the real NexolithCompleter the full-screen
+    input field actually uses, not a duplicated command list."""
+    completer = NexolithCompleter()
+    document = Document("/", cursor_position=1)
+    completions = [c.text for c in completer.get_completions(document, CompleteEvent())]
+
+    assert "/runs" in completions
+    assert "/scheduler" in completions

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
@@ -27,9 +30,25 @@ from nexolith.config.models import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.scheduler import default_pidfile_path, is_process_alive, write_pidfile
 from nexolith.types import Scalar
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test in this file gets its own state directory -- never the
+    real user's %LOCALAPPDATA%\\Nexolith -- matching test_scheduler_cli.py's
+    own convention. Needed for this story's /runs and /scheduler commands,
+    which (like their classic-CLI counterparts) open a real StateStore/
+    pidfile at the default location unless overridden.
+    """
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("NEXOLITH_STATE_DIR", str(state_dir))
+    return state_dir
+
+
 type InputStep = str | BaseException | Callable[[], str]
 
 
@@ -481,6 +500,10 @@ def test_command_parser_has_small_explicit_contract() -> None:
     assert parse_command("/clear").kind is InteractiveCommand.CLEAR
     assert parse_command("/validate").kind is InteractiveCommand.VALIDATE
     assert parse_command("/run").kind is InteractiveCommand.RUN
+    assert parse_command("/runs").kind is InteractiveCommand.RUNS
+    assert parse_command("/runs 42").text == "42"
+    assert parse_command("/scheduler").kind is InteractiveCommand.SCHEDULER
+    assert parse_command("/scheduler status").text == "status"
     assert parse_command("/exit").kind is InteractiveCommand.EXIT
     assert parse_command("validate").kind is InteractiveCommand.UNKNOWN
 
@@ -679,6 +702,268 @@ def test_help_does_not_expose_deferred_v031_or_v050_features() -> None:
     assert "/logs" not in help_text
     assert "completion" not in help_text
     assert "history" not in help_text
+
+
+# -- NXL-99: full-screen/classic-shared session parity (scheduler, runs, DAG) -
+
+
+def write_dag(dag_path: Path, pipeline_path: Path, source: Path, destination: Path) -> None:
+    source.write_text("id,status\n1,ready\n2,done\n", encoding="utf-8")
+    pipeline_path.write_text(
+        f"""
+name: dag_task_pipeline
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {destination.as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: interactive_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def write_failing_dag(dag_path: Path, pipeline_path: Path) -> None:
+    """A DAG that's structurally valid (so /open succeeds -- load_dag()
+    validates every task's pipeline reference exists) but genuinely fails
+    when actually run: its one task's pipeline points at a source file
+    that doesn't exist."""
+    pipeline_path.write_text(
+        f"""
+name: failing_task_pipeline
+source:
+  type: csv
+  path: {(pipeline_path.parent / "does_not_exist.csv").as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {(pipeline_path.parent / "unreachable_output.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: interactive_failing_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def test_help_lists_the_new_v033_parity_commands() -> None:
+    """NXL-99: /runs and /scheduler must be discoverable via /help, alongside
+    the original five commands (unchanged)."""
+    _, _, output = run_session(["/help", "/exit"])
+
+    help_text = "\n".join(output)
+    assert "/runs" in help_text
+    assert "/runs <id>" in help_text
+    assert "/scheduler status" in help_text
+    assert "/scheduler stop" in help_text
+    # /scheduler start is deliberately not offered as a real interactive
+    # command -- see test_scheduler_start_is_rejected_with_a_helpful_hint.
+    assert "scheduler start" in help_text.lower()  # still mentioned, as a hint
+
+
+def test_open_validate_run_a_dag_end_to_end(tmp_path: Path) -> None:
+    """/open, /validate, /run all extended to recognize a DAG file the same
+    way the classic CLI's validate/run commands do (detect_document_kind()),
+    reusing execute_dag()/render_run_detail() -- not a parallel
+    implementation. Real state recorded, real file written by the DAG's
+    own task.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    session, _, output = run_session([f"/open {dag_path}", "/validate", "/run", "/exit"])
+
+    rendered = "\n".join(output)
+    assert any(line.startswith("DAG opened:") for line in output)
+    assert session.context.pipeline is not None
+    assert session.context.pipeline.resolved_path == dag_path.resolve()
+    assert "DAG 'interactive_dag' is valid (1 task)." in output
+    assert "Status: succeeded" in rendered
+    assert "DAG: interactive_dag" in rendered
+    assert "[OK] only" in rendered
+    assert destination.is_file()
+    assert destination.read_text(encoding="utf-8").strip().splitlines() == [
+        "id,status",
+        "1,ready",
+        "2,done",
+    ]
+
+
+def test_run_a_failing_dag_reports_failure_and_session_stays_usable(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    write_failing_dag(dag_path, pipeline_path)
+
+    session, _, output = run_session([f"/open {dag_path}", "/run", "/help", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "Status: failed" in rendered
+    assert HELP in output  # session still usable after a DAG execution failure
+    assert session.context.pipeline is not None
+
+
+def test_open_invalid_dag_reports_error_via_the_shared_error_renderer(tmp_path: Path) -> None:
+    dag_path = tmp_path / "bad_dag.yaml"
+    dag_path.write_text("name: x\ntasks: []\n", encoding="utf-8")  # tasks must be non-empty
+
+    _, _, output = run_session([f"/open {dag_path}", "/exit"])
+
+    assert any(line.startswith("Could not open pipeline:") for line in output)
+
+
+def test_runs_list_with_no_runs_recorded_yet() -> None:
+    _, _, output = run_session(["/runs", "/exit"])
+
+    assert "No DAG runs recorded yet." in output
+
+
+def test_runs_list_and_show_reuse_real_rendering_after_a_dag_run(tmp_path: Path) -> None:
+    """Confirms /runs (list) and /runs <id> (show) reuse runs_render.py's
+    real rendering functions -- the exact bordered-panel/table output
+    `nexolith runs list`/`runs show` produce -- rather than a parallel
+    implementation for the interactive session.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/open {dag_path}", "/run", "/runs", "/runs 1", "/exit"])
+
+    rendered = "\n".join(output)
+    # /runs (list): the real table header from render_runs_list.
+    assert (
+        "ID" in rendered and "DAG" in rendered and "STATUS" in rendered and "SEVERITY" in rendered
+    )
+    # /runs 1 (show): the real bordered panel from render_run_detail.
+    assert rendered.count("Status: succeeded") >= 1
+    assert "Trigger: manual" in rendered
+    assert "Severity: medium" in rendered
+
+
+def test_runs_show_rejects_a_non_numeric_id() -> None:
+    _, _, output = run_session(["/runs abc", "/exit"])
+
+    assert any("Usage: /runs [id]" in line for line in output)
+
+
+def test_runs_show_reports_not_found_for_a_nonexistent_run() -> None:
+    _, _, output = run_session(["/runs 999", "/exit"])
+
+    assert "No DAG run found with id 999." in output
+
+
+def test_scheduler_status_reports_not_running_when_no_marker_file_exists() -> None:
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("Scheduler:" in line and "not running" in line for line in output)
+
+
+def test_scheduler_status_reports_running_for_a_real_live_process() -> None:
+    """Not just trusting a marker file's existence -- a real separate
+    process is spawned and its actual PID written to the marker, matching
+    test_scheduler_cli.py's own convention for this exact check."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+
+        _, _, output = run_session(["/scheduler status", "/exit"])
+
+        rendered = "\n".join(output)
+        assert "Scheduler:" in rendered
+        assert "running" in rendered
+        assert str(proc.pid) in rendered
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_scheduler_stop_reports_not_running_when_no_marker_exists() -> None:
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert "Scheduler is not running." in output
+
+
+def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
+    """Real process, real termination -- mirrors
+    test_scheduler_cli.py's test_stop_genuinely_terminates_a_real_running_scheduler
+    exactly, but driven through the interactive session's /scheduler stop
+    instead of calling stop_process()/the classic CLI command directly.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+        assert is_process_alive(proc.pid) is True
+
+        _, _, output = run_session(["/scheduler stop", "/exit"])
+
+        proc.wait(timeout=5)
+        assert is_process_alive(proc.pid) is False
+        assert any("stopped" in line.lower() for line in output)
+        assert not default_pidfile_path().exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_scheduler_start_is_rejected_with_a_helpful_hint() -> None:
+    """Deliberate design choice (NXL-99): /scheduler start is not wired to
+    actually run the daemon in-session -- Scheduler.run() blocks forever by
+    design (it's meant to own a dedicated foreground process), and this
+    session has no background thread to run it on instead (a new one would
+    violate the story's own constraint). Confirm it's rejected cleanly with
+    a helpful pointer to the real command, not silently ignored as
+    'unknown', and that the session keeps working afterward.
+    """
+    session, _, output = run_session(["/scheduler start", "/help", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "nexolith scheduler start" in rendered
+    assert "Unknown command" not in rendered
+    assert HELP in output
+    assert session.context.pipeline is None  # nothing hung or crashed
+
+
+def test_scheduler_unknown_subcommand_is_reported_clearly() -> None:
+    _, _, output = run_session(["/scheduler bogus", "/exit"])
+
+    assert any("Unknown scheduler command: bogus" in line for line in output)
+
+
+def test_bare_scheduler_shows_usage() -> None:
+    _, _, output = run_session(["/scheduler", "/exit"])
+
+    assert "Usage: /scheduler status|stop" in output
 
 
 def test_real_run_failure_is_redacted_and_session_remains_usable(tmp_path: Path) -> None:
