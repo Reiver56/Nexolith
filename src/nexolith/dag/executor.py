@@ -18,7 +18,7 @@ from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.jobs import run_script
 from nexolith.models import ExecutionResult
-from nexolith.state import StateStore
+from nexolith.state import DagRunStatus, StateStore
 from nexolith.types import Scalar
 
 
@@ -217,7 +217,57 @@ class DagExecutor:
                     blocked = True
 
         self._store.complete_dag_run(dag_run_id, success=not dag_failed, error=first_error)
+        self._record_cross_dag_reactions(dag)
         return dag_run_id
+
+    def _record_cross_dag_reactions(self, dag: DagConfig) -> None:
+        """NXL-94 fix. Whenever a DAG run finishes here -- regardless of
+        trigger_reason, so a manual `nexolith run`/`execute_dag()` call
+        included -- record its reaction to each upstream it declares in
+        `trigger.on_success_of`, against that upstream's current latest
+        successful run.
+
+        Chosen design (Option B from the story): bookkeeping lives on the
+        *downstream* side, at its own completion, keyed off its own
+        `trigger` declaration -- not on the upstream side broadcasting to
+        every other DAG that might name it (Option A). Option A would need
+        to scan every registered DAG's file at the upstream's completion to
+        find who declares it as a trigger source; this needs only the
+        `DagConfig` already in hand, and it's the only place that actually
+        knows "this run genuinely accounted for that upstream state."
+
+        This is exactly the bug found via the FonoLink stress test:
+        `Scheduler.tick()` only ever wrote `dag_trigger_reactions` for a
+        downstream DAG *it itself* dispatched. A downstream run outside the
+        scheduler (`nexolith run downstream.yaml` by hand) left no reaction
+        row at all -- so the next time the scheduler evaluated that
+        downstream, it saw the upstream's completion as still-unreacted-to
+        and fired the downstream again, off the exact same upstream run the
+        manual invocation had already run against. Hooking in here instead
+        means every `DagExecutor.run()` call, whatever triggered it, leaves
+        the same bookkeeping `Scheduler.tick()` itself would leave, so its
+        due-ness check always sees one consistent source of truth no matter
+        how the downstream got run.
+
+        Recorded unconditionally -- even if this run itself failed --
+        matching `Scheduler.tick()`'s own pre-existing behavior of
+        recording a reaction as soon as the downstream actually executes.
+        The upstream completion has been "seen" either way; a downstream
+        run failing on its own account is not a reason to force an
+        immediate, redundant re-trigger next tick purely because this
+        attempt didn't succeed.
+
+        A declared upstream with no successful run yet is skipped (nothing
+        to react to) -- the same condition `Scheduler.tick()` itself uses to
+        decide an upstream isn't satisfied.
+        """
+        if dag.trigger is None:
+            return
+        for upstream_name in dag.trigger.on_success_of:
+            upstream_run = self._store.latest_dag_run(upstream_name)
+            if upstream_run is None or upstream_run.status is not DagRunStatus.SUCCEEDED:
+                continue
+            self._store.record_trigger_reaction(dag.name, upstream_name, upstream_run.id)
 
     def _run_with_retries(
         self, dag_run_id: int, task: DagTaskConfig, attempt: Callable[[], object]

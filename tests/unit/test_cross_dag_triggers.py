@@ -395,6 +395,188 @@ tasks:
         store.close()
 
 
+# -- manual runs must record reactions too (NXL-94) --------------------------
+
+
+def test_manual_downstream_run_records_reaction_and_scheduler_does_not_refire(
+    tmp_path: Path,
+) -> None:
+    """The exact bug found via the FonoLink stress test: a downstream DAG
+    run outside the scheduler (a plain `execute_dag()`/`nexolith run` call)
+    previously left no `dag_trigger_reactions` row at all, since only
+    `Scheduler.tick()` ever wrote one -- so the next time the scheduler
+    evaluated this downstream, it saw the upstream's completion as
+    still-unreacted-to and fired the downstream again, off the exact same
+    upstream run the manual invocation had already run against.
+    """
+    upstream_path = tmp_path / "upstream.yaml"
+    write_pipeline(upstream_path, name="upstream_pipeline")
+    upstream_dag_path = tmp_path / "upstream_dag.yaml"
+    write_dag(
+        upstream_dag_path,
+        """
+name: upstream
+tasks:
+  - name: only
+    pipeline: upstream.yaml
+    depends_on: []
+""",
+    )
+    downstream_path = tmp_path / "downstream.yaml"
+    write_pipeline(downstream_path, name="downstream_pipeline")
+    downstream_dag_path = tmp_path / "downstream_dag.yaml"
+    write_dag(
+        downstream_dag_path,
+        """
+name: downstream
+trigger:
+  on_success_of: [upstream]
+tasks:
+  - name: only
+    pipeline: downstream.yaml
+    depends_on: []
+""",
+    )
+
+    store = make_store(tmp_path)
+    try:
+        upstream_run_id = execute_dag(upstream_dag_path, store)
+
+        # Downstream runs manually too -- e.g. a user driving the pipeline
+        # by hand, exactly like FonoLink's Round 1. Before NXL-94's fix,
+        # this left no trace in dag_trigger_reactions at all.
+        execute_dag(downstream_dag_path, store)
+        assert store.get_last_reacted_upstream_run_id("downstream", "upstream") == upstream_run_id
+        assert len(store.list_dag_runs("downstream")) == 1
+
+        # The scheduler starts up later (or just ticks). It must not treat
+        # the same upstream completion as still-unreacted-to.
+        scheduler = Scheduler(store)
+        assert scheduler.tick() == []
+        assert scheduler.tick() == []
+        assert len(store.list_dag_runs("downstream")) == 1
+    finally:
+        store.close()
+
+
+def test_manual_upstream_run_still_lets_scheduler_trigger_downstream_first_time(
+    tmp_path: Path,
+) -> None:
+    """The legitimate case NXL-94's fix must not break: an upstream that
+    completes for the first time (manually, in this case) still causes the
+    scheduler to trigger a downstream that has never reacted to it yet --
+    a manual completion is not treated as pre-emptively "already reacted
+    to" by anything other than an actual downstream run.
+    """
+    upstream_path = tmp_path / "upstream.yaml"
+    write_pipeline(upstream_path, name="upstream_pipeline")
+    upstream_dag_path = tmp_path / "upstream_dag.yaml"
+    write_dag(
+        upstream_dag_path,
+        """
+name: upstream
+tasks:
+  - name: only
+    pipeline: upstream.yaml
+    depends_on: []
+""",
+    )
+    downstream_path = tmp_path / "downstream.yaml"
+    write_pipeline(downstream_path, name="downstream_pipeline")
+    downstream_dag_path = tmp_path / "downstream_dag.yaml"
+    write_dag(
+        downstream_dag_path,
+        """
+name: downstream
+trigger:
+  on_success_of: [upstream]
+tasks:
+  - name: only
+    pipeline: downstream.yaml
+    depends_on: []
+""",
+    )
+
+    store = make_store(tmp_path)
+    try:
+        register_downstream(store, "downstream", downstream_dag_path)
+        scheduler = Scheduler(store)
+
+        execute_dag(upstream_dag_path, store)  # manual, first-ever completion
+
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 1
+        downstream_run = store.get_dag_run(triggered[0])
+        assert downstream_run is not None
+        assert downstream_run.trigger_reason == "schedule"
+    finally:
+        store.close()
+
+
+def test_fully_scheduler_driven_cross_dag_flow_still_works(tmp_path: Path) -> None:
+    """Regression: with no manual runs anywhere -- upstream due by interval,
+    downstream due only by cross-DAG trigger -- the existing, correct
+    scheduler-to-scheduler cascade (NXL-85) must be unaffected by NXL-94's
+    fix. Per NXL-86's two-phase tick(), a DAG that becomes due in the same
+    tick as its upstream isn't visible until the *next* tick.
+    """
+    upstream_path = tmp_path / "upstream.yaml"
+    write_pipeline(upstream_path, name="upstream_pipeline")
+    upstream_dag_path = tmp_path / "upstream_dag.yaml"
+    write_dag(
+        upstream_dag_path,
+        """
+name: upstream
+schedule: "1h"
+tasks:
+  - name: only
+    pipeline: upstream.yaml
+    depends_on: []
+""",
+    )
+    downstream_path = tmp_path / "downstream.yaml"
+    write_pipeline(downstream_path, name="downstream_pipeline")
+    downstream_dag_path = tmp_path / "downstream_dag.yaml"
+    write_dag(
+        downstream_dag_path,
+        """
+name: downstream
+trigger:
+  on_success_of: [upstream]
+tasks:
+  - name: only
+    pipeline: downstream.yaml
+    depends_on: []
+""",
+    )
+
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("upstream", upstream_dag_path, "1h", enabled=True)
+        register_downstream(store, "downstream", downstream_dag_path)
+        scheduler = Scheduler(store)
+
+        first_tick = scheduler.tick()
+        assert len(first_tick) == 1  # upstream, due by interval (never run before)
+        upstream_run = store.get_dag_run(first_tick[0])
+        assert upstream_run is not None
+        assert upstream_run.dag_name == "upstream"
+        assert upstream_run.trigger_reason == "schedule"
+
+        second_tick = scheduler.tick()
+        assert len(second_tick) == 1  # downstream, now reacting to upstream's completion
+        downstream_run = store.get_dag_run(second_tick[0])
+        assert downstream_run is not None
+        assert downstream_run.dag_name == "downstream"
+        assert downstream_run.trigger_reason == "schedule"
+
+        # No redundant third trigger off the same upstream completion.
+        assert scheduler.tick() == []
+    finally:
+        store.close()
+
+
 # -- config validation --------------------------------------------------
 
 
