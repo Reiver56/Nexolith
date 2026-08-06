@@ -1,0 +1,11 @@
+name: enrichment_task3_normalize
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query_file: ../queries/task3_normalize.sql
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: cdr_stage3
+  mode: replace
