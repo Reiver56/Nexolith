@@ -464,6 +464,41 @@ def test_mouse_support_is_enabled() -> None:
     assert captured.get("mouse_support") is True
 
 
+def test_min_redraw_interval_is_set_to_throttle_rapid_redraws() -> None:
+    """A real, live-reported visual-corruption bug in VS Code's integrated
+    terminal (xterm.js) could not be reproduced via prompt_toolkit's own
+    internal Screen model in this project's headless tests -- it was
+    provably correct at every step of the exact reported sequence -- but
+    independently-documented evidence (VS Code's own Terminal-Issues wiki;
+    a similar corruption class reported for another Python TUI app;
+    an ncurses-specific case VS Code's own maintainers confirmed as
+    "upstream") points to a known class of GPU-renderer corruption under
+    full-screen TUI redraw stress. `min_redraw_interval` is prompt_toolkit's
+    own documented mechanism for exactly this ("some terminals are not able
+    to process" high-frequency redraw output) -- this only pins that this
+    session actually sets it; it's a real, low-risk mitigation for a
+    documented class of issue, not a claim that the specific bug is fixed
+    (which could not be confirmed in this environment)."""
+    captured: dict[str, float | int | None] = {}
+
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        captured["min_redraw_interval"] = get_app().min_redraw_interval
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    assert captured.get("min_redraw_interval") == 0.05
+
+
 def test_scroll_events_route_to_the_output_log_not_input_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

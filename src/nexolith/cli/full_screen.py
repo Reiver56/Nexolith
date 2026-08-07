@@ -182,6 +182,34 @@ def run_full_screen_session(
         # output log scrolls it directly; keyboard Up/Down history navigation
         # is unaffected either way.
         mouse_support=True,
+        # min_redraw_interval: a real, documented prompt_toolkit mechanism
+        # for exactly this class of problem -- its own docstring: "Use this
+        # for applications where invalidate is called a lot. This could
+        # cause a lot of terminal output, which some terminals are not able
+        # to process." Added after a real, live-reported visual-corruption
+        # bug in VS Code's integrated terminal (built on xterm.js) that
+        # could not be reproduced or confirmed via prompt_toolkit's own
+        # internal Screen model in this project's headless tests (it was
+        # provably correct at every step of the exact reported sequence) --
+        # strong, independently-documented evidence points to a known class
+        # of xterm.js GPU-renderer glyph-cache corruption under full-screen
+        # TUI redraw stress (VS Code's own Terminal-Issues wiki confirms
+        # `"terminal.integrated.gpuAcceleration": "off"` as an official
+        # remedy for this general class; a similar corruption class for a
+        # different Python TUI is documented in
+        # https://github.com/anthropics/claude-code/issues/59163, and an
+        # analogous ncurses-specific case was confirmed "upstream" by VS
+        # Code's own maintainers in
+        # https://github.com/microsoft/vscode/issues/61163). This is a
+        # genuine, low-risk, no-functional-downside mitigation for that
+        # documented class of issue -- NOT a confirmed fix for this
+        # specific bug, which could not be reproduced in this environment
+        # to verify empirically. 50ms is imperceptible to a human typing or
+        # reading, while capping how fast this session can ever ask a
+        # renderer to redraw during a burst of events (e.g. a classic
+        # pipeline's per-phase event stream driving the status area's live
+        # timeline).
+        min_redraw_interval=0.05,
     )
 
     # The panel header already carries the "Nexo/Nexolith" branding that the
