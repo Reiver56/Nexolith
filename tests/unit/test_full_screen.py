@@ -22,7 +22,7 @@ from nexolith.cli.completion import NexolithCompleter
 from nexolith.cli.full_screen import _DIVIDER_COLOR, _divider, run_full_screen_session
 from nexolith.cli.interactive import InteractiveSession
 from nexolith.cli.nexo_art import BLURPLE
-from nexolith.cli.render_context import RenderContext
+from nexolith.cli.render_context import RenderContext, detect_width
 from nexolith.cli.status_area import StatusAreaState
 from nexolith.scheduler import default_pidfile_path, is_process_alive, write_pidfile
 
@@ -859,6 +859,86 @@ def test_dag_connector_failure_panel_renders_without_corruption_at_a_realistic_w
     assert "│" not in clear_text
     assert "Tasks:" not in clear_text
     assert "connector" not in clear_text.lower()
+
+
+def test_stale_width_is_refreshed_after_a_real_terminal_resize_mid_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`RenderContext.width` used to be detected once at session start and
+    never refreshed on a real terminal resize -- a limitation explicitly
+    flagged as out of scope in
+    test_dag_connector_failure_panel_renders_without_corruption_at_a_realistic_width
+    above. A real physical resize narrows the terminal; prompt_toolkit
+    itself notices (its own resize-polling on Windows, SIGWINCH on POSIX)
+    and redraws against the new real width -- but before this fix,
+    Nexolith's own panel/border budgeting kept using the width detected at
+    session start, reproducing the exact same "orphaned closing border"
+    pattern the scrollbar-margin fix addressed, but now caused by a stale
+    width instead of an unaccounted-for column, and considerably worse (a
+    ~20-column mismatch here, not an off-by-one).
+
+    `COLUMNS`/`DummyOutput.get_size()` are monkeypatched together between
+    the DAG's two `/run`s -- two independent knobs in this headless
+    harness that a real resize moves together via one real OS terminal-size
+    query. This proves `refresh_render_context_width()` genuinely picks up
+    a live width change before the second panel renders; it does not (and
+    cannot) prove anything about a real terminal's own resize-delivery
+    mechanism, which remains something only manual verification in a real
+    terminal can confirm.
+    """
+    monkeypatch.setenv("COLUMNS", "90")
+    monkeypatch.setattr(DummyOutput, "get_size", lambda self: Size(rows=40, columns=90))
+    render_context = RenderContext(is_tty=True, color_enabled=True, width=90)
+
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    write_failing_sql_dag(dag_path, pipeline_path)
+
+    # live_width=detect_width: opts this session into the live-refresh
+    # behavior under test. Every other test in this file omits it, so
+    # `refresh_render_context_width()` stays a no-op there and each
+    # fixed-width `RenderContext` used elsewhere keeps behaving exactly as
+    # declared, unaffected by this file's ambient ``COLUMNS``/real terminal
+    # size.
+    session = InteractiveSession(render_context=render_context, live_width=detect_width)
+    original_dispatch = session.dispatch
+    run_count = {"n": 0}
+    screens: list[list[str]] = []
+
+    def resize_after_first_run_then_snapshot(command: object) -> bool:
+        if getattr(command, "kind", None) is not None and command.kind.value == "run":  # type: ignore[attr-defined]
+            run_count["n"] += 1
+            if run_count["n"] == 2:
+                # Simulate a real physical resize narrowing the terminal.
+                monkeypatch.setenv("COLUMNS", "70")
+                monkeypatch.setattr(DummyOutput, "get_size", lambda self: Size(rows=40, columns=70))
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        app = get_app()
+        app._redraw()
+        screen = app.renderer._last_screen
+        assert screen is not None
+        rows = []
+        for y in sorted(screen.data_buffer.keys()):
+            row = screen.data_buffer[y]
+            rows.append("".join(row[x].char for x in sorted(row.keys())))
+        screens.append(rows)
+        return result
+
+    session.dispatch = resize_after_first_run_then_snapshot  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(f"/open {dag_path}\n/run\n/run\n/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(render_context, session=session)
+
+    post_resize_screen = screens[2]  # after the second /run, post-resize
+    bordered_rows = [row for row in post_resize_screen if row.startswith("│")]
+    assert bordered_rows, "expected the post-resize failure panel to appear in the log"
+    for row in bordered_rows:
+        stripped = row.rstrip()
+        assert stripped.endswith("│"), f"panel row's closing border wrapped away: {row!r}"
+    assert not any(row.strip() == "│" for row in post_resize_screen)
+    assert session.render_context.width == 70
 
 
 def test_run_result_falls_back_to_plain_ascii_border_when_render_context_is_plain(

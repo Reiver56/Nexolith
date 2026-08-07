@@ -100,7 +100,7 @@ def detect_render_context(
     return RenderContext(
         is_tty=is_tty,
         color_enabled="NO_COLOR" not in active_environ,
-        width=_detect_width(active_environ),
+        width=detect_width(active_environ),
         forced_plain=forced_plain,
         encoding_safe=_can_encode_block_characters(active_stream),
         kitty_graphics=_detect_kitty_graphics(active_environ),
@@ -190,8 +190,14 @@ def _can_encode_block_characters(stream: TextIO) -> bool:
     return True
 
 
-def _detect_width(environ: Mapping[str, str]) -> int:
-    columns = environ.get("COLUMNS")
+def detect_width(environ: Mapping[str, str] | None = None) -> int:
+    """Re-detectable in isolation (not just as part of `detect_render_context()`):
+    a live full-screen session re-queries this on every width-sensitive render so
+    `RenderContext.width`, frozen at session start otherwise, tracks a real
+    terminal resize (see `InteractiveSession.refresh_render_context_width()`).
+    """
+    active_environ = environ if environ is not None else os.environ
+    columns = active_environ.get("COLUMNS")
     if columns is not None:
         try:
             return int(columns)

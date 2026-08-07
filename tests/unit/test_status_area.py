@@ -55,7 +55,7 @@ def make_presenter(
         state,
         invalidate,
         write=(written if written is not None else []).append,
-        render_context=render_context,
+        render_context=lambda: render_context,
     )
 
 

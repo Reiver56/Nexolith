@@ -339,11 +339,16 @@ class FullScreenOperationPresenter:
         invalidate: Callable[[], None],
         *,
         write: OutputWriter,
-        render_context: RenderContext,
+        render_context: Callable[[], RenderContext],
     ) -> None:
         self._state = state
         self._invalidate = invalidate
         self._write = write
+        # A callable, not a frozen value: `full_screen.py` re-detects the
+        # real terminal width on every call so a `/run` result panel sizes
+        # itself against the current width even after a real terminal
+        # resize, rather than whatever was live when this presenter was
+        # constructed at session start.
         self._render_context = render_context
 
     def event_sink(self, operation: PipelineOperation) -> EventSink:
@@ -352,7 +357,7 @@ class FullScreenOperationPresenter:
         return _TimelineEventSink(self._state, self._invalidate)
 
     def show_result(self, result: ExecutionResult) -> None:
-        self._write(render_execution_panel(result, self._render_context))
+        self._write(render_execution_panel(result, self._render_context()))
         self._state.hide()
         self._invalidate()
 

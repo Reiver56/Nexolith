@@ -18,7 +18,7 @@ from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
 from nexolith.cli.nexo_art import render_nexo_panel
 from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
-from nexolith.cli.render_context import RenderContext, detect_render_context
+from nexolith.cli.render_context import RenderContext, detect_render_context, detect_width
 from nexolith.cli.runs_render import render_run_detail, render_run_not_found, render_runs_list
 from nexolith.cli.scheduler_render import (
     SchedulerStatus,
@@ -278,6 +278,7 @@ class InteractiveSession:
         application: InteractiveApplication | None = None,
         render_context: RenderContext | None = None,
         presenter: OperationPresenter | None = None,
+        live_width: Callable[[], int] | None = None,
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
@@ -311,6 +312,15 @@ class InteractiveSession:
         # timeline, summary, /validate highlighting) share one consistent capability
         # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
         self.render_context = render_context or detect_render_context()
+        # None by default (every existing caller, including every test that
+        # constructs a `RenderContext` directly and expects it to stay
+        # exactly as given): `refresh_render_context_width()` becomes a
+        # no-op unless a real live-width source is supplied. Real sessions
+        # (`run_interactive_session()`) pass `detect_width` here so a real
+        # terminal resize is picked up; anything that hands this a fixed
+        # `RenderContext` for a deterministic test keeps it frozen, exactly
+        # like before this existed.
+        self._live_width = live_width
 
     def set_output_writer(self, writer: OutputWriter, *, ansi_capable: bool = True) -> None:
         """Redirect where this session's output goes, e.g. to a full-screen
@@ -554,6 +564,36 @@ class InteractiveSession:
             store.close()
         self._write(render_run_detail(dag_run, tasks, self._output_render_context(), attempts))
 
+    def refresh_render_context_width(self) -> None:
+        """Re-detect the real terminal width and fold it into `render_context`
+        in place, so anything rendered *after* a real terminal resize sizes
+        itself against the current width instead of whatever was detected at
+        session start. No-op when this session has no `live_width` source
+        (see `__init__`) -- a fixed `RenderContext` handed in for a
+        deterministic test stays exactly as given.
+
+        `render_context` is otherwise detected exactly once per session (see
+        its own assignment above) -- color/encoding/kitty/truecolor tiers are
+        deliberately stable for a session's whole lifetime so they don't
+        flicker mid-session. Width is the one field that's genuinely wrong to
+        keep frozen: unlike those capability tiers, it routinely changes while
+        a real terminal window stays open, and every panel/border renderer
+        budgets its content directly against it. Real sessions pass
+        `detect_width` -- the same real OS-query `detect_render_context()`
+        itself calls -- so there is exactly one implementation of "what is
+        the terminal width right now," not a second one drifting out of sync
+        with the first.
+
+        This only prevents *future* renders from using a stale width; text
+        already written to the full-screen session's scrollable output log is
+        immutable there (a real prompt_toolkit `Buffer`, not something this
+        method re-flows) and keeps whatever width was live when it was
+        written -- the same way a real terminal's own scrollback behaves.
+        """
+        if self._live_width is None:
+            return
+        self.render_context = replace(self.render_context, width=self._live_width())
+
     def _output_render_context(self) -> RenderContext:
         """The render context to use for anything about to go through
         `self._write()` -- `self.render_context` unchanged when the current
@@ -590,10 +630,14 @@ class InteractiveSession:
         column by exactly one -- confirmed empirically: a real headless
         render with `render_context.width` set to exactly the real
         terminal's own column count still wrapped every content row's
-        closing border character onto its own line. `self.render_context`
-        itself is left untouched either way -- the status area/header have
-        no scrollbar margin and still use the full real width.
+        closing border character onto its own line. `self.render_context`'s
+        `ansi_capable` field is left untouched either way -- the status
+        area/header have no scrollbar margin and still use the full real
+        width; its `width` field, however, is refreshed first (see
+        `refresh_render_context_width()`) so this sink's -1 budget is always
+        computed against the real current terminal width, not a stale one.
         """
+        self.refresh_render_context_width()
         if self._output_ansi_capable:
             return self.render_context
         return replace(
@@ -776,8 +820,8 @@ def run_interactive_session() -> None:
         from nexolith.cli.full_screen import run_full_screen_session
 
         try:
-            run_full_screen_session(render_context)
+            run_full_screen_session(render_context, live_width=detect_width)
             return
         except Exception:
             pass
-    InteractiveSession(render_context=render_context).run()
+    InteractiveSession(render_context=render_context, live_width=detect_width).run()

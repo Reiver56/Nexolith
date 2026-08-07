@@ -225,7 +225,7 @@ class _RecordingSession:
 def _recording_session_factory(
     recorded: list[_RecordingSession],
 ) -> Callable[..., _RecordingSession]:
-    def factory(*, render_context: RenderContext) -> _RecordingSession:
+    def factory(*, render_context: RenderContext, live_width: object = None) -> _RecordingSession:
         session = _RecordingSession(render_context=render_context)
         recorded.append(session)
         return session
@@ -265,7 +265,8 @@ def test_run_interactive_session_attempts_full_screen_when_capable(
 
     calls: list[RenderContext] = []
     monkeypatch.setattr(
-        "nexolith.cli.full_screen.run_full_screen_session", lambda ctx: calls.append(ctx)
+        "nexolith.cli.full_screen.run_full_screen_session",
+        lambda ctx, **kwargs: calls.append(ctx),
     )
 
     def classic_must_not_be_called(**kwargs: object) -> None:
@@ -288,7 +289,7 @@ def test_run_interactive_session_falls_back_to_classic_loop_if_full_screen_setup
     capable_context = RenderContext(is_tty=True, color_enabled=True, width=200)
     monkeypatch.setattr(interactive, "detect_render_context", lambda: capable_context)
 
-    def broken_full_screen(ctx: RenderContext) -> None:
+    def broken_full_screen(ctx: RenderContext, **kwargs: object) -> None:
         raise RuntimeError("simulated: prompt_toolkit couldn't acquire a real terminal")
 
     monkeypatch.setattr("nexolith.cli.full_screen.run_full_screen_session", broken_full_screen)

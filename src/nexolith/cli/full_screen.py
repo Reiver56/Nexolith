@@ -25,6 +25,7 @@ or an unhandled exception. That guarantee comes from prompt_toolkit itself,
 not from anything in this module.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from prompt_toolkit.application import Application
@@ -59,6 +60,7 @@ def run_full_screen_session(
     *,
     session: InteractiveSession | None = None,
     status_state: StatusAreaState | None = None,
+    live_width: Callable[[], int] | None = None,
 ) -> None:
     """Run an `InteractiveSession` inside a full-screen prompt_toolkit layout:
     the bordered Nexo panel as a static header, a status area for
@@ -69,8 +71,19 @@ def run_full_screen_session(
     `PipelineApplication`, and to inspect the status area's final state after
     a real headless run — the same pattern already used for `session`);
     default to a real session using `render_context` and a fresh state.
+
+    `live_width` is forwarded to that default session's own `live_width`
+    (see `InteractiveSession.__init__`/`refresh_render_context_width()`) --
+    `None` by default so a `session` built by a test with a fixed
+    `RenderContext` keeps its declared width exactly, unaffected by
+    whatever real terminal size happens to be ambient in the process
+    running the test. `run_interactive_session()`, the only real (not test)
+    caller, passes `detect_width` here so a real terminal resize is
+    actually picked up.
     """
-    active_session = session or InteractiveSession(render_context=render_context)
+    active_session = session or InteractiveSession(
+        render_context=render_context, live_width=live_width
+    )
 
     output_area = TextArea(
         read_only=True, scrollbar=True, wrap_lines=True, lexer=OutputLogLexer(render_context)
@@ -97,16 +110,26 @@ def run_full_screen_session(
         wrap_lines=True,
         dont_extend_height=True,
     )
-    # ansi_capable=False (NXL-104): a /run's outcome is written through
-    # `append_output` -- the same ANSI-incapable output log sink `_write`
-    # itself uses -- so it needs the same downgrade `_output_render_context()`
-    # applies there, not the header/status area's own real-color context.
+
+    def _presenter_render_context() -> RenderContext:
+        """ansi_capable=False (NXL-104): a /run's outcome is written through
+        `append_output` -- the same ANSI-incapable output log sink `_write`
+        itself uses -- so it needs the same downgrade `_output_render_context()`
+        applies there, not the header/status area's own real-color context.
+
+        Called fresh on every `/run` outcome (not baked into a value once)
+        so its width tracks a real terminal resize -- see
+        `refresh_render_context_width()`.
+        """
+        active_session.refresh_render_context_width()
+        return replace(active_session.render_context, ansi_capable=False)
+
     active_session.set_presenter(
         FullScreenOperationPresenter(
             status_state,
             invalidate=lambda: application.invalidate(),
             write=append_output,
-            render_context=replace(render_context, ansi_capable=False),
+            render_context=_presenter_render_context,
         )
     )
 
@@ -129,8 +152,20 @@ def run_full_screen_session(
 
     input_field.accept_handler = on_submit
 
+    def render_header() -> ANSI:
+        """A callable, not a value baked in once: `status_state.render` above
+        already uses this pattern (prompt_toolkit re-invokes it on every
+        redraw). The header previously didn't, so it kept the panel border
+        sized to whatever width was live at session start even after a real
+        terminal resize -- re-detecting the width here every redraw is what
+        actually fixes that for the one piece of static-looking content in
+        this layout.
+        """
+        active_session.refresh_render_context_width()
+        return ANSI(render_nexo_panel(active_session.render_context))
+
     header = Window(
-        content=FormattedTextControl(ANSI(render_nexo_panel(render_context))),
+        content=FormattedTextControl(render_header),
         height=_PANEL_HEIGHT,
         dont_extend_height=True,
     )
