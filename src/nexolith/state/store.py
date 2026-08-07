@@ -13,8 +13,9 @@ different concern: that abstracts over multiple *user* database engines,
 this is Nexolith's own fixed, SQLite-only internal state).
 """
 
+import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -200,6 +201,46 @@ _MIGRATIONS: list[tuple[int, str]] = [
         -- reaches this column).
         """,
     ),
+    (
+        6,
+        """
+        -- Crash reconciliation (NXL-116). A run now records the process
+        -- that owns it, allowing a fresh scheduler to distinguish a stale
+        -- row from a genuinely active foreground `nexolith run` process.
+        -- `interrupted` honestly records an execution whose outcome was
+        -- never observed; it is terminal, but is not reported as failed.
+        --
+        -- SQLite cannot alter a CHECK constraint in place. Foreign-key
+        -- enforcement is disabled only for this parent-table rebuild and
+        -- restored before the migration completes; existing child rows
+        -- continue to reference the replacement table named dag_runs.
+        PRAGMA foreign_keys=OFF;
+        DROP TABLE IF EXISTS dag_runs_new;
+        CREATE TABLE dag_runs_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dag_name TEXT NOT NULL REFERENCES dags(name),
+            status TEXT NOT NULL
+                CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
+            trigger_reason TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            error TEXT,
+            on_failure TEXT NOT NULL DEFAULT 'skip',
+            severity TEXT NOT NULL DEFAULT 'medium',
+            owner_pid INTEGER
+        );
+        INSERT INTO dag_runs_new
+            (id, dag_name, status, trigger_reason, started_at, ended_at, error,
+             on_failure, severity, owner_pid)
+            SELECT id, dag_name, status, trigger_reason, started_at, ended_at, error,
+                   on_failure, severity, NULL
+            FROM dag_runs;
+        DROP TABLE dag_runs;
+        ALTER TABLE dag_runs_new RENAME TO dag_runs;
+        CREATE INDEX IF NOT EXISTS idx_dag_runs_dag_name ON dag_runs(dag_name);
+        PRAGMA foreign_keys=ON;
+        """,
+    ),
 ]
 
 
@@ -331,6 +372,7 @@ class StateStore:
         trigger_reason: str,
         on_failure: str = "skip",
         severity: str = "medium",
+        owner_pid: int | None = None,
     ) -> int:
         """Record a DAG run starting, pre-creating every one of its tasks as
         'pending' in the same transaction. Recording the full expected task
@@ -354,10 +396,18 @@ class StateStore:
             cursor = self._conn.execute(
                 """
                 INSERT INTO dag_runs
-                    (dag_name, status, trigger_reason, on_failure, severity, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (dag_name, status, trigger_reason, on_failure, severity, started_at, owner_pid)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (dag_name, DagRunStatus.RUNNING.value, trigger_reason, on_failure, severity, now),
+                (
+                    dag_name,
+                    DagRunStatus.RUNNING.value,
+                    trigger_reason,
+                    on_failure,
+                    severity,
+                    now,
+                    os.getpid() if owner_pid is None else owner_pid,
+                ),
             )
             dag_run_id = cursor.lastrowid
             assert dag_run_id is not None
@@ -429,6 +479,39 @@ class StateStore:
                 "UPDATE dag_runs SET status = ?, ended_at = ?, error = ? WHERE id = ?",
                 (status.value, _now(), error, dag_run_id),
             )
+
+    def interrupt_abandoned_dag_runs(self, is_process_alive: Callable[[int], bool]) -> list[int]:
+        """Mark incomplete runs whose owning process no longer exists.
+
+        Rows from schema versions before ownership tracking have no PID and
+        are necessarily indeterminate after upgrade, so they are reconciled
+        as interrupted too. The run and its task history remain intact.
+        """
+        abandoned = [
+            run
+            for run in self.list_incomplete_dag_runs()
+            if run.owner_pid is None or not is_process_alive(run.owner_pid)
+        ]
+        if not abandoned:
+            return []
+        ended_at = _now()
+        with self._conn:
+            self._conn.executemany(
+                """
+                UPDATE dag_runs SET status = ?, ended_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                [
+                    (
+                        DagRunStatus.INTERRUPTED.value,
+                        ended_at,
+                        run.id,
+                        DagRunStatus.RUNNING.value,
+                    )
+                    for run in abandoned
+                ],
+            )
+        return [run.id for run in abandoned]
 
     # -- Retry attempts (schema_version 3) -----------------------------------
     #
@@ -588,6 +671,7 @@ def _dag_run_record(row: sqlite3.Row) -> DagRunRecord:
         error=row["error"],
         on_failure=row["on_failure"],
         severity=row["severity"],
+        owner_pid=row["owner_pid"],
     )
 
 

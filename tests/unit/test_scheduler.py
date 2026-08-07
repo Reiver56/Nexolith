@@ -163,6 +163,86 @@ def test_an_already_running_dag_is_not_retriggered_even_if_due(tmp_path: Path) -
         store.close()
 
 
+def test_fresh_scheduler_interrupts_abandoned_run_and_schedules_dag_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        clock = Clock(datetime(2026, 1, 1, tzinfo=UTC))
+        monkeypatch.setattr("nexolith.state.store._now", lambda: clock.now().isoformat())
+        abandoned_id = store.start_dag_run(
+            "etl", ["extract"], trigger_reason="schedule", owner_pid=999999
+        )
+        clock.advance(timedelta(seconds=2))
+        calls: list[str] = []
+
+        scheduler = Scheduler(
+            store,
+            execute=make_fake_execute(store, calls),
+            now=clock.now,
+            process_is_alive=lambda pid: False,
+        )
+        triggered = scheduler.tick()
+
+        abandoned = store.get_dag_run(abandoned_id)
+        assert abandoned is not None
+        assert abandoned.status is DagRunStatus.INTERRUPTED
+        assert abandoned.ended_at == clock.now().isoformat()
+        assert len(triggered) == 1
+        assert calls == ["etl.yaml"]
+        assert store.get_dag_run(triggered[0]).status is DagRunStatus.SUCCEEDED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_fresh_scheduler_preserves_genuinely_active_foreground_run(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        active_id = store.start_dag_run("etl", ["extract"], trigger_reason="manual", owner_pid=4242)
+        calls: list[str] = []
+        scheduler = Scheduler(
+            store,
+            execute=make_fake_execute(store, calls),
+            process_is_alive=lambda pid: pid == 4242,
+        )
+
+        assert scheduler.tick() == []
+        assert calls == []
+        active = store.get_dag_run(active_id)
+        assert active is not None
+        assert active.status is DagRunStatus.RUNNING
+    finally:
+        store.close()
+
+
+def test_each_new_scheduler_instance_reconciles_before_its_first_tick(tmp_path: Path) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        run_id = store.start_dag_run("etl", [], trigger_reason="manual", owner_pid=4242)
+
+        first = Scheduler(store, process_is_alive=lambda pid: True)
+        assert first.tick() == []
+        assert store.get_dag_run(run_id).status is DagRunStatus.RUNNING  # type: ignore[union-attr]
+
+        calls: list[str] = []
+        started_at = datetime.fromisoformat(store.get_dag_run(run_id).started_at)  # type: ignore[union-attr]
+        second = Scheduler(
+            store,
+            execute=make_fake_execute(store, calls),
+            now=lambda: started_at + timedelta(seconds=2),
+            process_is_alive=lambda pid: False,
+        )
+        triggered = second.tick()
+
+        assert store.get_dag_run(run_id).status is DagRunStatus.INTERRUPTED  # type: ignore[union-attr]
+        assert len(triggered) == 1
+    finally:
+        store.close()
+
+
 def test_disabled_dag_is_never_triggered_regardless_of_schedule(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     try:

@@ -22,6 +22,7 @@ from nexolith.dag.executor import execute_dag
 from nexolith.dag.validator import read_dag_config
 from nexolith.exceptions import ConfigurationError
 from nexolith.scheduler.interval import parse_interval
+from nexolith.scheduler.pidfile import is_process_alive
 from nexolith.state import DagRecord, DagRunStatus, StateStore
 
 logger = logging.getLogger(__name__)
@@ -61,12 +62,15 @@ class Scheduler:
         execute: Callable[[Path, StateStore], int] | None = None,
         poll_interval_seconds: float = 5.0,
         now: Callable[[], datetime] | None = None,
+        process_is_alive: Callable[[int], bool] | None = None,
     ) -> None:
         self._store = store
         self._execute = execute or _default_execute
         self._poll_interval_seconds = poll_interval_seconds
         self._now = now or (lambda: datetime.now(UTC))
+        self._process_is_alive = process_is_alive or is_process_alive
         self._stop_event = threading.Event()
+        self._reconciled_incomplete_runs = False
 
     def tick(self) -> list[int]:
         """One evaluation pass over every registered DAG. Returns the
@@ -101,6 +105,12 @@ class Scheduler:
         loop. Accepted: the acceptance criteria asks for a real, whole-batch
         priority ordering, which requires exactly this.
         """
+        if not self._reconciled_incomplete_runs:
+            interrupted = self._store.interrupt_abandoned_dag_runs(self._process_is_alive)
+            for run_id in interrupted:
+                logger.warning("Marked abandoned DAG run %s as interrupted", run_id)
+            self._reconciled_incomplete_runs = True
+
         due: list[_DueDag] = []
         running_dag_names = {run.dag_name for run in self._store.list_incomplete_dag_runs()}
         for dag_record in self._store.list_dags():

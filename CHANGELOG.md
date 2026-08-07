@@ -102,6 +102,10 @@ what shipped, not when it's cut.
 
 #### Fixed
 
+- Fixed abandoned `running` DAG runs permanently blocking future interval and cross-DAG scheduling
+  after an unclean scheduler stop. Runs now record their owner process; a fresh scheduler marks only
+  ownerless legacy rows or rows whose owner is no longer alive as `interrupted`, preserving honest
+  history in `runs list`/`show` while making the DAG eligible again (NXL-116).
 - **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
   pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
   validate/run DAG files correctly.

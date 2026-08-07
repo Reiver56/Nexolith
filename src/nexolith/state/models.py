@@ -13,6 +13,7 @@ class DagRunStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 class TaskRunStatus(StrEnum):
@@ -79,6 +80,10 @@ class DagRunRecord:
     # "how serious was this failure", a question about a specific run in
     # the past, not "what should happen right now").
     severity: str = "medium"
+    # Process that created this run (schema_version 6). A live owner can be
+    # either the scheduler daemon or a foreground ``nexolith run`` process.
+    # None identifies a legacy row created before ownership was recorded.
+    owner_pid: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

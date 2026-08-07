@@ -30,7 +30,7 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
             "dag_trigger_reactions",
         } <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 5
+        assert version == 6
         conn.close()
     finally:
         store.close()
@@ -46,7 +46,7 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(5,)]
+    assert rows == [(6,)]
 
 
 def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
@@ -109,7 +109,7 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()
-    assert version == 5
+    assert version == 6
     assert "dag_trigger_reactions" in tables
 
 
@@ -458,6 +458,9 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
         INSERT INTO dags VALUES ('downstream', 'down.yaml', NULL, 1, 't0', 't0');
         INSERT INTO dag_runs
             VALUES (1, 'upstream', 'succeeded', 'manual', 'skip', 't0', 't1', NULL);
+        INSERT INTO task_runs VALUES (1, 'extract', 'succeeded', 't0', 't1', NULL);
+        INSERT INTO task_attempts
+            VALUES (1, 1, 'extract', 1, 'succeeded', 't0', 't1', NULL);
         """
     )
     conn.commit()
@@ -468,6 +471,9 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
         run = store.get_dag_run(1)
         assert run is not None
         assert run.status is DagRunStatus.SUCCEEDED  # pre-existing row preserved
+        assert run.owner_pid is None
+        assert store.list_task_runs(1)[0].task_name == "extract"
+        assert store.list_run_attempts(1)[0].task_name == "extract"
 
         assert store.get_last_reacted_upstream_run_id("downstream", "upstream") is None
         store.record_trigger_reaction("downstream", "upstream", 1)
@@ -477,8 +483,10 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
 
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
     conn.close()
-    assert version == 5
+    assert version == 6
+    assert foreign_key_errors == []
 
 
 def test_record_trigger_reaction_upserts_in_place(tmp_path: Path) -> None:

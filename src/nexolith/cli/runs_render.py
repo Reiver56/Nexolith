@@ -26,6 +26,7 @@ _DAG_RUN_COLOR = {
     DagRunStatus.RUNNING: BLURPLE,
     DagRunStatus.SUCCEEDED: GREEN,
     DagRunStatus.FAILED: RED,
+    DagRunStatus.INTERRUPTED: AMBER,
 }
 
 # ● covers both an in-progress task and a succeeded one, and ⊘ covers both

@@ -350,6 +350,28 @@ def test_runs_list_with_no_runs(isolated_state_dir: Path) -> None:
     assert "no dag runs" in result.output.lower()
 
 
+def test_runs_show_keeps_interrupted_run_visible_with_honest_status(
+    isolated_state_dir: Path,
+) -> None:
+    store = StateStore()
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s")
+        run_id = store.start_dag_run(
+            "etl", ["extract"], trigger_reason="schedule", owner_pid=999999
+        )
+        assert store.interrupt_abandoned_dag_runs(lambda pid: False) == [run_id]
+    finally:
+        store.close()
+
+    result = runner.invoke(app, ["runs", "show", str(run_id)])
+
+    assert result.exit_code == 0
+    assert "interrupted" in result.output
+    assert "failed" not in result.output
+    assert "(in progress)" not in result.output
+    assert "extract" in result.output
+
+
 def test_runs_list_filters_to_one_dag(isolated_state_dir: Path) -> None:
     store = StateStore()
     try:
