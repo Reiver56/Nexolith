@@ -85,6 +85,11 @@ def run_full_screen_session(
 
     active_session.set_output_writer(append_output, ansi_capable=False)
 
+    def clear_output() -> None:
+        output_area.buffer.set_document(Document(""), bypass_readonly=True)
+
+    active_session.set_clear_output_writer(clear_output)
+
     status_state = status_state or StatusAreaState()
     status_window = Window(
         content=FormattedTextControl(status_state.render),

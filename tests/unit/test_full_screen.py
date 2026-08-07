@@ -185,6 +185,54 @@ def test_session_stays_usable_after_a_failed_open(tmp_path: Path) -> None:
     assert session.context.pipeline.resolved_path == pipeline.resolve()
 
 
+def test_clear_empties_the_full_screen_output_log(tmp_path: Path) -> None:
+    """NXL-105: `/clear` inside the full-screen session now clears the
+    scrollable output log itself -- a real headless run inspecting the
+    log's actual buffer content before and after, not just that dispatch
+    doesn't crash.
+    """
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+    snapshots: list[str] = []
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        for window in get_app().layout.find_all_windows():
+            buffer = getattr(window.content, "buffer", None)
+            if buffer is not None and bool(buffer.read_only()):
+                snapshots.append(buffer.document.text)
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text("/help\n/clear\n/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    assert snapshots[0] != ""  # after /help: real content in the log
+    assert snapshots[1] == ""  # after /clear: emptied
+
+
+def test_close_still_clears_the_pipeline_context_in_full_screen(tmp_path: Path) -> None:
+    """NXL-105 regression: `/close` (renamed from `/clear`) still clears the
+    open pipeline/DAG context exactly as the old `/clear` did, end to end
+    through the real full-screen machinery, not just the classic loop
+    (already covered in test_interactive_cli.py)."""
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_pipeline(pipeline, source, destination)
+    session = InteractiveSession(render_context=_CAPABLE)
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {pipeline}\n/close\n/exit\n", session=session
+    )
+
+    assert session.context.pipeline is None
+    assert "Pipeline context cleared." in output_log
+
+
 def test_divider_uses_the_blue_discord_palette() -> None:
     divider = _divider()
 
@@ -799,3 +847,12 @@ def test_completion_menu_offers_the_new_v033_parity_commands() -> None:
 
     assert "/runs" in completions
     assert "/scheduler" in completions
+
+
+def test_completion_menu_offers_close_nxl_105() -> None:
+    completer = NexolithCompleter()
+    document = Document("/", cursor_position=1)
+    completions = [c.text for c in completer.get_completions(document, CompleteEvent())]
+
+    assert "/close" in completions
+    assert "/clear" in completions

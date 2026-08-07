@@ -14,6 +14,7 @@ from prompt_toolkit.document import Document
 COMMANDS: tuple[str, ...] = (
     "/help",
     "/open",
+    "/close",
     "/validate",
     "/run",
     "/runs",

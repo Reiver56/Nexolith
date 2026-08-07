@@ -342,6 +342,7 @@ def test_help_lists_only_available_commands() -> None:
     assert "/help" in result.output
     assert "/open <path>" in result.output
     assert "/open" in result.output
+    assert "/close" in result.output
     assert "/clear" in result.output
     assert "/exit" in result.output
     assert "/run" in result.output
@@ -365,25 +366,42 @@ def test_open_valid_pipeline_and_show_context(tmp_path: Path) -> None:
     ]
 
 
-def test_open_without_context_and_clear_without_context_are_safe() -> None:
-    session, _, output = run_session(["/open", "/clear", "/exit"])
+def test_open_without_context_and_close_without_context_are_safe() -> None:
+    session, _, output = run_session(["/open", "/close", "/exit"])
 
     assert session.context.pipeline is None
     assert output.count(NO_PIPELINE) == 2
 
 
-def test_open_replaces_pipeline_and_clear_removes_context(tmp_path: Path) -> None:
+def test_open_replaces_pipeline_and_close_removes_context(tmp_path: Path) -> None:
+    """NXL-105: `/close` (renamed from `/clear`) still does exactly this --
+    `/clear` itself now clears the scrollable log instead, see
+    test_clear_in_the_classic_loop_reports_no_scrollable_log_to_clear below
+    and full_screen's own coverage in test_full_screen.py.
+    """
     first = tmp_path / "first.yaml"
     second = tmp_path / "second.yaml"
     write_pipeline(first, "first")
     write_pipeline(second, "second")
 
-    session, reader, output = run_session([f"/open {first}", f"/open {second}", "/clear", "/exit"])
+    session, reader, output = run_session([f"/open {first}", f"/open {second}", "/close", "/exit"])
 
     assert session.context.pipeline is None
     assert "Pipeline context cleared." in output
     assert reader.prompts[-2] == "nexolith [second.yaml]> "
     assert reader.prompts[-1] == DEFAULT_PROMPT
+
+
+def test_clear_in_the_classic_loop_reports_no_scrollable_log_to_clear() -> None:
+    """NXL-105: `/clear` now means "clear the scrollable log" -- the
+    classic loop has no such buffer (it prints straight to the real
+    terminal, same as the one-shot `nexolith run`/`validate` commands), so
+    it reports that plainly rather than silently doing nothing or
+    (incorrectly, post-rename) clearing the pipeline context.
+    """
+    session, _, output = run_session(["/open", "/clear", "/exit"])
+
+    assert "Nothing to clear -- the classic session has no separate scrollable log." in output
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "directory", "invalid"])
@@ -499,6 +517,7 @@ def test_command_parser_has_small_explicit_contract() -> None:
     assert parse_command(" /help ").kind is InteractiveCommand.HELP
     assert parse_command("/open").kind is InteractiveCommand.OPEN
     assert parse_command("/open pipeline with spaces.yaml").text == "pipeline with spaces.yaml"
+    assert parse_command("/close").kind is InteractiveCommand.CLOSE
     assert parse_command("/clear").kind is InteractiveCommand.CLEAR
     assert parse_command("/validate").kind is InteractiveCommand.VALIDATE
     assert parse_command("/run").kind is InteractiveCommand.RUN

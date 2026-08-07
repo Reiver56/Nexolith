@@ -133,6 +133,14 @@ def test_register_is_recognized_after_nxl_103_completer_fix() -> None:
     assert lex_input_line("/register", _CAPABLE) == [(_BLUE_BOLD, "/register")]
 
 
+def test_close_and_clear_are_both_recognized_after_nxl_105_rename() -> None:
+    """NXL-105: `/close` (new) and `/clear` (redefined meaning, same
+    keyword) are both still real, highlighted commands -- automatic via
+    the shared `completion.COMMANDS` list, not a separate list here."""
+    assert lex_input_line("/close", _CAPABLE) == [(_BLUE_BOLD, "/close")]
+    assert lex_input_line("/clear", _CAPABLE) == [(_BLUE_BOLD, "/clear")]
+
+
 def test_unrecognized_slash_command_is_left_unstyled() -> None:
     assert lex_input_line("/bogus", _CAPABLE) == [("", "/bogus")]
 

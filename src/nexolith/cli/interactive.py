@@ -2,6 +2,7 @@
 
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -47,7 +48,8 @@ HELP = (
     "  /help  Show available commands.\n"
     "  /open <path>  Open or replace the current pipeline or DAG.\n"
     "  /open  Show the current pipeline or DAG.\n"
-    "  /clear  Clear the current pipeline or DAG.\n"
+    "  /close  Close the current pipeline or DAG.\n"
+    "  /clear  Clear the scrollable output log.\n"
     "  /validate  Validate the current pipeline or DAG.\n"
     "  /run  Run the current pipeline or DAG.\n"
     "  /runs  List recent DAG runs.\n"
@@ -74,6 +76,7 @@ class InteractiveCommand(StrEnum):
     EMPTY = "empty"
     HELP = "help"
     OPEN = "open"
+    CLOSE = "close"
     CLEAR = "clear"
     VALIDATE = "validate"
     RUN = "run"
@@ -103,6 +106,8 @@ def parse_command(value: str) -> ParsedCommand:
         parts = command.split(maxsplit=1)
         if parts[0] == "/open" and len(parts) == 2:
             return ParsedCommand(InteractiveCommand.OPEN, parts[1])
+    if command == "/close":
+        return ParsedCommand(InteractiveCommand.CLOSE)
     if command == "/clear":
         return ParsedCommand(InteractiveCommand.CLEAR)
     if command == "/validate":
@@ -265,6 +270,14 @@ class InteractiveSession:
         # True by default (matches every existing caller's real behavior
         # today, including every test that never sets this explicitly).
         self._output_ansi_capable = True
+        # NXL-105: `/clear` now clears the visible scrollable log -- a
+        # concept that only exists for the full-screen session (see
+        # set_clear_output_writer()). The classic loop has no such retained
+        # buffer to clear (it just prints straight to the real terminal, no
+        # different from the one-shot `nexolith run`/`validate` commands),
+        # so it leaves this unset and `_clear_log()` reports that plainly
+        # rather than silently doing nothing.
+        self._clear_output: Callable[[], None] | None = None
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
         self._presenter: OperationPresenter = presenter or ClassicOperationPresenter(self._write)
@@ -286,6 +299,13 @@ class InteractiveSession:
         """
         self._write = writer
         self._output_ansi_capable = ansi_capable
+
+    def set_clear_output_writer(self, clear: Callable[[], None]) -> None:
+        """Give `/clear` (NXL-105) a real way to empty the scrollable output
+        log -- only the full-screen session has one; unset by default, in
+        which case `/clear` reports that plainly (see `_clear_log()`).
+        """
+        self._clear_output = clear
 
     def set_presenter(self, presenter: OperationPresenter) -> None:
         """Redirect how `/validate`/`/run` progress and outcomes are shown,
@@ -319,8 +339,11 @@ class InteractiveSession:
         if command.kind is InteractiveCommand.OPEN:
             self._open_pipeline(command.text)
             return True
-        if command.kind is InteractiveCommand.CLEAR:
+        if command.kind is InteractiveCommand.CLOSE:
             self._clear_pipeline()
+            return True
+        if command.kind is InteractiveCommand.CLEAR:
+            self._clear_log()
             return True
         if command.kind is InteractiveCommand.VALIDATE:
             self._validate_pipeline()
@@ -368,10 +391,28 @@ class InteractiveSession:
         self._write(f"{kind_label} opened: {requested_path}")
 
     def _clear_pipeline(self) -> None:
+        """`/close` (NXL-105; the old `/clear` behavior, renamed -- see
+        `_clear_log()` for what `/clear` itself now does) -- unchanged
+        otherwise: still clears the currently-open pipeline/DAG selection,
+        same messages either way.
+        """
         if self.context.clear():
             self._write("Pipeline context cleared.")
         else:
             self._write(NO_PIPELINE)
+
+    def _clear_log(self) -> None:
+        """`/clear` (NXL-105): clears the scrollable output log, the more
+        natural reading of "clear" for a full-screen terminal UI. Only the
+        full-screen session has a retained log buffer to clear at all (see
+        `set_clear_output_writer()`) -- the classic loop just prints
+        straight to the real terminal, same as the one-shot `nexolith run`/
+        `validate` commands, so there is nothing here for it to act on.
+        """
+        if self._clear_output is not None:
+            self._clear_output()
+            return
+        self._write("Nothing to clear -- the classic session has no separate scrollable log.")
 
     def _validate_pipeline(self) -> None:
         pipeline = self._require_pipeline()

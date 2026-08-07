@@ -11,7 +11,7 @@ session in either mode; EOF and keyboard interruption also exit cleanly.
 
 Every command dispatches through the same `InteractiveSession.dispatch()` method regardless of
 which mode is active — the full-screen layout and the classic loop share 100% of the command
-logic (`/open`, `/validate`, `/run`, `/clear`, error handling, redaction) and differ only in how
+logic (`/open`, `/close`, `/validate`, `/run`, `/clear`, error handling, redaction) and differ only in how
 output is displayed. `run_interactive_session()`'s fallback between the two is a single,
 deterministic branch on `render_context.plain`, tested directly — not something that happens by
 accident if `prompt_toolkit` raises.
@@ -23,9 +23,11 @@ configuration when its contents change. Opening another pipeline replaces the co
 loading succeeds.
 
 `/open` without an argument reports the current path and marks it unavailable if the file was
-deleted after opening. `/clear` removes the active context. The prompt shows only the selected
-filename, for example `nexolith [orders.yaml]> `, and bounds unusual or long names. Context lasts
-only for the current interactive process.
+deleted after opening. `/close` removes the active context (NXL-105; `/clear` was renamed to this
+and now clears the full-screen session's scrollable output log instead -- the classic loop has no
+such buffer to clear, and reports that plainly). The prompt shows only the selected filename, for
+example `nexolith [orders.yaml]> `, and bounds unusual or long names. Context lasts only for the
+current interactive process.
 
 `/validate` reloads and validates the selected pipeline. `/run` reloads and executes it through the
 shared application layer. Both commands render plain-text lifecycle events as they arrive; a run

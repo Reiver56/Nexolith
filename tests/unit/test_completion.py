@@ -93,7 +93,7 @@ def test_non_open_commands_get_no_path_completion(
     monkeypatch.chdir(tmp_path)
     (tmp_path / "pipeline.yaml").write_text("name: x\n", encoding="utf-8")
 
-    for command in ("/validate", "/run", "/runs", "/help", "/clear", "/exit"):
+    for command in ("/validate", "/run", "/runs", "/help", "/close", "/clear", "/exit"):
         assert completions_for(f"{command} pipe") == []
 
 
@@ -115,6 +115,14 @@ def test_bare_slash_includes_register_nxl_103_was_never_added_here() -> None:
     """
     assert "/register" in COMMANDS
     assert completions_for("/reg") == ["/register"]
+
+
+def test_bare_slash_includes_close_nxl_105() -> None:
+    """NXL-105: `/close` (the renamed pipeline-context-clear command,
+    `/clear` itself now clears the scrollable log) is a real completable
+    command."""
+    assert "/close" in COMMANDS
+    assert completions_for("/clo") == ["/close"]
 
 
 def test_scheduler_subcommand_completion_offers_status_and_stop() -> None:
