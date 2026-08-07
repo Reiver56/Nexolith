@@ -582,6 +582,51 @@ def test_dag_run_result_uses_the_same_rounded_panel_style_as_a_classic_pipeline(
     assert "Rows read: 2" in output_log and "Rows written: 2" in output_log  # pipeline panel
 
 
+def test_output_log_panel_border_renders_with_real_blue_style_end_to_end(tmp_path: Path) -> None:
+    """This story's real feasibility proof, not just structured lexer output
+    in isolation (see test_highlighting.py for that): drives a genuine
+    headless `Application` all the way through rendering and inspects the
+    actual `Screen` cell styles `OutputLogLexer` produced, the same
+    technique `test_scroll_events_route_to_the_output_log_not_input_history`
+    already uses to inspect real render output elsewhere in this file.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "dag_pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    blue = f"fg:#{BLURPLE[0]:02x}{BLURPLE[1]:02x}{BLURPLE[2]:02x}"
+    found: dict[str, bool] = {"border_styled": False, "label_styled": False}
+
+    session = InteractiveSession(render_context=_CAPABLE)
+    original_dispatch = session.dispatch
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        app = get_app()
+        app._redraw()
+        screen = app.renderer._last_screen
+        assert screen is not None
+        for row in screen.data_buffer.values():
+            for cell in row.values():
+                if cell.char in "╭╮╰╯─│" and blue in cell.style:
+                    found["border_styled"] = True
+                if cell.char == "S" and blue in cell.style:  # start of "Status:"
+                    found["label_styled"] = True
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(f"/open {dag_path}\n/run\n/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(_CAPABLE, session=session)
+
+    assert found["border_styled"] is True
+    assert found["label_styled"] is True
+
+
 def test_run_result_falls_back_to_plain_ascii_border_when_render_context_is_plain(
     tmp_path: Path,
 ) -> None:

@@ -12,6 +12,12 @@ Callers must check `RenderContext.plain` before calling `run_full_screen_session
 attempts a real full-screen session and never checks terminal capability
 itself.
 
+`output_area`/`input_field` both carry a `Lexer` (`highlighting.py`) for real
+blue Discord-like styling -- panel borders/`Label:` prefixes in the log,
+recognized `/command` keywords as they're typed -- without embedding any
+ANSI escape code in either buffer's actual text (which `output_area`, a
+plain `TextArea`, still cannot interpret at all; see NXL-100/NXL-104).
+
 Crash/exit safety: `prompt_toolkit.Application(full_screen=True).run()`
 restores the terminal (raw mode and the alternate screen buffer) in its own
 `finally` blocks regardless of how it exits — normal completion, `.exit()`,
@@ -34,6 +40,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 
 from nexolith.cli.completion import NexolithCompleter
+from nexolith.cli.highlighting import CommandKeywordLexer, OutputLogLexer
 from nexolith.cli.interactive import GOODBYE, InteractiveSession, parse_command, render_prompt
 from nexolith.cli.nexo_art import BLURPLE, render_nexo_panel
 from nexolith.cli.render_context import RenderContext
@@ -65,7 +72,9 @@ def run_full_screen_session(
     """
     active_session = session or InteractiveSession(render_context=render_context)
 
-    output_area = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
+    output_area = TextArea(
+        read_only=True, scrollbar=True, wrap_lines=True, lexer=OutputLogLexer(render_context)
+    )
 
     def append_output(text: str) -> None:
         current = output_area.buffer.document.text
@@ -103,6 +112,7 @@ def run_full_screen_session(
         complete_while_typing=True,
         history=InMemoryHistory(),
         prompt=lambda: render_prompt(active_session.context),
+        lexer=CommandKeywordLexer(render_context),
     )
 
     def on_submit(buffer: Buffer) -> bool:

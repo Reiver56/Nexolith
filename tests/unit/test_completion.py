@@ -107,6 +107,16 @@ def test_bare_slash_includes_the_new_v033_parity_commands() -> None:
     assert completions_for("/sched") == ["/scheduler"]
 
 
+def test_bare_slash_includes_register_nxl_103_was_never_added_here() -> None:
+    """NXL-103 added `/register` to InteractiveCommand/parse_command but
+    never to this completer's own command list -- found while confirming
+    the real current command set for NXL-106's keyword highlighting, not
+    something that earlier story's own tests caught.
+    """
+    assert "/register" in COMMANDS
+    assert completions_for("/reg") == ["/register"]
+
+
 def test_scheduler_subcommand_completion_offers_status_and_stop() -> None:
     assert completions_for("/scheduler ") == ["status", "stop"]
     assert completions_for("/scheduler st") == ["status", "stop"]

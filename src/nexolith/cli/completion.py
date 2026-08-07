@@ -17,6 +17,7 @@ COMMANDS: tuple[str, ...] = (
     "/validate",
     "/run",
     "/runs",
+    "/register",
     "/scheduler",
     "/clear",
     "/exit",
