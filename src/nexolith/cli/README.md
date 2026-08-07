@@ -187,9 +187,19 @@ differs.
 `/exit`, `Ctrl+C`, `Ctrl+D`, or an unhandled exception — `prompt_toolkit` itself restores the
 terminal (raw mode and the alternate screen buffer) from its own `finally` blocks in
 `Application.run_async()`; that guarantee is `prompt_toolkit`'s, not this module's, and is why
-crash-safety here doesn't depend on anything in `full_screen.py` catching exceptions. Terminal
-resize is handled by `prompt_toolkit`'s own redraw machinery; no custom resize code exists in this
-module.
+crash-safety here doesn't depend on anything in `full_screen.py` catching exceptions.
+
+Terminal resize is *detected and redrawn* by `prompt_toolkit`'s own machinery (SIGWINCH on POSIX,
+size-polling on Windows), but `RenderContext.width` used to stay frozen at whatever was detected at
+session start, so panels rendered after a resize still budgeted against the old width — a real,
+confirmed corruption source, not just a cosmetic one (see `render_context.py`'s
+`detect_width()`/`InteractiveSession.refresh_render_context_width()`). The header (`render_header()`
+below), the `FullScreenOperationPresenter`'s render context, and `_output_render_context()` all now
+re-detect the width on every render instead of once; only text already written to the scrollable
+output log keeps whatever width was live when it was written, the same way a real terminal's own
+scrollback behaves. See the top-level README's "Known limitations" for the remaining,
+not-fully-resolved alt-screen-buffer corruption class this was one real contributing factor to, not
+the whole story.
 
 `run_interactive_session()` in `interactive.py` is the only caller: it checks
 `render_context.plain` first (the real, deterministic, tested fallback gate) and only attempts

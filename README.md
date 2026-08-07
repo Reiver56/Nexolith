@@ -148,6 +148,40 @@ connection details. `validate` parses YAML, resolves environment variables, and 
 configuration without reading or writing data. `run` executes the ordered pipeline and prints
 status, duration, row counts, and an error when applicable.
 
+### Known limitations
+
+The full-screen interactive session may occasionally render with visual corruption — overlapping
+or garbled text in the scrollable output log, typically after a task failure followed by further
+interaction. This has been reproduced in both VS Code's integrated terminal and plain
+PowerShell/`conhost`, so it is not specific to one terminal application.
+
+Root cause: believed to be a general class of alt-screen-buffer rendering bug affecting Windows
+terminal emulators broadly under heavy redraw activity, not something Nexolith's code can fully
+control from inside `prompt_toolkit`. See
+[microsoft/terminal#3545](https://github.com/microsoft/terminal/issues/3545),
+[#12329](https://github.com/microsoft/terminal/issues/12329),
+[#13741](https://github.com/microsoft/terminal/issues/13741), and
+[prompt-toolkit#1258](https://github.com/prompt-toolkit/python-prompt-toolkit/issues/1258).
+
+Two real, confirmed contributing factors have already been fixed or mitigated: a stale
+terminal-width bug where panel/border rendering kept using the width detected at session start
+instead of the real width after a terminal resize (fixed), and redraw-burst timing during rapid
+event streams (mitigated via `min_redraw_interval`). Both reduce how often this occurs but do not
+eliminate it — the remaining cause sits outside code this project controls.
+
+The classic, non-full-screen CLI (`validate`, `run`, `scheduler`, `runs`, and friends) is
+completely unaffected in any terminal — this is specific to the full-screen session's alternate
+screen buffer.
+
+If you hit this: try `/clear`, or exit (`/exit`) and restart the full-screen session. If it
+recurs often in your environment, prefer the classic CLI commands for that work instead.
+
+(A secondary, unconfirmed hypothesis worth revisiting later: the blue divider lines separating the
+full-screen layout's regions may visually blend with adjacent log content in some color schemes,
+possibly contributing to perceived severity. This doesn't explain the scattered/duplicated text
+fragments actually observed, which look like genuine buffer/redraw corruption rather than a
+contrast issue, so it's noted as a possible minor factor, not the primary cause.)
+
 ### Error handling and exit codes
 
 Expected failures use stable configuration, connector, transformation, and execution error
