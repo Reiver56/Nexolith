@@ -7,26 +7,129 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Changes targeting releases after 0.3.0 will be recorded here.
+Everything below has landed on `feature/v0.3.3-advanced-pipeline-capabilities` since `0.3.0` but is
+not yet released — grouped by the milestone each was built for. A version bump (`0.3.1`/`0.3.2`/
+`0.3.3`, or a single combined release) is a separate, not-yet-authorized step; this file records
+what shipped, not when it's cut.
 
-### Added
+### v0.3.1 — CLI Aesthetics
 
-- Added a full-screen interactive session on capable terminals: a bordered, titled Nexo pixel-art
-  panel as a persistent header, a scrollable output log, and a tab-completing input line (slash
-  commands and `/open` path completion), using `prompt_toolkit`'s alternate screen buffer. Falls
-  back to the existing plain-text line loop — unchanged, byte-identical — whenever `NO_COLOR`, no
-  real TTY, a narrow terminal, or `prompt_toolkit` cannot acquire a terminal for full-screen mode.
-  Every command dispatches through the same logic in both modes; only presentation differs
-  (NXL-69).
-- Added blue Discord-toned divider lines separating the full-screen layout's header, status,
-  output, and input regions, and made command/path tab-completion visible as a live menu while
-  typing instead of only on Tab/Enter (NXL-69).
+#### Added
+
+- Added a colored Nexo pixel-art startup splash and prompt idle state, degrading automatically by
+  terminal capability: the Kitty graphics protocol at full fidelity where supported, ANSI truecolor
+  (falling back to a real 256-color tier when truecolor isn't detected) block art otherwise, and
+  today's plain-text splash on a narrow, non-color, non-TTY, or encoding-unsafe terminal — never a
+  crash, always a graceful degrade (NXL-69, NXL-72).
+- Added a full-screen interactive session on capable terminals: a bordered, titled Nexo panel as a
+  persistent header, blue Discord-toned divider lines separating header/status/output/input, a
+  scrollable output log, and a tab-completing input line (slash commands and `/open` path
+  completion, visible as a live menu while typing). Falls back to the existing plain-text line
+  loop — unchanged, byte-identical — whenever `NO_COLOR`, no real TTY, a narrow terminal, or
+  `prompt_toolkit` cannot acquire a terminal for full-screen mode. Every command dispatches through
+  the same logic in both modes; only presentation differs (NXL-69).
 - Added an in-place step timeline for `/validate` and `/run` in the full-screen session, with a
-  small activity dot that pulses only when a real pipeline lifecycle event arrives (no timer, no
-  background thread), replaced by a bordered summary panel (status, rows read, rows written,
-  duration) on completion. `/validate` configuration errors now additionally show a small, bounded
-  excerpt of the pipeline YAML with the offending line highlighted, when it can be reliably
-  located; otherwise falls back to today's plain-text-only error message (NXL-69).
+  small activity dot that pulses only when a real pipeline lifecycle event arrives, replaced by a
+  bordered summary/validation panel on completion. `/validate` configuration errors additionally
+  show a small, bounded excerpt of the pipeline YAML with the offending line highlighted, when it
+  can be reliably located (NXL-69).
+
+#### Fixed
+
+- Fixed `/validate` leaving the full-screen status area stuck on its in-progress timeline forever
+  on success, instead of showing a terminal validation panel the way `/run` already did.
+- Fixed trackpad/mouse-wheel scrolling in the full-screen session hijacking the input field's
+  command history instead of scrolling the output log.
+
+### v0.3.2 — Operational Pipelines
+
+#### Added
+
+- Added a declarative DAG format (`workflow.yaml`) for describing multiple existing pipelines as
+  named, dependency-ordered tasks, with structural validation and cycle detection (NXL-74).
+- Added a DAG executor: runs a DAG's tasks in dependency order through the same pipeline engine
+  `run`/`validate` already use, recording live, crash-recoverable run/task state, and propagating a
+  failure to every downstream task as `skipped` (NXL-76).
+- Added a scheduler daemon: polls enabled, scheduled DAGs and triggers due ones automatically on an
+  interval schedule (`30s`/`5m`/`2h`/`1d`), with a skip-missed-occurrences catch-up policy and safe
+  shutdown (NXL-77).
+- Added `nexolith scheduler start`/`stop`/`status` and `nexolith runs list`/`show` to the CLI for
+  running and observing the scheduler daemon and DAG run history (NXL-78).
+- Added configurable per-task retry (delay and backoff multiplier) and a DAG-level failure
+  propagation policy (`skip`, the prior-only behavior, or `block`, which also blocks independent,
+  unrelated tasks), with a per-attempt breakdown shown in `runs show` for any task that was
+  retried (NXL-79).
+
+#### Fixed
+
+- Fixed `runs show` crashing with `UnicodeEncodeError` on a terminal/encoding that can't render its
+  Unicode status markers (e.g. a legacy Windows code page), including when `NO_COLOR` was set
+  (NXL-80).
+
+### v0.3.3 — Advanced Pipeline Capabilities
+
+#### Added
+
+- Added `query_file` on SQL pipeline sources, so a query can live in its own `.sql` file instead of
+  being inlined in the pipeline YAML (NXL-81).
+- Added parameterized SQL queries: named parameters declared on the source and safely bound via
+  SQLAlchemy Core (never string interpolation), overridable per DAG task at run time (NXL-82).
+- Added in-process Python transform job steps (`python_job`) for row-level logic the declarative
+  transform set can't express (NXL-83, ADR-7).
+- Added autonomous script job steps (`script:`) — a DAG task that runs as its own subprocess with
+  its own interpreter/venv, for engines like PySpark or a fan-out shape a single pipeline can't
+  express (NXL-88, ADR-7).
+- Added cross-DAG triggers (`trigger.on_success_of`): a DAG can start automatically as soon as
+  another DAG it depends on succeeds, instead of only on its own schedule (NXL-85).
+- Added DAG priority (`low`/`normal`/`high`/`critical`) for resolving scheduling contention among
+  multiple DAGs due at once (NXL-86).
+- Added DAG severity classification (`low`/`medium`/`high`/`critical`, default `medium`), snapshotted
+  per run and shown in `runs show`/`runs list` (NXL-87).
+- Added `nexolith dag register` (classic CLI) and `/register` (interactive session) to enable a DAG
+  for scheduled execution without running it first (NXL-103).
+- Added a `truncate` SQL destination write mode: clears a table's rows in place before writing,
+  preserving schema and constraints — unlike `replace`, which drops and recreates the table
+  (NXL-96).
+- Brought the full-screen interactive session up to parity with the classic CLI: `/runs`,
+  `/scheduler status`/`stop`, DAG file recognition for `/open`/`/validate`/`/run`, and `/register`
+  (NXL-99); `/open` with no argument now discovers DAG files recursively when nothing is open
+  (NXL-107); `/clear` now clears the scrollable output log, and the prior pipeline/DAG-context-clearing
+  behavior moved to `/close` (NXL-105).
+- Added new worked examples: a self-contained medallion bronze/silver/gold pipeline pattern
+  combining declarative, Python-job, and script-job steps; a Postgres-backed FonoLink stress test
+  (10 pipelines, 3 cross-DAG-triggered DAGs, real fraud/churn signal); and a `query_file`-based SQL
+  enrichment chain demo. See `examples/` for details.
+
+#### Fixed
+
+- **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
+  pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
+  validate/run DAG files correctly.
+- **SQL destination type inference silently downgraded `Decimal`/`datetime`/`date` columns to
+  `String`** when writing a fresh table (`replace`/`fail`-then-create) from aggregated or timestamp
+  values, breaking `SUM`/`MIN`/`MAX` and other SQL-level aggregation with no warning at write time.
+  Now infers real `Numeric`/`DateTime`/`Date` column types (NXL-97).
+- Fixed CSV pipeline source/destination paths only ever resolving against the process's working
+  directory instead of the pipeline's own directory, unlike every other path-bearing field
+  (`query_file`, `python_job`'s `file:`, a DAG's `pipeline:`/`script:`) (NXL-89).
+- Fixed cross-DAG trigger reactions only being recorded when the scheduler itself triggered a run —
+  a manually-run downstream DAG could be silently re-triggered by the scheduler later against stale
+  data (NXL-94).
+- Fixed `runs show`/`run` panel width having no ceiling: a long error message could produce a panel
+  wider than any real terminal, which then line-wrapped into a misaligned-looking result. Panel
+  width is now capped to the terminal and long values wrap cleanly (NXL-93).
+- Fixed `runs show`/`run` reading as if nothing happened on a failed DAG run that still had
+  independent, unrelated tasks succeed with real, persisted side effects (NXL-95).
+- Fixed the full-screen session printing raw 24-bit color escape codes as literal text on terminals
+  that signal color support but not truecolor, and colorized text leaking into the output log (which
+  cannot interpret any ANSI escape codes at all) — structural highlighting there (borders, labels,
+  recognized commands) now goes through a proper syntax-highlighting lexer instead (NXL-100,
+  NXL-104, NXL-106).
+- Fixed two real sources of visual corruption in the full-screen session's scrollable output log: an
+  unaccounted-for scrollbar column that could overflow a maximally-wide result panel by one
+  character, and a stale terminal width that was never refreshed after a real window resize;
+  redraw bursts are also now throttled as an additional, lower-confidence mitigation. Occasional
+  full-screen rendering corruption can still occur on Windows — see README's "Known limitations".
 
 ## [0.3.0] - 2026-08-01
 

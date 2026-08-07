@@ -37,8 +37,16 @@ process](RELEASING.md).
 ## Features
 
 - Declarative YAML pipelines with Pydantic validation
-- CSV, SQLite, and PostgreSQL sources and destinations
-- Safe select, rename, drop-null, and declarative filter transformations
+- CSV, SQLite, and PostgreSQL sources and destinations, including parameterized and
+  file-backed (`query_file`) SQL queries
+- Safe select, rename, drop-null, and declarative filter transformations, plus in-process
+  Python (`python_job`) and subprocess script job steps for logic the declarative set can't
+  express (see [Transformations](#transformations))
+- DAG orchestration across multiple pipelines: dependencies, retries, failure-propagation
+  policy, cross-DAG triggers, priority, and severity, with a scheduler daemon and persisted
+  run history (see [CLI](#cli))
+- An interactive CLI session — full-screen with tab-completion on a capable terminal, a
+  plain-text line loop otherwise — alongside scriptable one-shot commands
 - Environment variable substitution using `${VARIABLE_NAME}`
 - Execution status, timing, row counts, and safe error reporting
 - Small registries for adding connectors and transformations
@@ -51,6 +59,12 @@ connector registry for its source and destination, and the transformation regist
 each ordered transformation. Rows use the intentionally small `list[dict]` representation.
 Execution results are plain models that can later be persisted without coupling persistence
 to the runner.
+
+A DAG layer sits above single pipelines: declarative dependency graphs (`nexolith.dag`) are
+executed in order (`nexolith.dag`'s executor), with run/task state persisted to a local
+SQLite store (`nexolith.state`) that a polling scheduler daemon (`nexolith.scheduler`) reads
+to trigger due or cross-DAG-triggered DAGs. See [src/nexolith/cli/README.md](src/nexolith/cli/README.md)
+for how the CLI presentation layer is organized.
 
 ## Requirements and installation
 
@@ -441,18 +455,24 @@ and connection pooling configuration remain outside the current MVP.
 
 ## Roadmap
 
-Available in `0.1.0`:
+Available:
 
 - [x] YAML validation and environment substitution
-- [x] CSV, SQLite, and PostgreSQL connectors
-- [x] Core transformations, CLI, and in-memory execution results
+- [x] CSV, SQLite, and PostgreSQL connectors, including parameterized and file-backed queries
+- [x] Core transformations, an interactive and scriptable CLI, and in-memory execution results
+- [x] In-process Python and subprocess script job steps
+- [x] DAG orchestration, configurable retries and failure-propagation policy, cross-DAG
+      triggers, and priority/severity classification
+- [x] A scheduler daemon and persisted execution history
+
+See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
 Planned, not implemented:
 
 - [ ] REST API, MySQL, and additional connectors
-- [ ] Custom transformation plugins and configurable retries
-- [ ] Persisted execution history and scheduling
-- [ ] Parallel execution and data-quality checks
+- [ ] A custom transformation plugin system
+- [ ] Parallel task execution within a DAG (currently sequential)
+- [ ] Data-quality checks
 - [ ] Lineage, metrics, observability, and a web dashboard
 
 ## Contributing, security, and license
