@@ -573,13 +573,34 @@ class InteractiveSession:
         style in the log: both already rendered through `panel_lines()`
         (DAG directly, pipeline via `render_execution_panel()`), so both
         pick up the rounded shape for free once color alone -- not the
-        border too -- is what gets suppressed for this sink. `self.render_context`
-        itself is left untouched either way -- the status area and header
-        still use it directly and still get real color.
+        border too -- is what gets suppressed for this sink.
+
+        `width - 1`, also only for this sink (found diagnosing a real
+        visual-corruption report): the full-screen output log's `TextArea`
+        is constructed with `scrollbar=True` (full_screen.py), which adds a
+        `ScrollbarMargin` -- a real column of the `Window`'s width that
+        `TextArea`'s own `wrap_lines=True` reserves for the scrollbar and
+        never gives to content, confirmed directly by reading
+        `prompt_toolkit.widgets.base.TextArea.__init__` and
+        `prompt_toolkit.layout.margins.ScrollbarMargin`. `panel_lines()`
+        budgets its border/padding against the *full* `render_context.width`
+        with no way to know about that margin, so a panel whose rendered
+        line reaches the full declared width (which its own width-capping
+        logic, NXL-93, deliberately maximizes) overflows the real available
+        column by exactly one -- confirmed empirically: a real headless
+        render with `render_context.width` set to exactly the real
+        terminal's own column count still wrapped every content row's
+        closing border character onto its own line. `self.render_context`
+        itself is left untouched either way -- the status area/header have
+        no scrollbar margin and still use the full real width.
         """
         if self._output_ansi_capable:
             return self.render_context
-        return replace(self.render_context, ansi_capable=False)
+        return replace(
+            self.render_context,
+            ansi_capable=False,
+            width=max(1, self.render_context.width - 1),
+        )
 
     def _show_runs(self, value: str) -> None:
         """`/runs` (list) and `/runs <id>` (show) -- reuses `runs_render.py`'s

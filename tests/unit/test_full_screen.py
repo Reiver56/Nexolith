@@ -12,6 +12,7 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.data_structures import Size
 from prompt_toolkit.document import Document
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.layout.containers import Window
@@ -699,6 +700,130 @@ def test_output_log_panel_border_renders_with_real_blue_style_end_to_end(tmp_pat
 
     assert found["border_styled"] is True
     assert found["label_styled"] is True
+
+
+def write_failing_sql_dag(dag_path: Path, pipeline_path: Path) -> None:
+    """A DAG whose one task fails with a real `ConnectorError` --
+    `_create_sql_engine()`'s own "Could not configure SQL connector" path,
+    triggered by a malformed connection URL `create_engine()` itself
+    rejects (`sqlalchemy.exc.ArgumentError`, a `SQLAlchemyError` subclass)
+    -- the exact real error the corruption bug report was about, not a
+    synthetic placeholder message.
+    """
+    pipeline_path.write_text(
+        """
+name: failing_sql_pipeline
+source:
+  type: sqlite
+  connection_url: "not-a-valid-connection-url"
+  table: whatever
+destination:
+  type: csv
+  path: output.csv
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: corruption_repro_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def test_dag_connector_failure_panel_renders_without_corruption_at_a_realistic_width(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for a real visual-corruption bug found by live testing:
+    a DAG task failing with a real `ConnectorError`, then `/clear`.
+
+    Root cause (confirmed via this exact real headless-render technique
+    before writing this test): `panel_lines()` (nexo_art.py) budgets a
+    panel's border/padding against the *full* `render_context.width`, but
+    the full-screen output log's `TextArea` is built with `scrollbar=True`
+    (full_screen.py), which reserves one real column of the `Window`'s
+    width for its `ScrollbarMargin` -- confirmed by reading
+    `prompt_toolkit.widgets.base.TextArea.__init__` and
+    `prompt_toolkit.layout.margins.ScrollbarMargin` directly. A panel
+    reaching the full declared width (which NXL-93's own width-capping
+    logic deliberately maximizes for a long value like a real connector
+    error message) overflowed the real available column by exactly one,
+    and `wrap_lines=True` wrapped the orphaned closing border character
+    onto its own line -- misaligned columns, fragments appearing to
+    "duplicate" at different rows, exactly the reported symptom. Fixed in
+    `InteractiveSession._output_render_context()` by reducing the width
+    used for this specific sink by one.
+
+    `DummyOutput.get_size()` is monkeypatched to a specific, realistic
+    column count that genuinely matches the declared `RenderContext.width`
+    -- the correctly-functioning case this bug broke, not an artificially
+    mismatched one (a separate, pre-existing concern: `RenderContext.width`
+    is detected once at session start and never refreshed on a real
+    terminal resize).
+    """
+    # width=90 (not just any realistic value): confirmed directly that this
+    # DAG's exact real error message word-wraps such that its longest panel
+    # line reaches the full declared width at 90 -- the precondition for
+    # the off-by-one to actually manifest (it does not at every width; a
+    # panel's real rendered width depends on where `textwrap.wrap()` breaks
+    # the value, not just the declared budget). Also comfortably above
+    # `MINIMUM_WIDTH` even after the fix's -1, so this exercises the
+    # rounded-panel path, not the plain-mode ASCII fallback.
+    monkeypatch.setattr(DummyOutput, "get_size", lambda self: Size(rows=40, columns=90))
+    render_context = RenderContext(is_tty=True, color_enabled=True, width=90)
+
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    write_failing_sql_dag(dag_path, pipeline_path)
+
+    session = InteractiveSession(render_context=render_context)
+    original_dispatch = session.dispatch
+    screens: list[list[str]] = []
+
+    def snapshotting_dispatch(command: object) -> bool:
+        result = original_dispatch(command)  # type: ignore[arg-type]
+        app = get_app()
+        app._redraw()
+        screen = app.renderer._last_screen
+        assert screen is not None
+        rows = []
+        for y in sorted(screen.data_buffer.keys()):
+            row = screen.data_buffer[y]
+            rows.append("".join(row[x].char for x in sorted(row.keys())))
+        screens.append(rows)
+        return result
+
+    session.dispatch = snapshotting_dispatch  # type: ignore[method-assign]
+
+    with create_pipe_input() as pipe_input:
+        pipe_input.send_text(f"/open {dag_path}\n/run\n/clear\n/exit\n")
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            run_full_screen_session(render_context, session=session)
+
+    run_screen = screens[1]  # after /run
+    bordered_rows = [row for row in run_screen if row.startswith("│")]
+    assert bordered_rows, "expected the real failure panel to appear in the log"
+    for row in bordered_rows:
+        stripped = row.rstrip()
+        assert stripped.endswith("│"), f"panel row's closing border wrapped away: {row!r}"
+    # The exact artifact this bug produced: a lone orphaned closing border
+    # on its own physical row, with nothing else on it.
+    assert not any(row.strip() == "│" for row in run_screen)
+    assert any("Status: failed" in row for row in run_screen)
+
+    clear_screen = screens[2]  # after /clear
+    # Rows 0-8 are the static header panel (_PANEL_HEIGHT), which is never
+    # touched by /clear and legitimately contains its own "│" border --
+    # excluded so this checks the log area specifically, not the header.
+    clear_text = "\n".join(clear_screen[9:])
+    assert "Status: failed" not in clear_text
+    assert "│" not in clear_text
+    assert "Tasks:" not in clear_text
+    assert "connector" not in clear_text.lower()
 
 
 def test_run_result_falls_back_to_plain_ascii_border_when_render_context_is_plain(
