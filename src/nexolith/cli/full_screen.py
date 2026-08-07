@@ -19,6 +19,8 @@ or an unhandled exception. That guarantee comes from prompt_toolkit itself,
 not from anything in this module.
 """
 
+from dataclasses import replace
+
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
@@ -81,8 +83,17 @@ def run_full_screen_session(
         wrap_lines=True,
         dont_extend_height=True,
     )
+    # ansi_capable=False (NXL-104): a /run's outcome is written through
+    # `append_output` -- the same ANSI-incapable output log sink `_write`
+    # itself uses -- so it needs the same downgrade `_output_render_context()`
+    # applies there, not the header/status area's own real-color context.
     active_session.set_presenter(
-        FullScreenOperationPresenter(status_state, invalidate=lambda: application.invalidate())
+        FullScreenOperationPresenter(
+            status_state,
+            invalidate=lambda: application.invalidate(),
+            write=append_output,
+            render_context=replace(render_context, ansi_capable=False),
+        )
     )
 
     input_field = TextArea(

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from nexolith.cli.context import SelectedPipeline
+from nexolith.cli.render_context import RenderContext
 from nexolith.cli.status_area import (
     FullScreenOperationPresenter,
     StatusAreaState,
     StepStatus,
     build_error_excerpt,
+    render_execution_panel,
 )
 from nexolith.events import (
     ExtractionCompleted,
@@ -34,6 +38,25 @@ def plain(state: StatusAreaState) -> str:
 
 def selected_pipeline(path: Path) -> SelectedPipeline:
     return SelectedPipeline(requested_path=Path(path.name), resolved_path=path)
+
+
+_CAPABLE = RenderContext(is_tty=True, color_enabled=True, width=200)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def make_presenter(
+    state: StatusAreaState,
+    *,
+    invalidate: Callable[[], None] = lambda: None,
+    written: list[str] | None = None,
+    render_context: RenderContext = _CAPABLE,
+) -> FullScreenOperationPresenter:
+    return FullScreenOperationPresenter(
+        state,
+        invalidate,
+        write=(written if written is not None else []).append,
+        render_context=render_context,
+    )
 
 
 # --- Step timeline ------------------------------------------------------
@@ -129,7 +152,7 @@ def test_full_screen_presenter_toggles_dot_only_inside_handle(tmp_path: Path) ->
         invalidations += 1
 
     state = StatusAreaState()
-    presenter = FullScreenOperationPresenter(state, invalidate)
+    presenter = make_presenter(state, invalidate=invalidate)
     sink = presenter.event_sink(PipelineOperation.VALIDATE)
 
     assert invalidations == 1  # event_sink() itself calls invalidate once (start)
@@ -158,51 +181,96 @@ def test_active_step_marker_alternates_with_dot_state() -> None:
     assert "○" in plain(state)
 
 
-# --- Summary panel --------------------------------------------------------
+# --- Result panel (NXL-104: written to the output log, not this area) -----
 
 
-def test_summary_panel_is_a_clean_rectangle_on_success() -> None:
+def test_execution_panel_is_a_clean_rectangle_on_success() -> None:
     result = ExecutionResult(
         pipeline_name="x", status=ExecutionStatus.SUCCEEDED, rows_read=5, rows_written=3
     )
-    state = StatusAreaState()
-    state.finish_with_result(result)
 
-    lines = [line for line in plain(state).split("\n") if line]
-    widths = {len(line) for line in lines}
+    lines = [line for line in render_execution_panel(result, _CAPABLE).split("\n") if line]
+    widths = {len(_ANSI_RE.sub("", line)) for line in lines}
 
     assert len(widths) == 1
-    assert lines[0].startswith("╭") and lines[0].endswith("╮")
-    assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
+    assert lines[0].startswith("\x1b[") and "╭" in lines[0] and "╮" in lines[0]
+    assert lines[-1].startswith("\x1b[") and "╰" in lines[-1] and "╯" in lines[-1]
 
 
-def test_summary_panel_shows_status_rows_and_duration() -> None:
+def test_execution_panel_shows_status_rows_and_duration() -> None:
     result = ExecutionResult(
         pipeline_name="x", status=ExecutionStatus.SUCCEEDED, rows_read=5, rows_written=3
     )
-    state = StatusAreaState()
-    state.finish_with_result(result)
 
-    text = plain(state)
+    text = _ANSI_RE.sub("", render_execution_panel(result, _CAPABLE))
+
     assert "Status: succeeded" in text
     assert "Rows read: 5" in text
     assert "Rows written: 3" in text
 
 
-def test_summary_panel_replaces_timeline_and_stays_legible_without_color() -> None:
+def test_execution_panel_stays_legible_without_color() -> None:
     """Legibility check: strip all styling and confirm the numbers are still
     plainly readable text, not conveyed by color alone."""
     result = ExecutionResult(
         pipeline_name="x", status=ExecutionStatus.FAILED, rows_read=5, rows_written=0
     )
-    state = StatusAreaState()
-    state.start(PipelineOperation.RUN)
-    state.finish_with_result(result)
 
-    text = plain(state)
+    text = _ANSI_RE.sub("", render_execution_panel(result, _CAPABLE))
+
     assert "Status: failed" in text
     assert "Rows written: 0" in text
-    assert "●" not in text and "○" not in text  # timeline is gone, replaced
+
+
+def test_execution_panel_falls_back_to_plain_ascii_when_render_context_is_plain() -> None:
+    result = ExecutionResult(
+        pipeline_name="x", status=ExecutionStatus.SUCCEEDED, rows_read=5, rows_written=3
+    )
+    plain_context = RenderContext(is_tty=False, color_enabled=True, width=200)
+
+    text = render_execution_panel(result, plain_context)
+
+    assert "\x1b[" not in text
+    lines = [line for line in text.split("\n") if line]
+    assert lines[0].startswith("+") and lines[0].endswith("+")
+    assert lines[-1].startswith("+") and lines[-1].endswith("+")
+
+
+def test_execution_panel_omits_color_but_keeps_the_rounded_border_when_ansi_incapable() -> None:
+    """NXL-104: a genuinely capable terminal (not `.plain`) writing into an
+    ANSI-incapable sink (e.g. the full-screen output log) still gets the
+    rounded border shape -- only the color codes are suppressed."""
+    result = ExecutionResult(
+        pipeline_name="x", status=ExecutionStatus.SUCCEEDED, rows_read=5, rows_written=3
+    )
+    log_context = RenderContext(is_tty=True, color_enabled=True, width=200, ansi_capable=False)
+
+    text = render_execution_panel(result, log_context)
+
+    assert "\x1b[" not in text
+    lines = [line for line in text.split("\n") if line]
+    assert lines[0].startswith("╭") and lines[0].endswith("╮")
+    assert lines[-1].startswith("╰") and lines[-1].endswith("╯")
+
+
+def test_show_result_writes_the_execution_panel_to_the_log_and_hides_the_status_area() -> None:
+    result = ExecutionResult(
+        pipeline_name="x", status=ExecutionStatus.SUCCEEDED, rows_read=5, rows_written=3
+    )
+    state = StatusAreaState()
+    state.start(PipelineOperation.RUN)
+    written: list[str] = []
+    presenter = make_presenter(state, written=written)
+
+    presenter.show_result(result)
+
+    assert state.visible is False
+    assert len(written) == 1
+    plain_written = _ANSI_RE.sub("", written[0])
+    assert "Status: succeeded" in plain_written
+    assert "Rows read: 5" in plain_written
+    # The fixed area itself no longer carries this content at all.
+    assert plain(state) == ""
 
 
 # --- Error text + excerpt --------------------------------------------------
@@ -212,7 +280,7 @@ def test_show_error_without_excerpt_falls_back_to_plain_text(tmp_path: Path) -> 
     pipeline = selected_pipeline(tmp_path / "missing.yaml")  # never written -> unreadable
     error = ConfigurationError(f"Pipeline file not found: {pipeline.resolved_path}.")
     state = StatusAreaState()
-    presenter = FullScreenOperationPresenter(state, invalidate=lambda: None)
+    presenter = make_presenter(state)
 
     presenter.show_error(error, pipeline, PipelineOperation.VALIDATE)
 
@@ -290,15 +358,47 @@ def test_excerpt_falls_back_to_none_when_file_is_unreadable(tmp_path: Path) -> N
     assert build_error_excerpt(error, pipeline) is None
 
 
-def test_run_error_never_gets_excerpt_only_validate_does(tmp_path: Path) -> None:
-    """Story scope: excerpting is /validate-specific, not /run."""
+def test_run_error_goes_to_the_output_log_not_the_status_area(tmp_path: Path) -> None:
+    """NXL-104: a `/run` error (unlike `/validate`'s) now goes to the
+    scrollable output log and hides this fixed area entirely, matching
+    where a DAG `/run`'s own error already went -- it never reaches
+    `state` at all, so `error_text`/`error_excerpt` stay at their initial
+    `None`, not merely "excerpt is None" as before this story (when a run
+    error still populated `error_text` and stayed visible here).
+    """
     path = tmp_path / "broken.yaml"
     path.write_text("name: [\n", encoding="utf-8")
     pipeline = selected_pipeline(path)
     error = ConfigurationError(f"Invalid YAML in {path} at line 1, column 8.")
     state = StatusAreaState()
-    presenter = FullScreenOperationPresenter(state, invalidate=lambda: None)
+    state.start(PipelineOperation.RUN)
+    written: list[str] = []
+    presenter = make_presenter(state, written=written)
 
     presenter.show_error(error, pipeline, PipelineOperation.RUN)
 
+    assert state.visible is False
+    assert state.error_text is None
     assert state.error_excerpt is None
+    assert len(written) == 1
+    assert "Error [configuration]" in written[0]
+
+
+def test_validate_error_still_populates_the_status_area_with_excerpt(tmp_path: Path) -> None:
+    """Confirms /validate's own error path is genuinely unaffected by
+    NXL-104 -- still shown in this fixed area, excerpt included."""
+    path = tmp_path / "broken.yaml"
+    path.write_text("name: [\n", encoding="utf-8")
+    pipeline = selected_pipeline(path)
+    error = ConfigurationError(f"Invalid YAML in {path} at line 1, column 8.")
+    state = StatusAreaState()
+    state.start(PipelineOperation.VALIDATE)
+    written: list[str] = []
+    presenter = make_presenter(state, written=written)
+
+    presenter.show_error(error, pipeline, PipelineOperation.VALIDATE)
+
+    assert state.visible is True
+    assert state.error_text is not None
+    assert state.error_excerpt is not None
+    assert written == []

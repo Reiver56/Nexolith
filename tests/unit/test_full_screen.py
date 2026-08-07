@@ -46,15 +46,27 @@ def run_with_keys(
     *,
     session: InteractiveSession | None = None,
     status_state: StatusAreaState | None = None,
+    render_context: RenderContext = _CAPABLE,
 ) -> InteractiveSession:
     """Drive a real, headless full-screen Application with synthetic keystrokes
     (prompt_toolkit's own testing utilities: a pipe-backed Input and a
-    DummyOutput, no real terminal involved) and return the session used."""
-    active_session = session or InteractiveSession(render_context=_CAPABLE)
+    DummyOutput, no real terminal involved) and return the session used.
+
+    `render_context` must match `session`'s own `render_context` whenever a
+    custom `session` is passed with a non-default one (real usage always
+    constructs both from the same value -- see `run_interactive_session()`);
+    it's a separate parameter here only because `run_full_screen_session()`
+    itself takes `render_context` and `session` independently, for the
+    header/`FullScreenOperationPresenter` versus the session's own dispatch
+    logic respectively.
+    """
+    active_session = session or InteractiveSession(render_context=render_context)
     with create_pipe_input() as pipe_input:
         pipe_input.send_text(keys)
         with create_app_session(input=pipe_input, output=DummyOutput()):
-            run_full_screen_session(_CAPABLE, session=active_session, status_state=status_state)
+            run_full_screen_session(
+                render_context, session=active_session, status_state=status_state
+            )
     return active_session
 
 
@@ -63,6 +75,7 @@ def run_with_keys_capturing_output_log(
     *,
     session: InteractiveSession | None = None,
     status_state: StatusAreaState | None = None,
+    render_context: RenderContext = _CAPABLE,
 ) -> str:
     """Like `run_with_keys`, but also returns the real, final scrollable
     output log text -- what a user would actually see for commands (like
@@ -72,7 +85,7 @@ def run_with_keys_capturing_output_log(
     the header/status controls have no Buffer at all), so it's identified
     that way rather than needing `run_full_screen_session` to expose it.
     """
-    active_session = session or InteractiveSession(render_context=_CAPABLE)
+    active_session = session or InteractiveSession(render_context=render_context)
     captured: dict[str, str] = {}
     original_dispatch = active_session.dispatch
 
@@ -89,7 +102,9 @@ def run_with_keys_capturing_output_log(
     with create_pipe_input() as pipe_input:
         pipe_input.send_text(keys)
         with create_app_session(input=pipe_input, output=DummyOutput()):
-            run_full_screen_session(_CAPABLE, session=active_session, status_state=status_state)
+            run_full_screen_session(
+                render_context, session=active_session, status_state=status_state
+            )
     return captured.get("text", "")
 
 
@@ -209,9 +224,15 @@ def test_a_divider_separates_the_status_area_from_the_output_log() -> None:
     assert divider_count.get("n") == 3
 
 
-def test_run_updates_the_status_area_timeline_and_summary_end_to_end(tmp_path: Path) -> None:
+def test_run_updates_the_status_area_timeline_then_returns_to_idle(tmp_path: Path) -> None:
     """Real events, real dispatch, real status area -- not just a unit-level
-    check of StatusAreaState in isolation."""
+    check of StatusAreaState in isolation. NXL-104: a `/run`'s own outcome no
+    longer stays shown in this fixed area (the step timeline updates live
+    while it runs -- confirmed here via the steps ending up "done" -- but the
+    area itself returns to blank/idle once the result panel has been written
+    to the output log instead; see test_run_result_panel_appears_in_the_output_log_...
+    below for that part).
+    """
     pipeline = tmp_path / "pipeline.yaml"
     source = tmp_path / "input.csv"
     destination = tmp_path / "output.csv"
@@ -220,11 +241,35 @@ def test_run_updates_the_status_area_timeline_and_summary_end_to_end(tmp_path: P
 
     run_with_keys(f"/open {pipeline}\n/run\n/exit\n", status_state=status)
 
-    assert status.visible is True
-    assert status.result is not None
-    assert status.result.rows_read == 2
-    assert status.result.rows_written == 2
+    assert status.visible is False
     assert all(step_status.value == "done" for _, step_status in status.steps)
+
+
+def test_run_result_panel_appears_in_the_output_log_with_the_rounded_style(
+    tmp_path: Path,
+) -> None:
+    """NXL-104: a classic pipeline's `/run` outcome now goes to the
+    scrollable output log, using the same rounded-border panel style as a
+    DAG's own `/run` outcome (see
+    test_dag_run_result_uses_the_same_rounded_panel_style_as_a_classic_pipeline
+    below) -- not a separate `StyleAndTextTuples` panel in the fixed area.
+    """
+    pipeline = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_pipeline(pipeline, source, destination)
+    status = StatusAreaState()
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {pipeline}\n/run\n/exit\n", status_state=status
+    )
+
+    assert "╭" in output_log and "╮" in output_log
+    assert "╰" in output_log and "╯" in output_log
+    assert "Status: succeeded" in output_log
+    assert "Rows read: 2" in output_log
+    assert "Rows written: 2" in output_log
+    assert status.visible is False
 
 
 def test_validate_updates_the_status_area_to_a_terminal_validation_panel(tmp_path: Path) -> None:
@@ -244,7 +289,6 @@ def test_validate_updates_the_status_area_to_a_terminal_validation_panel(tmp_pat
     run_with_keys(f"/open {pipeline}\n/validate\n/exit\n", status_state=status)
 
     assert status.visible is True
-    assert status.result is None
     assert status.validated_config is not None
     assert status.validated_config.name == "full-screen-test"
     assert status.error_text is None
@@ -495,6 +539,84 @@ def test_open_validate_run_a_dag_end_to_end_in_full_screen(tmp_path: Path) -> No
         "1,ready",
         "2,done",
     ]
+    # NXL-104: a genuinely capable terminal (is_tty, wide, encoding-safe --
+    # `_CAPABLE`, used by default here) still gets the rounded border shape
+    # in the output log, even though the log itself can't render color.
+    assert "╭" in output_log and "╮" in output_log
+    assert "+---" not in output_log
+
+
+def test_dag_run_result_uses_the_same_rounded_panel_style_as_a_classic_pipeline(
+    tmp_path: Path,
+) -> None:
+    """The core NXL-104 fix: before it, a DAG `/run` result rendered as a
+    plain ASCII `+---+` rectangle (`_output_render_context()` forced the
+    whole render context to `plain`), while a classic pipeline `/run` result
+    rendered rounded and colored in a completely separate fixed area. Both
+    now go through `panel_lines()` and land in the same scrollable log with
+    an identical rounded-border shape -- confirmed here by running both
+    kinds back to back in one session and comparing their actual border
+    characters, not just asserting each in isolation.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    dag_pipeline_path = tmp_path / "dag_pipeline.yaml"
+    dag_source = tmp_path / "dag_input.csv"
+    dag_destination = tmp_path / "dag_output.csv"
+    write_dag(dag_path, dag_pipeline_path, dag_source, dag_destination)
+
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_source = tmp_path / "pipeline_input.csv"
+    pipeline_destination = tmp_path / "pipeline_output.csv"
+    write_pipeline(pipeline_path, pipeline_source, pipeline_destination)
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {dag_path}\n/run\n/open {pipeline_path}\n/run\n/exit\n"
+    )
+
+    rounded_borders = [line for line in output_log.split("\n") if line.startswith(("╭", "╰"))]
+    assert (
+        len(rounded_borders) == 4
+    )  # top+bottom for the DAG panel, top+bottom for the pipeline one
+    assert "+---" not in output_log and "+-" not in output_log  # no ASCII fallback border at all
+    assert "Status: succeeded" in output_log  # DAG panel
+    assert "Rows read: 2" in output_log and "Rows written: 2" in output_log  # pipeline panel
+
+
+def test_run_result_falls_back_to_plain_ascii_border_when_render_context_is_plain(
+    tmp_path: Path,
+) -> None:
+    """Step 3/4: `RenderContext.plain` fallback still works after
+    unification, for both a DAG and a classic pipeline result -- confirmed
+    directly rather than assumed, since `panel_lines()`'s ASCII branch is
+    reached via a completely different condition (`render_context.plain`)
+    than the one this story actually changed (`ansi_capable`).
+    """
+    dag_path = tmp_path / "dag.yaml"
+    dag_pipeline_path = tmp_path / "dag_pipeline.yaml"
+    dag_source = tmp_path / "dag_input.csv"
+    dag_destination = tmp_path / "dag_output.csv"
+    write_dag(dag_path, dag_pipeline_path, dag_source, dag_destination)
+
+    pipeline_path = tmp_path / "pipeline.yaml"
+    pipeline_source = tmp_path / "pipeline_input.csv"
+    pipeline_destination = tmp_path / "pipeline_output.csv"
+    write_pipeline(pipeline_path, pipeline_source, pipeline_destination)
+
+    narrow = RenderContext(is_tty=True, color_enabled=True, width=200, forced_plain=True)
+
+    output_log = run_with_keys_capturing_output_log(
+        f"/open {dag_path}\n/run\n/open {pipeline_path}\n/run\n/exit\n", render_context=narrow
+    )
+
+    assert "╭" not in output_log and "╮" not in output_log
+    ascii_borders = [
+        line
+        for line in output_log.split("\n")
+        if line.startswith("+") and line.endswith("+") and set(line) == {"+", "-"}
+    ]
+    assert len(ascii_borders) == 4  # top+bottom for each of the two panels
+    assert "Status: succeeded" in output_log
+    assert "Rows read: 2" in output_log and "Rows written: 2" in output_log
 
 
 def test_runs_list_and_show_render_correctly_inside_full_screen(tmp_path: Path) -> None:

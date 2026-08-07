@@ -452,18 +452,29 @@ class InteractiveSession:
     def _output_render_context(self) -> RenderContext:
         """The render context to use for anything about to go through
         `self._write()` -- `self.render_context` unchanged when the current
-        output sink can actually render ANSI, or a plain-forced copy when
-        it can't (NXL-100: the full-screen session's output log is a plain
-        prompt_toolkit TextArea with zero ANSI interpretation, at any color
-        tier -- unlike the status area/header, which render through
-        prompt_toolkit's own style system and degrade color depth safely on
-        their own, confirmed directly). `self.render_context` itself is
-        left untouched either way -- the status area and header still use
-        it directly and still get real color.
+        output sink can actually render ANSI, or an `ansi_capable=False`
+        copy when it can't (NXL-100: the full-screen session's output log is
+        a plain prompt_toolkit TextArea with zero ANSI interpretation, at
+        any color tier -- unlike the status area/header, which render
+        through prompt_toolkit's own style system and degrade color depth
+        safely on their own, confirmed directly).
+
+        `ansi_capable=False`, not `forced_plain=True` (NXL-104): the log is
+        a real, wide, UTF-8-safe destination -- only raw escape codes are
+        unsafe there, not the rounded Unicode border shape itself, so a
+        capable terminal still gets that shape (just without color) instead
+        of degrading all the way down to `plain`'s ASCII fallback. This is
+        what actually unified DAG and pipeline results into the same visual
+        style in the log: both already rendered through `panel_lines()`
+        (DAG directly, pipeline via `render_execution_panel()`), so both
+        pick up the rounded shape for free once color alone -- not the
+        border too -- is what gets suppressed for this sink. `self.render_context`
+        itself is left untouched either way -- the status area and header
+        still use it directly and still get real color.
         """
         if self._output_ansi_capable:
             return self.render_context
-        return replace(self.render_context, forced_plain=True)
+        return replace(self.render_context, ansi_capable=False)
 
     def _show_runs(self, value: str) -> None:
         """`/runs` (list) and `/runs <id>` (show) -- reuses `runs_render.py`'s

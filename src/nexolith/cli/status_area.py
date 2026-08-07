@@ -1,6 +1,17 @@
 """Full-screen presentation for `/validate` and `/run`: an in-place step
-timeline with an event-pulsed dot, a bordered summary panel on completion,
-and a bounded, highlighted YAML excerpt for `/validate` configuration errors.
+timeline with an event-pulsed dot while an operation is in progress, and a
+bounded, highlighted YAML excerpt for `/validate` configuration errors.
+
+A `/run`'s own outcome -- the bordered result panel, or a plain error line
+-- is written to the scrollable output log instead of shown here (NXL-104:
+previously a bordered summary panel replaced the timeline in this fixed
+area, a different visual style and a different placement than a DAG `/run`
+result, which has always gone to the log). This area returns to blank/idle
+once a `/run` finishes either way, success or error, matching the log-based
+placement DAG results already used. `/validate`'s own completion (the
+validation panel, and its error path with a locatable YAML excerpt) is
+unaffected -- explicitly out of this story's scope -- and still finishes
+here.
 
 `StatusAreaState.dot_on` toggles only inside `_TimelineEventSink.handle()`,
 which only runs when `PipelineApplication` delivers a real event through the
@@ -23,7 +34,9 @@ from prompt_toolkit.formatted_text import StyleAndTextTuples
 
 from nexolith.cli.context import SelectedPipeline
 from nexolith.cli.interactive import render_operation_error
-from nexolith.cli.nexo_art import BLURPLE, DIM, GREEN, RED, WHITE
+from nexolith.cli.interactive_types import OutputWriter
+from nexolith.cli.nexo_art import BLURPLE, DIM, GREEN, RED, WHITE, panel_lines
+from nexolith.cli.render_context import RenderContext
 from nexolith.config import PipelineConfig
 from nexolith.events import (
     ApplicationEvent,
@@ -78,7 +91,6 @@ class StatusAreaState:
     visible: bool = False
     steps: list[tuple[str, StepStatus]] = field(default_factory=list)
     dot_on: bool = False
-    result: ExecutionResult | None = None
     validated_config: PipelineConfig | None = None
     error_text: str | None = None
     error_excerpt: list[tuple[bool, int, str]] | None = None
@@ -87,11 +99,19 @@ class StatusAreaState:
         labels = _STEPS_VALIDATE if operation is PipelineOperation.VALIDATE else _STEPS_RUN
         self.steps = [(label, StepStatus.PENDING) for label in labels]
         self.dot_on = False
-        self.result = None
         self.validated_config = None
         self.error_text = None
         self.error_excerpt = None
         self.visible = True
+
+    def hide(self) -> None:
+        """Return this area to its blank idle state (NXL-104) -- used after
+        a `/run`'s outcome has been written to the scrollable output log
+        instead of shown here, unlike `/validate`'s own completion, which
+        still finishes visible in this area via `finish_with_validation()`/
+        `finish_with_error()`.
+        """
+        self.visible = False
 
     def _set_step(self, label: str, status: StepStatus) -> None:
         self.steps = [(lbl, status if lbl == label else st) for lbl, st in self.steps]
@@ -118,10 +138,6 @@ class StatusAreaState:
             if label is not None:
                 self._set_step(label, StepStatus.FAILED)
 
-    def finish_with_result(self, result: ExecutionResult) -> None:
-        self.result = result
-        self.visible = True
-
     def finish_with_validation(self, config: PipelineConfig) -> None:
         self.validated_config = config
         self.visible = True
@@ -134,8 +150,6 @@ class StatusAreaState:
     def render(self) -> StyleAndTextTuples:
         if not self.visible:
             return [("", "")]
-        if self.result is not None:
-            return _render_summary_panel(self.result)
         if self.validated_config is not None:
             return _render_validation_panel(self.validated_config)
         if self.error_text is not None:
@@ -192,27 +206,40 @@ def _render_bordered_panel(
     return fragments
 
 
-def _render_summary_panel(result: ExecutionResult) -> StyleAndTextTuples:
+def render_execution_panel(result: ExecutionResult, render_context: RenderContext) -> str:
+    """The full-screen `/run` outcome for a classic pipeline (NXL-104):
+    written to the scrollable output log via `panel_lines()` -- the exact
+    same bordered-panel primitive `runs_render.render_run_detail()` already
+    uses for a DAG `/run`'s outcome -- rather than this module's own,
+    separate `StyleAndTextTuples`-based panel the fixed status area used to
+    show. Both now produce an identical rounded-border visual style in the
+    same place; only the row *content* differs (a pipeline never has tasks
+    to list, a DAG never has row counts).
+    """
+    plain = render_context.plain
     success = result.status is ExecutionStatus.SUCCEEDED
-    rows: list[tuple[str, str]] = [
-        ("Status", result.status.value),
-        ("Rows read", str(result.rows_read)),
-        ("Rows written", str(result.rows_written)),
+    status_color = None if plain else (GREEN if success else RED)
+    rows: list[tuple[str, str, tuple[int, int, int] | None]] = [
+        ("Status", result.status.value, status_color),
+        ("Rows read", str(result.rows_read), _count_color(result.rows_read, success, plain)),
+        (
+            "Rows written",
+            str(result.rows_written),
+            _count_color(result.rows_written, success, plain),
+        ),
     ]
     if result.duration_seconds is not None:
-        rows.append(("Duration", f"{result.duration_seconds:.3f}s"))
-    return _render_bordered_panel(rows, lambda label, value: _value_color(label, value, success))
+        rows.append(("Duration", f"{result.duration_seconds:.3f}s", None if plain else WHITE))
+    return "\n".join(panel_lines(rows, render_context))
 
 
-def _value_color(label: str, value: str, success: bool) -> tuple[int, int, int]:
-    if label == "Status":
-        return GREEN if success else RED
-    if label == "Duration":
-        return WHITE
+def _count_color(value: int, success: bool, plain: bool) -> tuple[int, int, int] | None:
+    if plain:
+        return None
     # Row counts: reserve non-blue color specifically for success/error signaling.
     if not success:
         return RED
-    return DIM if value == "0" else GREEN
+    return DIM if value == 0 else GREEN
 
 
 def _render_validation_panel(config: PipelineConfig) -> StyleAndTextTuples:
@@ -295,14 +322,29 @@ def build_error_excerpt(
 
 class FullScreenOperationPresenter:
     """The full-screen `OperationPresenter`: step timeline + pulse dot while
-    `/validate`/`/run` are in progress, a bordered summary panel on success,
-    the existing safe error text (plus a bounded YAML excerpt for
-    `/validate` configuration errors, when locatable) on failure.
+    `/validate`/`/run` are in progress, shown in the fixed status area.
+
+    `/validate`'s own completion (a bordered validation panel on success,
+    error text plus a bounded YAML excerpt on failure) still finishes in
+    this same fixed area, unaffected by NXL-104 -- explicitly out of that
+    story's scope. A `/run`'s completion (success, a failed `ExecutionResult`,
+    or a raised error) instead writes to `write` (the scrollable output log)
+    and returns this area to blank/idle, matching where a DAG `/run`'s
+    outcome has always gone.
     """
 
-    def __init__(self, state: StatusAreaState, invalidate: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        state: StatusAreaState,
+        invalidate: Callable[[], None],
+        *,
+        write: OutputWriter,
+        render_context: RenderContext,
+    ) -> None:
         self._state = state
         self._invalidate = invalidate
+        self._write = write
+        self._render_context = render_context
 
     def event_sink(self, operation: PipelineOperation) -> EventSink:
         self._state.start(operation)
@@ -310,7 +352,8 @@ class FullScreenOperationPresenter:
         return _TimelineEventSink(self._state, self._invalidate)
 
     def show_result(self, result: ExecutionResult) -> None:
-        self._state.finish_with_result(result)
+        self._write(render_execution_panel(result, self._render_context))
+        self._state.hide()
         self._invalidate()
 
     def show_validation_result(self, config: PipelineConfig) -> None:
@@ -321,9 +364,14 @@ class FullScreenOperationPresenter:
         self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
     ) -> None:
         text = render_operation_error(error, pipeline)
-        excerpt = None
-        if operation is PipelineOperation.VALIDATE and isinstance(error, ConfigurationError):
-            excerpt = build_error_excerpt(error, pipeline)
+        if operation is PipelineOperation.RUN:
+            self._write(text)
+            self._state.hide()
+            self._invalidate()
+            return
+        excerpt = (
+            build_error_excerpt(error, pipeline) if isinstance(error, ConfigurationError) else None
+        )
         self._state.finish_with_error(text, excerpt)
         self._invalidate()
 
@@ -333,4 +381,5 @@ __all__ = [
     "StatusAreaState",
     "StepStatus",
     "build_error_excerpt",
+    "render_execution_panel",
 ]

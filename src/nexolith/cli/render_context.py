@@ -38,6 +38,24 @@ class RenderContext:
     # strictly worse than wrongly assuming standard color (a slightly less
     # precise, but always-valid, 256-color approximation).
     truecolor: bool = False
+    # NXL-104: whether the concrete sink this render will be written to can
+    # interpret raw ANSI SGR escape codes at all -- independent of `plain`.
+    # `plain` is about whether the real *terminal* is color/Unicode-capable
+    # (NO_COLOR, no tty, unsafe encoding, too narrow); this is about whether
+    # the *destination buffer* can render color at all, which can be False
+    # even inside a fully color-capable, wide, UTF-8 terminal -- the
+    # full-screen session's scrollable output log is a plain-text
+    # `prompt_toolkit` `TextArea`/`Buffer` with zero ANSI interpretation at
+    # any color depth (confirmed directly in NXL-100), while the *rounded
+    # Unicode border shape* it draws is still perfectly safe there (it's
+    # just characters, not escape codes). Defaults to True, matching every
+    # caller before this field existed (a real terminal stream, where the
+    # sink and the terminal are the same thing). `colorize()` is the one
+    # place that checks it, so setting `ansi_capable=False` degrades color
+    # only -- border style and everything else `plain` governs is
+    # unaffected, letting a genuinely capable terminal still get the nicer
+    # rounded panel shape even when writing into an ANSI-incapable sink.
+    ansi_capable: bool = True
 
     @property
     def plain(self) -> bool:

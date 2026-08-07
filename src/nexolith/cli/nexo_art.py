@@ -12,13 +12,24 @@ titled top border) for the splash/idle display; `render_nexo_pixel_art()` stays
 available on its own for anything that wants the bare art.
 
 Also the shared color-tier module for every raw-ANSI renderer in `cli/`
-(`runs_render.py`, `scheduler_render.py`) -- NXL-100: a real terminal was
-found that prints an unrecognized 24-bit `38;2;r;g;b` sequence back as
-literal text instead of degrading it. `colorize()` is the one place that
-decides, per call, whether to actually emit truecolor or a nearest-256-color
-approximation, based on the real `RenderContext.truecolor` signal -- no
-renderer should ever hardcode a `38;2;...` sequence directly again.
+(`runs_render.py`, `scheduler_render.py`, `status_area.py`) -- NXL-100: a
+real terminal was found that prints an unrecognized 24-bit `38;2;r;g;b`
+sequence back as literal text instead of degrading it. `colorize()` is the
+one place that decides, per call, whether to actually emit truecolor or a
+nearest-256-color approximation, based on the real `RenderContext.truecolor`
+signal -- no renderer should ever hardcode a `38;2;...` sequence directly
+again. It's also (NXL-104) the one place that decides whether to emit any
+escape code at all, based on `RenderContext.ansi_capable` -- for a sink that
+cannot interpret ANSI (e.g. the full-screen session's scrollable output log)
+regardless of how capable the real terminal otherwise is.
+
+`panel_lines()` is the shared rounded-bordered-panel renderer every one of
+those callers builds its final result/summary/detail display from -- one
+implementation, reused rather than duplicated per caller, so DAG and
+pipeline results (and anything else) render with an identical visual style.
 """
+
+import textwrap
 
 from nexolith import __version__
 from nexolith.cli.render_context import RenderContext
@@ -135,8 +146,14 @@ def colorize(
 
     Callers must still consult `render_context.plain` themselves before
     calling this at all -- this always produces color codes, it never
-    decides whether color should happen in the first place.
+    decides whether color should happen in the first place. The one
+    exception is `render_context.ansi_capable` (NXL-104): when False, `text`
+    is returned completely unchanged (no SGR codes, no bold, no reset) --
+    the destination cannot interpret any escape code at all, regardless of
+    what `plain` says about the real terminal's own capability.
     """
+    if not render_context.ansi_capable:
+        return text
     prefix = "\x1b[1m" if bold else ""
     return f"{prefix}{_fg_sgr(rgb, truecolor=render_context.truecolor)}{text}{_RESET}"
 
@@ -237,3 +254,75 @@ def render_nexo_panel(render_context: RenderContext) -> str:
     lines.extend(_panel_content_line(line, render_context) for line in art_lines)
     lines.append(_panel_bottom_line(render_context))
     return "\n".join(lines)
+
+
+# --- Generic result/summary panel (NXL-93, moved here from runs_render.py
+# in NXL-104 so status_area.py's classic-pipeline result can reuse the exact
+# same primitive as runs_render.py's DAG result, rather than each keeping
+# its own bordered-panel implementation) -------------------------------
+
+
+def _wrap_panel_row(
+    label: str, value: str, color: tuple[int, int, int] | None, interior_width: int
+) -> list[tuple[str, str, tuple[int, int, int] | None]]:
+    """One row -> one or more `(prefix, chunk, color)` pieces. A short
+    value (the common case) always produces exactly one piece with
+    `prefix = "{label}: "`, identical to this function not existing at
+    all. A value too long to fit `interior_width` wraps onto continuation
+    pieces instead, each using a same-width blank indent in place of
+    repeating the label, so every piece can be padded and bordered by the
+    same uniform logic regardless of whether it's a row's first line or a
+    continuation of one.
+    """
+    prefix = f"{label}: "
+    indent = " " * len(prefix)
+    budget = max(1, interior_width - len(prefix))
+    chunks = textwrap.wrap(value, width=budget) or [""]
+    pieces = [(prefix, chunks[0], color)]
+    pieces.extend((indent, chunk, color) for chunk in chunks[1:])
+    return pieces
+
+
+def panel_lines(
+    rows: list[tuple[str, str, tuple[int, int, int] | None]], render_context: RenderContext
+) -> list[str]:
+    """Render `rows` (label, value, optional value color) as a bordered
+    panel: rounded Unicode corners with `colorize()`d values whenever
+    `render_context` allows it, a plain ASCII `+---+` rectangle otherwise
+    (NXL-80's encoding-safe fallback). `render_context.width` bounds every
+    line's total visible width (NXL-93) -- a value long enough to overflow
+    it wraps onto its own bordered, padded continuation line instead of
+    letting the terminal's own line-wrap misalign the border.
+
+    Border shape depends only on `render_context.plain` (real terminal
+    capability); whether values actually get colored additionally depends
+    on `render_context.ansi_capable` (NXL-104), via `colorize()` itself --
+    so a genuinely capable terminal still gets the rounded shape even when
+    the caller is writing into an ANSI-incapable sink such as the
+    full-screen session's plain-text output log.
+    """
+    plain = render_context.plain
+    interior_width = max(4, render_context.width - 4)  # "│ " + content + " │"
+    pieces: list[tuple[str, str, tuple[int, int, int] | None]] = []
+    for label, value, color in rows:
+        pieces.extend(_wrap_panel_row(label, value, color, interior_width))
+
+    plain_lines = [f"{prefix}{chunk}" for prefix, chunk, _color in pieces]
+    width = max(len(line) for line in plain_lines)
+
+    if plain:
+        border = "+" + "-" * (width + 2) + "+"
+        body = [f"| {line.ljust(width)} |" for line in plain_lines]
+        return [border, *body, border]
+
+    top = colorize("╭" + "─" * (width + 2) + "╮", BLURPLE, render_context)
+    bottom = colorize("╰" + "─" * (width + 2) + "╯", BLURPLE, render_context)
+    side = colorize("│", BLURPLE, render_context)
+    body = []
+    for (prefix, chunk, color), plain_line in zip(pieces, plain_lines, strict=True):
+        pad = " " * (width - len(plain_line))
+        chunk_text = (
+            colorize(chunk, color, render_context, bold=True) if color is not None else chunk
+        )
+        body.append(f"{side} {prefix}{chunk_text}{pad} {side}")
+    return [top, *body, bottom]

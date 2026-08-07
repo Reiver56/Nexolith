@@ -1,17 +1,17 @@
 """Rendering for `nexolith runs list`/`runs show`. Reuses v0.3.1's exact
-established conventions -- `BLURPLE`/`WHITE`/`GREEN`/`RED`/`DIM` from
-`nexo_art.py`, the same rounded-corner bordered-panel shape used for the
-interactive session's own run summary -- rather than inventing a separate
-visual language for these commands. Plain static ANSI strings here, not
+established conventions -- `BLURPLE`/`WHITE`/`GREEN`/`RED`/`DIM` and (NXL-104)
+`panel_lines()` itself, from `nexo_art.py` -- the same rounded-corner
+bordered-panel primitive the full-screen session's own classic-pipeline
+result panel now builds on too, rather than each keeping a separate
+implementation of the same shape. Plain static ANSI strings here, not
 `prompt_toolkit` `StyleAndTextTuples`: these are one-shot `typer` commands
 that print and exit, not a live session.
 """
 
-import textwrap
 from collections import defaultdict
 from datetime import datetime
 
-from nexolith.cli.nexo_art import AMBER, BLURPLE, DIM, GREEN, RED, WHITE, colorize
+from nexolith.cli.nexo_art import AMBER, BLURPLE, DIM, GREEN, RED, WHITE, colorize, panel_lines
 from nexolith.cli.render_context import RenderContext
 from nexolith.state import (
     DagRunRecord,
@@ -146,71 +146,6 @@ def render_run_not_found(run_id: int) -> str:
     return f"No DAG run found with id {run_id}."
 
 
-def _wrap_panel_row(
-    label: str, value: str, color: tuple[int, int, int] | None, interior_width: int
-) -> list[tuple[str, str, tuple[int, int, int] | None]]:
-    """One row -> one or more `(prefix, chunk, color)` pieces. A short
-    value (the common case) always produces exactly one piece with
-    `prefix = "{label}: "`, identical to this function not existing at
-    all. A value too long to fit `interior_width` wraps onto continuation
-    pieces instead, each using a same-width blank indent in place of
-    repeating the label, so every piece can be padded and bordered by the
-    same uniform logic regardless of whether it's a row's first line or a
-    continuation of one.
-    """
-    prefix = f"{label}: "
-    indent = " " * len(prefix)
-    budget = max(1, interior_width - len(prefix))
-    chunks = textwrap.wrap(value, width=budget) or [""]
-    pieces = [(prefix, chunks[0], color)]
-    pieces.extend((indent, chunk, color) for chunk in chunks[1:])
-    return pieces
-
-
-def _panel_lines(
-    rows: list[tuple[str, str, tuple[int, int, int] | None]], render_context: RenderContext
-) -> list[str]:
-    """NXL-93: `render_context.width` bounds every rendered line's total
-    visible width (border characters and their single-space margins
-    included) so the panel never exceeds the real terminal's own width.
-    Before this, a value long enough to make the panel wider than the
-    terminal (any Error message of a few dozen words) was still correctly
-    padded to its OWN unbounded computed width -- but the terminal's own
-    line-wrap then broke that string across multiple physical rows at an
-    arbitrary column, landing the right border character in a different
-    column on each wrapped row and producing exactly the
-    misaligned-rectangle appearance reported: the string was never
-    actually mis-padded, the panel was simply wider than the screen
-    displaying it. Long values now wrap onto their own bordered, padded
-    continuation lines instead.
-    """
-    plain = render_context.plain
-    interior_width = max(4, render_context.width - 4)  # "│ " + content + " │"
-    pieces: list[tuple[str, str, tuple[int, int, int] | None]] = []
-    for label, value, color in rows:
-        pieces.extend(_wrap_panel_row(label, value, color, interior_width))
-
-    plain_lines = [f"{prefix}{chunk}" for prefix, chunk, _color in pieces]
-    width = max(len(line) for line in plain_lines)
-
-    if plain:
-        border = "+" + "-" * (width + 2) + "+"
-        body = [f"| {line.ljust(width)} |" for line in plain_lines]
-        return [border, *body, border]
-
-    top = colorize("╭" + "─" * (width + 2) + "╮", BLURPLE, render_context)
-    bottom = colorize("╰" + "─" * (width + 2) + "╯", BLURPLE, render_context)
-    side = colorize("│", BLURPLE, render_context)
-    body = []
-    for (prefix, chunk, color), plain_line in zip(pieces, plain_lines, strict=True):
-        pad = " " * (width - len(plain_line))
-        chunk_text = (
-            colorize(chunk, color, render_context, bold=True) if color is not None else chunk
-        )
-        body.append(f"{side} {prefix}{chunk_text}{pad} {side}")
-    return [top, *body, bottom]
-
-
 def _partial_success_note(run: DagRunRecord, tasks: list[TaskRunRecord]) -> str | None:
     """NXL-95: `on_failure: skip` (the default policy) only blocks a
     failed task's own transitive dependents -- an independent branch that
@@ -269,7 +204,7 @@ def render_run_detail(
     if run.error:
         panel_rows.append(("Error", run.error, None if plain else RED))
 
-    lines = _panel_lines(panel_rows, render_context)
+    lines = panel_lines(panel_rows, render_context)
 
     partial_success_note = _partial_success_note(run, tasks)
     if partial_success_note is not None:
