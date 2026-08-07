@@ -263,6 +263,118 @@ def test_start_cleans_up_a_stale_marker_and_proceeds(
     assert "already" not in result.output.lower()
 
 
+def test_two_real_processes_cannot_both_acquire_the_scheduler_pidfile(tmp_path: Path) -> None:
+    """Two independent interpreters cross the same start gate together.
+
+    The winner stays alive until both results are recorded, so the loser
+    observes a genuinely live owner rather than sequentially taking over a
+    pidfile whose first owner already exited.
+    """
+    pidfile = tmp_path / "scheduler.pid"
+    gate = tmp_path / "gate"
+    release = tmp_path / "release"
+    ready = [tmp_path / f"ready-{index}" for index in range(2)]
+    results = [tmp_path / f"result-{index}" for index in range(2)]
+    script = """
+import os
+import sys
+import time
+from pathlib import Path
+
+from nexolith.scheduler import acquire_pidfile
+
+pidfile, gate, release, ready, result = map(Path, sys.argv[1:])
+ready.write_text("ready", encoding="utf-8")
+while not gate.exists():
+    time.sleep(0.001)
+claim = acquire_pidfile(pidfile, os.getpid(), "concurrent-test")
+outcome = "acquired" if claim.acquired else "locked"
+result.write_text(f"{outcome}:{os.getpid()}", encoding="utf-8")
+if claim.acquired:
+    while not release.exists():
+        time.sleep(0.001)
+"""
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(pidfile),
+                str(gate),
+                str(release),
+                str(ready[index]),
+                str(results[index]),
+            ]
+        )
+        for index in range(2)
+    ]
+    try:
+        deadline = time.monotonic() + 10
+        while not all(path.exists() for path in ready):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        gate.write_text("go", encoding="utf-8")
+        while not all(path.exists() for path in results):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        result_parts = [path.read_text(encoding="utf-8").split(":") for path in results]
+        outcomes = [parts[0] for parts in result_parts]
+        assert sorted(outcomes) == ["acquired", "locked"]
+        winner_pid = int(result_parts[outcomes.index("acquired")][1])
+        record = read_pidfile(pidfile)
+        assert record is not None
+        assert record.pid == winner_pid
+    finally:
+        release.write_text("release", encoding="utf-8")
+        for process in processes:
+            process.wait(timeout=10)
+
+
+def test_two_real_scheduler_start_commands_leave_only_one_daemon(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "concurrent-cli-state"
+    executable = Path(sys.executable).with_name(
+        "nexolith.exe" if sys.platform == "win32" else "nexolith"
+    )
+    env = os.environ.copy()
+    env["NEXOLITH_STATE_DIR"] = str(state_dir)
+    processes = [
+        subprocess.Popen(
+            [str(executable), "scheduler", "start"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    try:
+        deadline = time.monotonic() + 10
+        while all(process.poll() is None for process in processes):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+        stopped = [process for process in processes if process.poll() is not None]
+        running = [process for process in processes if process.poll() is None]
+        assert len(stopped) == 1
+        assert len(running) == 1
+        output = stopped[0].communicate(timeout=5)[0]
+        assert stopped[0].returncode == 1
+        assert "already" in output.lower()
+
+        record = read_pidfile(state_dir / "scheduler.pid")
+        assert record is not None
+        assert is_process_alive(record.pid)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=10)
+
+
 # -- scheduler stop -------------------------------------------------------
 
 

@@ -1,7 +1,9 @@
 from nexolith.scheduler.daemon import Scheduler
 from nexolith.scheduler.interval import parse_interval
 from nexolith.scheduler.pidfile import (
+    PidFileClaim,
     PidFileRecord,
+    acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
     read_pidfile,
@@ -11,8 +13,10 @@ from nexolith.scheduler.pidfile import (
 )
 
 __all__ = [
+    "PidFileClaim",
     "PidFileRecord",
     "Scheduler",
+    "acquire_pidfile",
     "default_pidfile_path",
     "is_process_alive",
     "parse_interval",

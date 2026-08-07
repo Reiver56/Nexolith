@@ -39,6 +39,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -51,6 +52,12 @@ _PIDFILE_NAME = "scheduler.pid"
 class PidFileRecord:
     pid: int
     started_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PidFileClaim:
+    acquired: bool
+    existing: PidFileRecord | None = None
 
 
 def default_pidfile_path() -> Path:
@@ -105,6 +112,61 @@ def is_process_alive(pid: int) -> bool:
     except PermissionError:
         return True  # exists, just owned by another user
     return True
+
+
+def acquire_pidfile(
+    path: Path,
+    pid: int,
+    started_at: str,
+    *,
+    process_is_alive: Callable[[int], bool] = is_process_alive,
+) -> PidFileClaim:
+    """Atomically claim scheduler ownership with exclusive file creation.
+
+    ``open(..., "x")`` maps to ``O_CREAT | O_EXCL`` in CPython on both
+    Windows and POSIX. The filesystem decides creation atomically: only one
+    concurrent starter can create the path.
+
+    A fixed tombstone is exclusively created to serialize stale-file
+    cleaners. The cleaner rechecks ownership while holding that claim,
+    removes only the confirmed-dead marker, then retries creation once.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"pid": pid, "started_at": started_at})
+
+    def exclusive_create() -> bool:
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                stream.write(payload)
+        except FileExistsError:
+            return False
+        return True
+
+    tombstone = path.with_name(f"{path.name}.stale")
+    if exclusive_create():
+        remove_pidfile(tombstone)
+        return PidFileClaim(acquired=True)
+
+    existing = read_pidfile(path)
+    if existing is None or process_is_alive(existing.pid):
+        return PidFileClaim(acquired=False, existing=existing)
+
+    try:
+        with tombstone.open("x", encoding="utf-8") as stream:
+            stream.write(payload)
+    except FileExistsError:
+        return PidFileClaim(acquired=False, existing=read_pidfile(path))
+
+    try:
+        existing = read_pidfile(path)
+        if existing is None or process_is_alive(existing.pid):
+            return PidFileClaim(acquired=False, existing=existing)
+        remove_pidfile(path)
+        if exclusive_create():
+            return PidFileClaim(acquired=True)
+        return PidFileClaim(acquired=False, existing=read_pidfile(path))
+    finally:
+        remove_pidfile(tombstone)
 
 
 def stop_process(pid: int) -> bool:

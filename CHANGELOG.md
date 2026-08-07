@@ -106,6 +106,9 @@ what shipped, not when it's cut.
   after an unclean scheduler stop. Runs now record their owner process; a fresh scheduler marks only
   ownerless legacy rows or rows whose owner is no longer alive as `interrupted`, preserving honest
   history in `runs list`/`show` while making the DAG eligible again (NXL-116).
+- Fixed concurrent `scheduler start` commands both passing a read-before-write PID check and
+  launching duplicate schedulers. PID ownership now uses atomic exclusive creation; stale markers
+  are removed under a serialized cleanup claim before one bounded retry (NXL-117).
 - **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
   pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
   validate/run DAG files correctly.

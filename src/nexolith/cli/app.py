@@ -35,12 +35,12 @@ from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 from nexolith.scheduler import (
     Scheduler,
+    acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
     read_pidfile,
     remove_pidfile,
     stop_process,
-    write_pidfile,
 )
 from nexolith.state import DagRunStatus, StateStore
 
@@ -160,26 +160,28 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
 def scheduler_start() -> None:
     """Run the scheduler daemon in the foreground until stopped (Ctrl+C)."""
     pidfile_path = default_pidfile_path()
-    existing = read_pidfile(pidfile_path)
-    if existing is not None and is_process_alive(existing.pid):
-        typer.echo(
-            f"Scheduler already appears to be running (PID {existing.pid}, "
-            f"started {existing.started_at}).",
-            err=True,
-        )
+    claim = acquire_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
+    if not claim.acquired:
+        if claim.existing is None:
+            typer.echo("Scheduler start already in progress.", err=True)
+        else:
+            typer.echo(
+                f"Scheduler already appears to be running (PID {claim.existing.pid}, "
+                f"started {claim.existing.started_at}).",
+                err=True,
+            )
         raise typer.Exit(code=1)
-    if existing is not None:
-        remove_pidfile(pidfile_path)  # stale marker from a prior, uncleanly-stopped run
 
-    store = StateStore()
-    scheduler = Scheduler(store)
-    write_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
-    typer.echo(render_scheduler_started(os.getpid()))
+    store: StateStore | None = None
     try:
+        store = StateStore()
+        scheduler = Scheduler(store)
+        typer.echo(render_scheduler_started(os.getpid()))
         scheduler.run()
     finally:
         remove_pidfile(pidfile_path)
-        store.close()
+        if store is not None:
+            store.close()
 
 
 @scheduler_app.command("stop")
