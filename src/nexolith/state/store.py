@@ -13,12 +13,18 @@ different concern: that abstracts over multiple *user* database engines,
 this is Nexolith's own fixed, SQLite-only internal state).
 """
 
-import os
 import sqlite3
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nexolith.process_identity import (
+    ProcessIdentity,
+    ProcessIdentityLookupStatus,
+    ProcessIdentityProvider,
+    current_process_identity,
+)
 from nexolith.state.models import (
     DagRecord,
     DagRunRecord,
@@ -241,6 +247,18 @@ _MIGRATIONS: list[tuple[int, str]] = [
         PRAGMA foreign_keys=ON;
         """,
     ),
+    (
+        7,
+        """
+        -- PID-reuse-safe run ownership (NXL-120). The nullable
+        -- owner_create_time_ns column is added in Python before this script
+        -- runs (see _add_dag_runs_owner_identity_column_if_missing), using
+        -- the same idempotent ALTER TABLE pattern as schema versions 3 and
+        -- 5. Existing version-6 rows deliberately remain NULL: inventing a
+        -- creation time would risk confusing a reused PID with its original
+        -- owner.
+        """,
+    ),
 ]
 
 
@@ -270,6 +288,13 @@ def _add_dag_runs_severity_column_if_missing(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE dag_runs ADD COLUMN severity TEXT NOT NULL DEFAULT 'medium'")
 
 
+def _add_dag_runs_owner_identity_column_if_missing(conn: sqlite3.Connection) -> None:
+    """Add NXL-120's creation-time half of the owner identity safely."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(dag_runs)").fetchall()}
+    if "owner_create_time_ns" not in columns:
+        conn.execute("ALTER TABLE dag_runs ADD COLUMN owner_create_time_ns INTEGER")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
     existing = conn.execute("SELECT version FROM schema_version").fetchone()
@@ -282,6 +307,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             _add_dag_runs_on_failure_column_if_missing(conn)
         elif version == 5:
             _add_dag_runs_severity_column_if_missing(conn)
+        elif version == 7:
+            _add_dag_runs_owner_identity_column_if_missing(conn)
         conn.executescript(script)
         with conn:
             if has_row:
@@ -292,6 +319,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         current_version = version
 
 
+@dataclass(frozen=True, slots=True)
+class DagRunReconciliation:
+    interrupted_run_ids: tuple[int, ...]
+    unverifiable_runs: tuple[tuple[int, str], ...]
+
+
 class StateStore:
     """A store per process, holding one open connection for its lifetime.
     Not thread-shared -- no thread introduced anywhere in this story, and
@@ -300,7 +333,12 @@ class StateStore:
     threads sharing one.
     """
 
-    def __init__(self, database_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        database_path: Path | None = None,
+        *,
+        process_identity: Callable[[], ProcessIdentity] | None = None,
+    ) -> None:
         self.database_path = database_path or default_database_path()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.database_path))
@@ -309,6 +347,7 @@ class StateStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
         _ensure_schema(self._conn)
+        self._process_identity = process_identity or current_process_identity
 
     def close(self) -> None:
         self._conn.close()
@@ -372,7 +411,7 @@ class StateStore:
         trigger_reason: str,
         on_failure: str = "skip",
         severity: str = "medium",
-        owner_pid: int | None = None,
+        owner_identity: ProcessIdentity | None = None,
     ) -> int:
         """Record a DAG run starting, pre-creating every one of its tasks as
         'pending' in the same transaction. Recording the full expected task
@@ -392,12 +431,14 @@ class StateStore:
         snapshotted here, not read from the file later, for the same reason.
         """
         now = _now()
+        identity = owner_identity or self._process_identity()
         with self._conn:
             cursor = self._conn.execute(
                 """
                 INSERT INTO dag_runs
-                    (dag_name, status, trigger_reason, on_failure, severity, started_at, owner_pid)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (dag_name, status, trigger_reason, on_failure, severity, started_at,
+                     owner_pid, owner_create_time_ns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     dag_name,
@@ -406,7 +447,8 @@ class StateStore:
                     on_failure,
                     severity,
                     now,
-                    os.getpid() if owner_pid is None else owner_pid,
+                    identity.pid,
+                    identity.create_time_ns,
                 ),
             )
             dag_run_id = cursor.lastrowid
@@ -480,20 +522,40 @@ class StateStore:
                 (status.value, _now(), error, dag_run_id),
             )
 
-    def interrupt_abandoned_dag_runs(self, is_process_alive: Callable[[int], bool]) -> list[int]:
-        """Mark incomplete runs whose owning process no longer exists.
+    def interrupt_abandoned_dag_runs(
+        self, lookup_process: ProcessIdentityProvider
+    ) -> DagRunReconciliation:
+        """Interrupt owners known dead or replaced; preserve unknown owners.
 
-        Rows from schema versions before ownership tracking have no PID and
-        are necessarily indeterminate after upgrade, so they are reconciled
-        as interrupted too. The run and its task history remain intact.
+        A matching PID is insufficient because operating systems reuse
+        PIDs. Runs are interrupted only when the process is absent or its
+        creation time differs. Legacy rows and lookup failures remain
+        running, failing closed against duplicate execution.
         """
-        abandoned = [
-            run
-            for run in self.list_incomplete_dag_runs()
-            if run.owner_pid is None or not is_process_alive(run.owner_pid)
-        ]
+        abandoned: list[DagRunRecord] = []
+        unverifiable: list[tuple[int, str]] = []
+        for run in self.list_incomplete_dag_runs():
+            if run.owner_pid is None or run.owner_create_time_ns is None:
+                unverifiable.append((run.id, "legacy_owner_identity"))
+                continue
+
+            stored_identity = ProcessIdentity(run.owner_pid, run.owner_create_time_ns)
+            try:
+                lookup = lookup_process(run.owner_pid)
+            except Exception:
+                unverifiable.append((run.id, ProcessIdentityLookupStatus.UNAVAILABLE.value))
+                continue
+
+            if lookup.status is ProcessIdentityLookupStatus.NOT_FOUND:
+                abandoned.append(run)
+            elif lookup.status is ProcessIdentityLookupStatus.FOUND:
+                if lookup.identity != stored_identity:
+                    abandoned.append(run)
+            else:
+                unverifiable.append((run.id, lookup.status.value))
+
         if not abandoned:
-            return []
+            return DagRunReconciliation((), tuple(unverifiable))
         ended_at = _now()
         with self._conn:
             self._conn.executemany(
@@ -511,7 +573,7 @@ class StateStore:
                     for run in abandoned
                 ],
             )
-        return [run.id for run in abandoned]
+        return DagRunReconciliation(tuple(run.id for run in abandoned), tuple(unverifiable))
 
     # -- Retry attempts (schema_version 3) -----------------------------------
     #
@@ -672,6 +734,7 @@ def _dag_run_record(row: sqlite3.Row) -> DagRunRecord:
         on_failure=row["on_failure"],
         severity=row["severity"],
         owner_pid=row["owner_pid"],
+        owner_create_time_ns=row["owner_create_time_ns"],
     )
 
 

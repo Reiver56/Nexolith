@@ -463,4 +463,4 @@ def test_migration_3_applies_cleanly_on_a_schema_version_2_database(tmp_path: Pa
     conn = sqlite3.connect(str(db_path))
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     conn.close()
-    assert version == 6
+    assert version == 7

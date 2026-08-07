@@ -1,4 +1,5 @@
 import signal
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from nexolith.process_identity import ProcessIdentity, ProcessIdentityLookup
 from nexolith.scheduler import Scheduler, parse_interval
 from nexolith.scheduler.daemon import _default_execute
 from nexolith.state import DagRunStatus, StateStore
@@ -171,8 +173,9 @@ def test_fresh_scheduler_interrupts_abandoned_run_and_schedules_dag_again(
         store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
         clock = Clock(datetime(2026, 1, 1, tzinfo=UTC))
         monkeypatch.setattr("nexolith.state.store._now", lambda: clock.now().isoformat())
+        owner = ProcessIdentity(pid=999999, create_time_ns=1_000_000_000)
         abandoned_id = store.start_dag_run(
-            "etl", ["extract"], trigger_reason="schedule", owner_pid=999999
+            "etl", ["extract"], trigger_reason="schedule", owner_identity=owner
         )
         clock.advance(timedelta(seconds=2))
         calls: list[str] = []
@@ -181,7 +184,7 @@ def test_fresh_scheduler_interrupts_abandoned_run_and_schedules_dag_again(
             store,
             execute=make_fake_execute(store, calls),
             now=clock.now,
-            process_is_alive=lambda pid: False,
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.not_found(),
         )
         triggered = scheduler.tick()
 
@@ -196,16 +199,48 @@ def test_fresh_scheduler_interrupts_abandoned_run_and_schedules_dag_again(
         store.close()
 
 
+def test_fresh_scheduler_interrupts_reused_owner_pid_and_schedules_dag_again(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        original_owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+        replacement_process = ProcessIdentity(pid=4242, create_time_ns=2_000_000_000)
+        abandoned_id = store.start_dag_run(
+            "etl", ["extract"], trigger_reason="schedule", owner_identity=original_owner
+        )
+        started_at = datetime.fromisoformat(store.get_dag_run(abandoned_id).started_at)  # type: ignore[union-attr]
+        calls: list[str] = []
+
+        scheduler = Scheduler(
+            store,
+            execute=make_fake_execute(store, calls),
+            now=lambda: started_at + timedelta(seconds=2),
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.found(replacement_process),
+        )
+        triggered = scheduler.tick()
+
+        assert store.get_dag_run(abandoned_id).status is DagRunStatus.INTERRUPTED  # type: ignore[union-attr]
+        assert len(triggered) == 1
+        assert calls == ["etl.yaml"]
+    finally:
+        store.close()
+
+
 def test_fresh_scheduler_preserves_genuinely_active_foreground_run(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     try:
         store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
-        active_id = store.start_dag_run("etl", ["extract"], trigger_reason="manual", owner_pid=4242)
+        owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+        active_id = store.start_dag_run(
+            "etl", ["extract"], trigger_reason="manual", owner_identity=owner
+        )
         calls: list[str] = []
         scheduler = Scheduler(
             store,
             execute=make_fake_execute(store, calls),
-            process_is_alive=lambda pid: pid == 4242,
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.found(owner),
         )
 
         assert scheduler.tick() == []
@@ -221,9 +256,13 @@ def test_each_new_scheduler_instance_reconciles_before_its_first_tick(tmp_path: 
     store = make_store(tmp_path)
     try:
         store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
-        run_id = store.start_dag_run("etl", [], trigger_reason="manual", owner_pid=4242)
+        owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+        run_id = store.start_dag_run("etl", [], trigger_reason="manual", owner_identity=owner)
 
-        first = Scheduler(store, process_is_alive=lambda pid: True)
+        first = Scheduler(
+            store,
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.found(owner),
+        )
         assert first.tick() == []
         assert store.get_dag_run(run_id).status is DagRunStatus.RUNNING  # type: ignore[union-attr]
 
@@ -233,12 +272,91 @@ def test_each_new_scheduler_instance_reconciles_before_its_first_tick(tmp_path: 
             store,
             execute=make_fake_execute(store, calls),
             now=lambda: started_at + timedelta(seconds=2),
-            process_is_alive=lambda pid: False,
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.not_found(),
         )
         triggered = second.tick()
 
         assert store.get_dag_run(run_id).status is DagRunStatus.INTERRUPTED  # type: ignore[union-attr]
         assert len(triggered) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        lambda pid: ProcessIdentityLookup.access_denied(),
+        lambda pid: ProcessIdentityLookup.unavailable(),
+    ],
+)
+def test_unverifiable_owner_fails_closed_against_duplicate_execution(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    lookup: Callable[[int], ProcessIdentityLookup],
+) -> None:
+    owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+    store = StateStore(tmp_path / "state.db", process_identity=lambda: owner)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        run_id = store.start_dag_run("etl", [], trigger_reason="manual")
+        calls: list[str] = []
+        scheduler = Scheduler(
+            store,
+            execute=make_fake_execute(store, calls),
+            process_identity_lookup=lookup,
+        )
+
+        with caplog.at_level("WARNING", logger="nexolith.scheduler.daemon"):
+            assert scheduler.tick() == []
+
+        assert store.get_dag_run(run_id).status is DagRunStatus.RUNNING  # type: ignore[union-attr]
+        assert calls == []
+        assert "leaving it running to avoid duplicate execution" in caplog.text
+    finally:
+        store.close()
+
+
+def test_process_identity_provider_failure_fails_closed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+    store = StateStore(tmp_path / "state.db", process_identity=lambda: owner)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        run_id = store.start_dag_run("etl", [], trigger_reason="manual")
+
+        def lookup_failure(pid: int) -> ProcessIdentityLookup:
+            raise OSError("simulated lookup failure")
+
+        scheduler = Scheduler(store, process_identity_lookup=lookup_failure)
+        with caplog.at_level("WARNING", logger="nexolith.scheduler.daemon"):
+            assert scheduler.tick() == []
+
+        assert store.get_dag_run(run_id).status is DagRunStatus.RUNNING  # type: ignore[union-attr]
+        assert "(unavailable)" in caplog.text
+    finally:
+        store.close()
+
+
+def test_legacy_owner_without_creation_time_fails_closed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    owner = ProcessIdentity(pid=4242, create_time_ns=1_000_000_000)
+    store = StateStore(tmp_path / "state.db", process_identity=lambda: owner)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), "1s", enabled=True)
+        run_id = store.start_dag_run("etl", [], trigger_reason="manual")
+        conn = sqlite3.connect(str(store.database_path))
+        conn.execute("UPDATE dag_runs SET owner_create_time_ns = NULL WHERE id = ?", (run_id,))
+        conn.commit()
+        conn.close()
+
+        scheduler = Scheduler(store)
+        with caplog.at_level("WARNING", logger="nexolith.scheduler.daemon"):
+            assert scheduler.tick() == []
+
+        assert store.get_dag_run(run_id).status is DagRunStatus.RUNNING  # type: ignore[union-attr]
+        assert "(legacy_owner_identity)" in caplog.text
     finally:
         store.close()
 

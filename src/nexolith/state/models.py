@@ -84,6 +84,11 @@ class DagRunRecord:
     # either the scheduler daemon or a foreground ``nexolith run`` process.
     # None identifies a legacy row created before ownership was recorded.
     owner_pid: int | None = None
+    # Creation time of ``owner_pid`` as an integer Unix timestamp in
+    # nanoseconds (schema_version 7, NXL-120). PID + creation time is the
+    # durable process identity; either field being None identifies a legacy
+    # row whose owner cannot be verified safely.
+    owner_create_time_ns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

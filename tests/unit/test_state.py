@@ -1,6 +1,9 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
+from nexolith.process_identity import ProcessIdentity, ProcessIdentityUnavailable
 from nexolith.state import DagRunStatus, StateStore, TaskRunStatus
 
 
@@ -30,7 +33,9 @@ def test_schema_creation_on_a_fresh_database(tmp_path: Path) -> None:
             "dag_trigger_reactions",
         } <= tables
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 6
+        assert version == 7
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(dag_runs)").fetchall()}
+        assert "owner_create_time_ns" in columns
         conn.close()
     finally:
         store.close()
@@ -46,7 +51,7 @@ def test_reopening_an_existing_database_is_idempotent(tmp_path: Path) -> None:
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT version FROM schema_version").fetchall()
     conn.close()
-    assert rows == [(6,)]
+    assert rows == [(7,)]
 
 
 def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: Path) -> None:
@@ -109,7 +114,7 @@ def test_upgrading_an_existing_version_1_database_preserves_its_data(tmp_path: P
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     conn.close()
-    assert version == 6
+    assert version == 7
     assert "dag_trigger_reactions" in tables
 
 
@@ -192,6 +197,8 @@ def test_full_successful_run_lifecycle(tmp_path: Path) -> None:
         assert run is not None
         assert run.status is DagRunStatus.RUNNING
         assert run.ended_at is None
+        assert run.owner_pid is not None
+        assert run.owner_create_time_ns is not None
 
         tasks = store.list_task_runs(run_id)
         assert [task.task_name for task in tasks] == ["extract", "load"]
@@ -213,6 +220,22 @@ def test_full_successful_run_lifecycle(tmp_path: Path) -> None:
         assert finished_tasks["extract"].started_at is not None
         assert finished_tasks["extract"].ended_at is not None
         assert finished_tasks["load"].status is TaskRunStatus.SUCCEEDED
+    finally:
+        store.close()
+
+
+def test_run_does_not_start_when_current_process_identity_is_unavailable(tmp_path: Path) -> None:
+    def unavailable_identity() -> ProcessIdentity:
+        raise ProcessIdentityUnavailable("simulated unavailable identity")
+
+    store = StateStore(tmp_path / "state.db", process_identity=unavailable_identity)
+    try:
+        store.register_dag("etl", Path("etl.yaml"), None)
+
+        with pytest.raises(ProcessIdentityUnavailable, match="simulated unavailable identity"):
+            store.start_dag_run("etl", ["extract"], trigger_reason="manual")
+
+        assert store.list_dag_runs("etl") == []
     finally:
         store.close()
 
@@ -472,6 +495,7 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
         assert run is not None
         assert run.status is DagRunStatus.SUCCEEDED  # pre-existing row preserved
         assert run.owner_pid is None
+        assert run.owner_create_time_ns is None
         assert store.list_task_runs(1)[0].task_name == "extract"
         assert store.list_run_attempts(1)[0].task_name == "extract"
 
@@ -485,7 +509,77 @@ def test_migration_4_applies_cleanly_on_a_schema_version_3_database(tmp_path: Pa
     version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
     foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
     conn.close()
-    assert version == 6
+    assert version == 7
+    assert foreign_key_errors == []
+
+
+def test_migration_7_preserves_version_6_run_task_and_attempt_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version (version) VALUES (6);
+        CREATE TABLE dags (
+            name TEXT PRIMARY KEY, source_path TEXT NOT NULL, schedule TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE dag_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dag_name TEXT NOT NULL REFERENCES dags(name),
+            status TEXT NOT NULL
+                CHECK (status IN ('running', 'succeeded', 'failed', 'interrupted')),
+            trigger_reason TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, error TEXT,
+            on_failure TEXT NOT NULL DEFAULT 'skip', severity TEXT NOT NULL DEFAULT 'medium',
+            owner_pid INTEGER
+        );
+        CREATE TABLE task_runs (
+            dag_run_id INTEGER NOT NULL REFERENCES dag_runs(id), task_name TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK (status IN
+                    ('pending', 'running', 'succeeded', 'failed', 'skipped', 'blocked')),
+            started_at TEXT, ended_at TEXT, error TEXT,
+            PRIMARY KEY (dag_run_id, task_name)
+        );
+        CREATE TABLE task_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, dag_run_id INTEGER NOT NULL,
+            task_name TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed')),
+            started_at TEXT NOT NULL, ended_at TEXT, error TEXT,
+            FOREIGN KEY (dag_run_id, task_name) REFERENCES task_runs(dag_run_id, task_name)
+        );
+        CREATE TABLE dag_trigger_reactions (
+            downstream_dag_name TEXT NOT NULL, upstream_dag_name TEXT NOT NULL,
+            last_reacted_run_id INTEGER NOT NULL,
+            PRIMARY KEY (downstream_dag_name, upstream_dag_name)
+        );
+        INSERT INTO dags VALUES ('etl', 'etl.yaml', '1m', 1, 't0', 't0');
+        INSERT INTO dag_runs VALUES
+            (7, 'etl', 'running', 'manual', 't0', NULL, NULL, 'skip', 'high', 4242);
+        INSERT INTO task_runs VALUES (7, 'extract', 'running', 't0', NULL, NULL);
+        INSERT INTO task_attempts VALUES (9, 7, 'extract', 1, 'running', 't0', NULL, NULL);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = StateStore(db_path)
+    try:
+        run = store.get_dag_run(7)
+        assert run is not None
+        assert run.owner_pid == 4242
+        assert run.owner_create_time_ns is None
+        assert store.list_task_runs(7)[0].status is TaskRunStatus.RUNNING
+        assert store.list_run_attempts(7)[0].attempt_number == 1
+    finally:
+        store.close()
+
+    conn = sqlite3.connect(str(db_path))
+    version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+    conn.close()
+    assert version == 7
     assert foreign_key_errors == []
 
 

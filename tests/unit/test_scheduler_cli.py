@@ -540,10 +540,18 @@ def test_runs_show_keeps_interrupted_run_visible_with_honest_status(
     store = StateStore()
     try:
         store.register_dag("etl", Path("etl.yaml"), "1s")
+        from nexolith.process_identity import ProcessIdentity, ProcessIdentityLookup
+
         run_id = store.start_dag_run(
-            "etl", ["extract"], trigger_reason="schedule", owner_pid=999999
+            "etl",
+            ["extract"],
+            trigger_reason="schedule",
+            owner_identity=ProcessIdentity(999999, 1_000_000_000),
         )
-        assert store.interrupt_abandoned_dag_runs(lambda pid: False) == [run_id]
+        reconciliation = store.interrupt_abandoned_dag_runs(
+            lambda pid: ProcessIdentityLookup.not_found()
+        )
+        assert reconciliation.interrupted_run_ids == (run_id,)
     finally:
         store.close()
 

@@ -21,8 +21,8 @@ from typing import NamedTuple
 from nexolith.dag.executor import execute_dag
 from nexolith.dag.validator import read_dag_config
 from nexolith.exceptions import ConfigurationError
+from nexolith.process_identity import ProcessIdentityProvider, lookup_process_identity
 from nexolith.scheduler.interval import parse_interval
-from nexolith.scheduler.pidfile import is_process_alive
 from nexolith.state import DagRecord, DagRunStatus, StateStore
 
 logger = logging.getLogger(__name__)
@@ -62,13 +62,13 @@ class Scheduler:
         execute: Callable[[Path, StateStore], int] | None = None,
         poll_interval_seconds: float = 5.0,
         now: Callable[[], datetime] | None = None,
-        process_is_alive: Callable[[int], bool] | None = None,
+        process_identity_lookup: ProcessIdentityProvider | None = None,
     ) -> None:
         self._store = store
         self._execute = execute or _default_execute
         self._poll_interval_seconds = poll_interval_seconds
         self._now = now or (lambda: datetime.now(UTC))
-        self._process_is_alive = process_is_alive or is_process_alive
+        self._process_identity_lookup = process_identity_lookup or lookup_process_identity
         self._stop_event = threading.Event()
         self._reconciled_incomplete_runs = False
 
@@ -106,9 +106,16 @@ class Scheduler:
         priority ordering, which requires exactly this.
         """
         if not self._reconciled_incomplete_runs:
-            interrupted = self._store.interrupt_abandoned_dag_runs(self._process_is_alive)
-            for run_id in interrupted:
+            reconciliation = self._store.interrupt_abandoned_dag_runs(self._process_identity_lookup)
+            for run_id in reconciliation.interrupted_run_ids:
                 logger.warning("Marked abandoned DAG run %s as interrupted", run_id)
+            for run_id, reason in reconciliation.unverifiable_runs:
+                logger.warning(
+                    "Could not verify owner identity for DAG run %s (%s); "
+                    "leaving it running to avoid duplicate execution",
+                    run_id,
+                    reason,
+                )
             self._reconciled_incomplete_runs = True
 
         due: list[_DueDag] = []

@@ -107,9 +107,13 @@ what shipped, not when it's cut.
 - Fixed `/open` path completion returning no matches when multiple spaces separate the command from
   its path argument.
 - Fixed abandoned `running` DAG runs permanently blocking future interval and cross-DAG scheduling
-  after an unclean scheduler stop. Runs now record their owner process; a fresh scheduler marks only
-  ownerless legacy rows or rows whose owner is no longer alive as `interrupted`, preserving honest
-  history in `runs list`/`show` while making the DAG eligible again (NXL-116).
+  after an unclean scheduler stop. Runs now record their owner process; a fresh scheduler marks rows
+  whose owner is known to be gone as `interrupted`, preserving honest history in `runs list`/`show`
+  while making the DAG eligible again (NXL-116).
+- Fixed operating-system PID reuse making an abandoned run look genuinely active forever. Run
+  ownership now combines PID with process creation time on Windows and supported POSIX platforms;
+  dead or identity-mismatched owners are interrupted, while legacy or unverifiable identities stay
+  running with a diagnostic warning to avoid duplicate side effects (NXL-120).
 - Fixed concurrent `scheduler start` commands both passing a read-before-write PID check and
   launching duplicate schedulers. PID ownership now uses atomic exclusive creation; stale markers
   are removed under a serialized cleanup claim before one bounded retry, while `status` and `stop`
