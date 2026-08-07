@@ -23,7 +23,12 @@ configuration when its contents change. Opening another pipeline replaces the co
 loading succeeds.
 
 `/open` without an argument reports the current path and marks it unavailable if the file was
-deleted after opening. `/close` removes the active context (NXL-105; `/clear` was renamed to this
+deleted after opening -- or, if nothing is open (NXL-107), recursively discovers DAG files under
+the current directory (`dag_discovery.py`, skipping VCS/venv/build-output directories, pruned via
+`os.walk()`'s own in-place `dirnames` mutation) and prints a numbered pick-list; `/open <number>`
+opens one from that list, resolving to a path string and falling into the exact same `/open <path>`
+code path used for an explicit path, the same list-then-select convention `/runs`/`/runs <id>`
+already established. `/close` removes the active context (NXL-105; `/clear` was renamed to this
 and now clears the full-screen session's scrollable output log instead -- the classic loop has no
 such buffer to clear, and reports that plainly). The prompt shows only the selected filename, for
 example `nexolith [orders.yaml]> `, and bounds unusual or long names. Context lasts only for the

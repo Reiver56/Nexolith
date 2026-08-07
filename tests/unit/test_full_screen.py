@@ -185,6 +185,32 @@ def test_session_stays_usable_after_a_failed_open(tmp_path: Path) -> None:
     assert session.context.pipeline.resolved_path == pipeline.resolve()
 
 
+def test_open_discovery_works_end_to_end_through_the_real_full_screen_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NXL-107: /open (no argument, nothing open) discovers and lists DAG
+    files, and /open <number> opens one -- through the real full-screen
+    machinery (dispatch is shared with the classic loop, already covered
+    there, but this confirms the shared code path genuinely works here
+    too, not just that it should in theory)."""
+    workflows_dir = tmp_path / "workflows"
+    workflows_dir.mkdir()
+    dag_path = workflows_dir / "dag.yaml"
+    pipeline_path = workflows_dir / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+    session = InteractiveSession(render_context=_CAPABLE)
+
+    output_log = run_with_keys_capturing_output_log("/open\n/open 1\n/exit\n", session=session)
+
+    assert "Discovered DAGs:" in output_log
+    assert session.context.pipeline is not None
+    assert session.context.pipeline.resolved_path == dag_path.resolve()
+    assert "DAG opened:" in output_log
+
+
 def test_clear_empties_the_full_screen_output_log(tmp_path: Path) -> None:
     """NXL-105: `/clear` inside the full-screen session now clears the
     scrollable output log itself -- a real headless run inspecting the

@@ -10,6 +10,7 @@ from typing import Protocol
 
 from nexolith.application import PipelineApplication
 from nexolith.cli.context import SelectedPipeline, SessionContext
+from nexolith.cli.dag_discovery import discover_dag_files
 from nexolith.cli.dag_register_render import render_dag_registration
 from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import error_category
@@ -47,7 +48,9 @@ HELP = (
     "Available commands:\n"
     "  /help  Show available commands.\n"
     "  /open <path>  Open or replace the current pipeline or DAG.\n"
-    "  /open  Show the current pipeline or DAG.\n"
+    "  /open  Show the current pipeline or DAG, or discover DAG files under "
+    "the current directory if none is open.\n"
+    "  /open <number>  Open a DAG from the most recent discovery list.\n"
     "  /close  Close the current pipeline or DAG.\n"
     "  /clear  Clear the scrollable output log.\n"
     "  /validate  Validate the current pipeline or DAG.\n"
@@ -182,6 +185,24 @@ def render_current_pipeline(pipeline: SelectedPipeline | None) -> str:
     return f"Current pipeline: {pipeline.requested_path}{availability}"
 
 
+def render_discovered_dags(paths: list[Path], cwd: Path) -> str:
+    """NXL-107: a numbered pick-list for `/open`'s discovery mode, mirroring
+    `/runs`'s own list-then-select-by-number convention. Paths are shown
+    relative to `cwd` when possible (shorter, more readable than absolute)
+    -- `discover_dag_files(cwd)` only ever returns paths under `cwd`, so the
+    fallback to the absolute path is defensive, not expected to trigger.
+    """
+    lines = ["Discovered DAGs:"]
+    for index, path in enumerate(paths, start=1):
+        try:
+            display = path.relative_to(cwd)
+        except ValueError:
+            display = path
+        lines.append(f"  {index}  {display}")
+    lines.append("Use /open <number> to open one.")
+    return "\n".join(lines)
+
+
 def _safe_prompt_label(filename: str) -> str:
     safe = "".join(
         character if character.isprintable() and character not in "[]" else "?"
@@ -278,6 +299,11 @@ class InteractiveSession:
         # so it leaves this unset and `_clear_log()` reports that plainly
         # rather than silently doing nothing.
         self._clear_output: Callable[[], None] | None = None
+        # NXL-107: the most recent `/open` (no argument, nothing open)
+        # discovery listing, so a follow-up `/open <number>` can resolve
+        # against it. Invalidated by any other `/open` call (explicit path
+        # or a consumed selection) -- see `_open_pipeline()`.
+        self._discovered_dags: list[Path] | None = None
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
         self._presenter: OperationPresenter = presenter or ClassicOperationPresenter(self._write)
@@ -367,9 +393,29 @@ class InteractiveSession:
         return True
 
     def _open_pipeline(self, value: str) -> None:
+        """`/open` (NXL-107): with no argument, shows the current pipeline/
+        DAG's status exactly as before this story when one is already open
+        -- otherwise (nothing open, previously just a static "No pipeline is
+        currently open." message) discovers DAG files under the current
+        directory instead, since there was nothing useful to show anyway.
+        `/open <number>` opens an entry from the most recent such listing,
+        the same list-then-select convention `/runs`/`/runs <id>` already
+        established; any other `/open <value>` is unchanged, an explicit
+        path, exactly as before this story -- and either way, opening a
+        selection reuses this exact same method body below, not a parallel
+        code path.
+        """
         if not value:
-            self._write(render_current_pipeline(self.context.pipeline))
+            if self.context.pipeline is not None:
+                self._write(render_current_pipeline(self.context.pipeline))
+                return
+            self._discover_dags()
             return
+
+        selected = self._resolve_discovered_selection(value)
+        self._discovered_dags = None
+        if selected is not None:
+            value = str(selected)
 
         requested_path = Path(value)
         try:
@@ -389,6 +435,24 @@ class InteractiveSession:
 
         self.context.select(requested_path, resolved_path)
         self._write(f"{kind_label} opened: {requested_path}")
+
+    def _discover_dags(self) -> None:
+        cwd = Path.cwd()
+        discovered = discover_dag_files(cwd)
+        if not discovered:
+            self._discovered_dags = None
+            self._write(f"No DAG files found under {cwd}.")
+            return
+        self._discovered_dags = discovered
+        self._write(render_discovered_dags(discovered, cwd))
+
+    def _resolve_discovered_selection(self, value: str) -> Path | None:
+        if self._discovered_dags is None or not value.isdigit():
+            return None
+        index = int(value)
+        if not (1 <= index <= len(self._discovered_dags)):
+            return None
+        return self._discovered_dags[index - 1]
 
     def _clear_pipeline(self) -> None:
         """`/close` (NXL-105; the old `/clear` behavior, renamed -- see

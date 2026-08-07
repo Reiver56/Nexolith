@@ -366,11 +366,22 @@ def test_open_valid_pipeline_and_show_context(tmp_path: Path) -> None:
     ]
 
 
-def test_open_without_context_and_close_without_context_are_safe() -> None:
+def test_open_without_context_discovers_and_close_without_context_is_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NXL-107: `/open` with nothing currently open used to just print
+    `NO_PIPELINE` -- there was nothing else to show. It now discovers DAG
+    files under the current directory instead (an empty, real `tmp_path`
+    here, so the deterministic "none found" message is what's expected).
+    `/close` is unaffected -- unchanged NO_PIPELINE-reporting behavior.
+    """
+    monkeypatch.chdir(tmp_path)
+
     session, _, output = run_session(["/open", "/close", "/exit"])
 
     assert session.context.pipeline is None
-    assert output.count(NO_PIPELINE) == 2
+    assert f"No DAG files found under {tmp_path}" in "\n".join(output)
+    assert output.count(NO_PIPELINE) == 1
 
 
 def test_open_replaces_pipeline_and_close_removes_context(tmp_path: Path) -> None:
@@ -390,6 +401,108 @@ def test_open_replaces_pipeline_and_close_removes_context(tmp_path: Path) -> Non
     assert "Pipeline context cleared." in output
     assert reader.prompts[-2] == "nexolith [second.yaml]> "
     assert reader.prompts[-1] == DEFAULT_PROMPT
+
+
+# -- NXL-107: /open discovery ------------------------------------------------
+
+
+def test_open_with_no_context_lists_discovered_dags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    _, _, output = run_session(["/open", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "Discovered DAGs:" in rendered
+    assert "1" in rendered and "workflows" in rendered and "dag.yaml" in rendered
+    assert "Use /open <number> to open one." in rendered
+
+
+def test_open_by_discovered_number_opens_it_exactly_like_an_explicit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression-style comparison (Step 5): opening via the discovery
+    number must produce the exact same outcome as `/open <path>` always
+    has -- same context state, same "DAG opened:" message -- because
+    `_open_pipeline()` resolves the selection to a path string and then
+    falls straight into its one, unchanged code path.
+    """
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    via_discovery, _, discovery_output = run_session(["/open", "/open 1", "/exit"])
+    via_explicit_path, _, explicit_output = run_session([f"/open {dag_path}", "/exit"])
+
+    discovered_pipeline = via_discovery.context.pipeline
+    explicit_pipeline = via_explicit_path.context.pipeline
+    assert discovered_pipeline is not None
+    assert explicit_pipeline is not None
+    assert discovered_pipeline.resolved_path == dag_path.resolve()
+    assert discovered_pipeline.resolved_path == explicit_pipeline.resolved_path
+    assert any(line.startswith("DAG opened:") for line in discovery_output)
+    assert any(line.startswith("DAG opened:") for line in explicit_output)
+
+
+def test_open_explicit_path_is_unaffected_by_a_pending_discovery_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/open <path>` (an actual, non-numeric-only path) must never be
+    misread as a discovery selection, even right after a discovery listing
+    -- confirms the numeric-only guard in `_resolve_discovered_selection()`.
+    """
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    other_pipeline = tmp_path / "other.yaml"
+    write_pipeline(other_pipeline, "other")
+    monkeypatch.chdir(tmp_path)
+
+    session, _, output = run_session(["/open", f"/open {other_pipeline}", "/exit"])
+
+    assert session.context.pipeline is not None
+    assert session.context.pipeline.resolved_path == other_pipeline.resolve()
+    assert any(line.startswith("Pipeline opened:") for line in output)
+
+
+def test_open_with_no_dags_found_reports_that_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    _, _, output = run_session(["/open", "/exit"])
+
+    assert f"No DAG files found under {tmp_path}" in "\n".join(output)
+
+
+def test_open_out_of_range_discovery_number_falls_through_to_a_literal_path_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No crash, no silent success -- an out-of-range number after a
+    discovery listing just behaves like any other nonexistent literal
+    path, exactly as `/open 99` always would with no discovery pending."""
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    session, _, output = run_session(["/open", "/open 99", "/exit"])
+
+    assert session.context.pipeline is None
+    assert any(line.startswith("Could not open pipeline:") for line in output)
 
 
 def test_clear_in_the_classic_loop_reports_no_scrollable_log_to_clear() -> None:
@@ -729,6 +842,8 @@ def test_help_does_not_expose_deferred_v031_or_v050_features() -> None:
 
 
 def write_dag(dag_path: Path, pipeline_path: Path, source: Path, destination: Path) -> None:
+    dag_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_path.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("id,status\n1,ready\n2,done\n", encoding="utf-8")
     pipeline_path.write_text(
         f"""
