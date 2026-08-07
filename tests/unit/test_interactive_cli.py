@@ -1120,6 +1120,17 @@ def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
     test_scheduler_cli.py's test_stop_genuinely_terminates_a_real_running_scheduler
     exactly, but driven through the interactive session's /scheduler stop
     instead of calling stop_process()/the classic CLI command directly.
+
+    Does NOT assert the exact "stopped" wording, matching that same
+    test_scheduler_cli.py test's own established convention: `_scheduler_stop()`
+    itself polls `is_process_alive()` for a bounded ~2s (interactive.py)
+    before choosing between "stopped" and the honest "may still be shutting
+    down" wording (NXL-78: best-effort on Windows, never guaranteed), so
+    which exact wording comes out is itself a real race against this
+    machine's own process-teardown timing -- confirmed flaky under real
+    load, where the OS-level `proc.wait(timeout=5)` below still succeeded,
+    well past that ~2s budget. Only the genuinely deterministic guarantee
+    (real termination, pidfile removed) is asserted.
     """
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -1134,7 +1145,7 @@ def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
 
         proc.wait(timeout=5)
         assert is_process_alive(proc.pid) is False
-        assert any("stopped" in line.lower() for line in output)
+        assert any("stopped" in line.lower() or "shutting down" in line.lower() for line in output)
         assert not default_pidfile_path().exists()
     finally:
         if proc.poll() is None:

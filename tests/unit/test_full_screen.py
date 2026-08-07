@@ -1071,6 +1071,19 @@ def test_scheduler_status_running_for_a_real_process_in_full_screen() -> None:
 
 
 def test_scheduler_stop_genuinely_terminates_a_real_process_in_full_screen() -> None:
+    """`_scheduler_stop()` itself already polls `is_process_alive()` for a
+    bounded ~2s (interactive.py) before choosing between "stopped" and the
+    honest "may still be shutting down" wording (NXL-78: stop is best-effort
+    on Windows, never guaranteed) -- so which exact wording comes out is
+    itself a real race against how long *this* machine takes to actually
+    tear the process down, independent of anything this test does. Asserting
+    the confirmed-only wording flaked under real machine load (the OS-level
+    `proc.wait(timeout=5)` below succeeded either way, well past that ~2s
+    budget). Only the genuinely deterministic guarantee is checked here --
+    real termination -- matching test_scheduler_cli.py's own
+    test_stop_genuinely_terminates_a_real_running_scheduler_and_removes_the_marker,
+    which never asserted this wording either.
+    """
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
@@ -1084,7 +1097,8 @@ def test_scheduler_stop_genuinely_terminates_a_real_process_in_full_screen() -> 
 
         proc.wait(timeout=5)
         assert is_process_alive(proc.pid) is False
-        assert "stopped" in output_log.lower()
+        lowered = output_log.lower()
+        assert "stopped" in lowered or "shutting down" in lowered
     finally:
         if proc.poll() is None:
             proc.kill()
