@@ -112,7 +112,8 @@ what shipped, not when it's cut.
   history in `runs list`/`show` while making the DAG eligible again (NXL-116).
 - Fixed concurrent `scheduler start` commands both passing a read-before-write PID check and
   launching duplicate schedulers. PID ownership now uses atomic exclusive creation; stale markers
-  are removed under a serialized cleanup claim before one bounded retry (NXL-117).
+  are removed under a serialized cleanup claim before one bounded retry, while `status` and `stop`
+  never unlink a marker that may have been concurrently reacquired (NXL-117).
 - **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
   pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
   validate/run DAG files correctly.

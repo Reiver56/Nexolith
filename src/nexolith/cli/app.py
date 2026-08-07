@@ -202,7 +202,6 @@ def scheduler_stop() -> None:
         typer.echo(render_scheduler_not_running())
         return
     if not is_process_alive(record.pid):
-        remove_pidfile(pidfile_path)
         typer.echo(render_scheduler_not_running())
         return
 
@@ -215,10 +214,9 @@ def scheduler_stop() -> None:
             break
         time.sleep(0.1)
 
-    # This command owns marker cleanup rather than trusting the target
-    # process's own shutdown path -- see pidfile.py's docstring for why
-    # that trust wouldn't be well-founded on Windows.
-    remove_pidfile(pidfile_path)
+    # Leave marker ownership unchanged: another scheduler may have acquired
+    # the path after this command observed `record`. A later start recovers
+    # the old marker atomically if it is still stale.
     if is_process_alive(record.pid):
         typer.echo(render_scheduler_stop_uncertain(record.pid))
     else:
@@ -232,8 +230,6 @@ def scheduler_status() -> None:
     record = read_pidfile(pidfile_path)
     render_context = detect_render_context()
     if record is None or not is_process_alive(record.pid):
-        if record is not None:
-            remove_pidfile(pidfile_path)
         typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
         return
     typer.echo(

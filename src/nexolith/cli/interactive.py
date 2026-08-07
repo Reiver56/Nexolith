@@ -37,7 +37,6 @@ from nexolith.scheduler import (
     default_pidfile_path,
     is_process_alive,
     read_pidfile,
-    remove_pidfile,
     stop_process,
 )
 from nexolith.state import StateStore
@@ -730,8 +729,6 @@ class InteractiveSession:
         record = read_pidfile(pidfile_path)
         render_context = self._output_render_context()
         if record is None or not is_process_alive(record.pid):
-            if record is not None:
-                remove_pidfile(pidfile_path)
             self._write(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
             return
         self._write(
@@ -754,7 +751,6 @@ class InteractiveSession:
             self._write(render_scheduler_not_running())
             return
         if not is_process_alive(record.pid):
-            remove_pidfile(pidfile_path)
             self._write(render_scheduler_not_running())
             return
 
@@ -767,7 +763,8 @@ class InteractiveSession:
                 break
             time.sleep(0.1)
 
-        remove_pidfile(pidfile_path)
+        # Do not unlink an observer-owned path: it may now belong to a new
+        # scheduler. Atomic stale recovery belongs to the next start.
         if is_process_alive(record.pid):
             self._write(render_scheduler_stop_uncertain(record.pid))
         else:

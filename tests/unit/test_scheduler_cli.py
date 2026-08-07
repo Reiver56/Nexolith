@@ -177,7 +177,7 @@ def test_status_reports_running_with_accurate_info_for_a_real_live_process(
         proc.wait(timeout=5)
 
 
-def test_status_reports_not_running_and_self_heals_a_stale_marker(
+def test_status_reports_not_running_and_leaves_a_stale_marker(
     isolated_state_dir: Path,
 ) -> None:
     """A marker file naming a PID that is not actually alive (the process
@@ -192,7 +192,35 @@ def test_status_reports_not_running_and_self_heals_a_stale_marker(
 
     assert result.exit_code == 0
     assert "not running" in result.output
-    assert not pidfile_path.exists()  # self-healed
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert record.pid == 999999
+
+
+def test_status_does_not_delete_a_concurrently_replaced_marker(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+
+    def replace_before_reporting_dead(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return False
+
+    monkeypatch.setattr(
+        sys.modules["nexolith.cli.app"], "is_process_alive", replace_before_reporting_dead
+    )
+
+    result = runner.invoke(app, ["scheduler", "status"])
+
+    assert result.exit_code == 0
+    assert "not running" in result.output
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
 
 
 # -- scheduler start: marker lifecycle -------------------------------------
@@ -253,14 +281,22 @@ def test_start_cleans_up_a_stale_marker_and_proceeds(
 ) -> None:
     from nexolith.scheduler.daemon import Scheduler
 
-    monkeypatch.setattr(Scheduler, "run", lambda self, **kwargs: None)
     pidfile_path = default_pidfile_path()
+    seen_owner: list[int] = []
+
+    def record_owner(self: Scheduler, **kwargs: object) -> None:
+        record = read_pidfile(pidfile_path)
+        assert record is not None
+        seen_owner.append(record.pid)
+
+    monkeypatch.setattr(Scheduler, "run", record_owner)
     write_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00")  # stale: 999999 is dead
 
     result = runner.invoke(app, ["scheduler", "start"])
 
     assert result.exit_code == 0
     assert "already" not in result.output.lower()
+    assert seen_owner == [os.getpid()]
 
 
 def test_two_real_processes_cannot_both_acquire_the_scheduler_pidfile(tmp_path: Path) -> None:
@@ -385,7 +421,7 @@ def test_stop_reports_not_running_when_no_marker_exists(isolated_state_dir: Path
     assert "not running" in result.output
 
 
-def test_stop_genuinely_terminates_a_real_running_scheduler_and_removes_the_marker(
+def test_stop_genuinely_terminates_a_real_running_scheduler_and_leaves_its_marker(
     isolated_state_dir: Path,
 ) -> None:
     proc = subprocess.Popen(
@@ -402,7 +438,9 @@ def test_stop_genuinely_terminates_a_real_running_scheduler_and_removes_the_mark
         proc.wait(timeout=5)
         assert result.exit_code == 0
         assert is_process_alive(proc.pid) is False
-        assert not pidfile_path.exists()
+        record = read_pidfile(pidfile_path)
+        assert record is not None
+        assert record.pid == proc.pid
         if sys.platform == "win32":
             assert "forcibly" in result.output.lower()
     finally:
@@ -410,7 +448,7 @@ def test_stop_genuinely_terminates_a_real_running_scheduler_and_removes_the_mark
             proc.kill()
 
 
-def test_stop_self_heals_a_stale_marker(isolated_state_dir: Path) -> None:
+def test_stop_reports_not_running_and_leaves_a_stale_marker(isolated_state_dir: Path) -> None:
     pidfile_path = default_pidfile_path()
     write_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00")
 
@@ -418,7 +456,41 @@ def test_stop_self_heals_a_stale_marker(isolated_state_dir: Path) -> None:
 
     assert result.exit_code == 0
     assert "not running" in result.output
-    assert not pidfile_path.exists()
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert record.pid == 999999
+
+
+def test_stop_does_not_delete_a_concurrently_replaced_marker(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+    liveness = iter((True, False, False))
+
+    def observed_process_is_alive(pid: int) -> bool:
+        assert pid == 111111
+        return next(liveness)
+
+    def stop_old_process(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return True
+
+    monkeypatch.setattr(
+        sys.modules["nexolith.cli.app"], "is_process_alive", observed_process_is_alive
+    )
+    monkeypatch.setattr(sys.modules["nexolith.cli.app"], "stop_process", stop_old_process)
+
+    result = runner.invoke(app, ["scheduler", "stop"])
+
+    assert result.exit_code == 0
+    assert "stopped" in result.output.lower()
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
 
 
 # -- runs list --------------------------------------------------------------

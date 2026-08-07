@@ -28,9 +28,10 @@ process during this story, not assumed:
   `stop_process()` here still uses `os.kill(pid, signal.SIGTERM)` (simplest
   standard-library call, and the one that behaves correctly -- genuinely
   gracefully -- on Unix) rather than shelling out to `taskkill`; the
-  practical result on Windows is the same either way, and the caller (the
-  `scheduler stop` CLI command) is responsible for its own PID-file cleanup
-  afterward rather than trusting the target process to do it.
+  practical result on Windows is the same either way. A remote `scheduler
+  stop` deliberately leaves the observed PID file in place: it cannot prove
+  that the path was not concurrently reacquired. The next `scheduler start`
+  recovers that stale marker through the serialized atomic acquisition path.
 """
 
 import contextlib

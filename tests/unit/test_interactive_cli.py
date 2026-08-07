@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -30,7 +31,7 @@ from nexolith.config.models import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
 from nexolith.models import ExecutionResult
-from nexolith.scheduler import default_pidfile_path, is_process_alive, write_pidfile
+from nexolith.scheduler import default_pidfile_path, is_process_alive, read_pidfile, write_pidfile
 from nexolith.types import Scalar
 
 runner = CliRunner()
@@ -1109,6 +1110,41 @@ def test_scheduler_status_reports_running_for_a_real_live_process() -> None:
         proc.wait(timeout=5)
 
 
+def test_scheduler_status_leaves_a_stale_marker() -> None:
+    pidfile_path = default_pidfile_path()
+    write_pidfile(pidfile_path, 999999, "old-start")
+
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("not running" in line for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (999999, "old-start")
+
+
+def test_scheduler_status_preserves_a_concurrent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+
+    def replace_before_reporting_dead(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return False
+
+    monkeypatch.setattr("nexolith.cli.interactive.is_process_alive", replace_before_reporting_dead)
+
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("not running" in line for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
+
+
 def test_scheduler_stop_reports_not_running_when_no_marker_exists() -> None:
     _, _, output = run_session(["/scheduler stop", "/exit"])
 
@@ -1129,8 +1165,8 @@ def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
     which exact wording comes out is itself a real race against this
     machine's own process-teardown timing -- confirmed flaky under real
     load, where the OS-level `proc.wait(timeout=5)` below still succeeded,
-    well past that ~2s budget. Only the genuinely deterministic guarantee
-    (real termination, pidfile removed) is asserted.
+    well past that ~2s budget. Only the genuinely deterministic guarantees
+    (real termination, original stale pidfile retained) are asserted.
     """
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -1146,10 +1182,53 @@ def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
         proc.wait(timeout=5)
         assert is_process_alive(proc.pid) is False
         assert any("stopped" in line.lower() or "shutting down" in line.lower() for line in output)
-        assert not default_pidfile_path().exists()
+        record = read_pidfile(default_pidfile_path())
+        assert record is not None
+        assert record.pid == proc.pid
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_scheduler_stop_leaves_a_stale_marker() -> None:
+    pidfile_path = default_pidfile_path()
+    write_pidfile(pidfile_path, 999999, "old-start")
+
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert "Scheduler is not running." in output
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (999999, "old-start")
+
+
+def test_scheduler_stop_preserves_a_concurrent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+    liveness = iter((True, False, False))
+
+    def observed_process_is_alive(pid: int) -> bool:
+        assert pid == 111111
+        return next(liveness)
+
+    def stop_old_process(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return True
+
+    monkeypatch.setattr("nexolith.cli.interactive.is_process_alive", observed_process_is_alive)
+    monkeypatch.setattr("nexolith.cli.interactive.stop_process", stop_old_process)
+
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert any("stopped" in line.lower() for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
 
 
 def test_scheduler_start_is_rejected_with_a_helpful_hint() -> None:

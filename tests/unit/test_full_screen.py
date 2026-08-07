@@ -1081,7 +1081,7 @@ def test_scheduler_stop_genuinely_terminates_a_real_process_in_full_screen() -> 
     `proc.wait(timeout=5)` below succeeded either way, well past that ~2s
     budget). Only the genuinely deterministic guarantee is checked here --
     real termination -- matching test_scheduler_cli.py's own
-    test_stop_genuinely_terminates_a_real_running_scheduler_and_removes_the_marker,
+    test_stop_genuinely_terminates_a_real_running_scheduler_and_leaves_its_marker,
     which never asserted this wording either.
     """
     proc = subprocess.Popen(
