@@ -262,29 +262,6 @@ class InteractiveSession:
         # timeline, summary, /validate highlighting) share one consistent capability
         # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
         self.render_context = render_context or detect_render_context()
-        if __import__("os").environ.get("NEXOLITH_DEBUG_RENDER"):
-            import sys as _sys
-
-            _sys.stderr.write("=== NEXOLITH_DEBUG_RENDER (temporary, not committed) ===\n")
-            _sys.stderr.write(f"sys.stdout type: {type(_sys.stdout)!r}\n")
-            _sys.stderr.write(f"sys.stdout is sys.__stdout__: {_sys.stdout is _sys.__stdout__!r}\n")
-            _sys.stderr.write(f"sys.stdout.isatty(): {_sys.stdout.isatty()!r}\n")
-            _sys.stderr.write(f"sys.stdout.encoding: {getattr(_sys.stdout, 'encoding', None)!r}\n")
-            _sys.stderr.write(f"self._write is builtins.print: {self._write is print!r}\n")
-            for _field in (
-                "is_tty",
-                "color_enabled",
-                "width",
-                "forced_plain",
-                "encoding_safe",
-                "kitty_graphics",
-            ):
-                _sys.stderr.write(
-                    f"render_context.{_field}: {getattr(self.render_context, _field)!r}\n"
-                )
-            _sys.stderr.write(f"render_context.plain: {self.render_context.plain!r}\n")
-            _sys.stderr.write(f"render_context.use_kitty: {self.render_context.use_kitty!r}\n")
-            _sys.stderr.write("=== end debug ===\n")
 
     def set_output_writer(self, writer: OutputWriter, *, ansi_capable: bool = True) -> None:
         """Redirect where this session's output goes, e.g. to a full-screen
