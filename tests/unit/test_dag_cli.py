@@ -213,3 +213,176 @@ def test_classic_pipeline_cli_output_remains_unchanged(tmp_path: Path) -> None:
     assert len(lines) == 5
     assert re.fullmatch(r"Duration: \d+\.\d{3}s", lines[4])
     assert execution.stderr == ""
+
+
+def test_dag_register_creates_a_new_registration_without_running_any_task(tmp_path: Path) -> None:
+    """NXL-103: `nexolith dag register` creates the `dags` row (schedule,
+    enabled) straight from the file -- confirmed by checking the row
+    directly, not just the command's own echoed confirmation -- and, unlike
+    `run`, never executes a task (no dag_runs row at all).
+    """
+    write_pipeline(tmp_path / "extract.yaml", name="extract")
+    dag = tmp_path / "workflow.yaml"
+    write_dag(
+        dag,
+        """
+name: register_only_dag
+schedule: 10m
+tasks:
+  - name: extract
+    pipeline: extract.yaml
+    depends_on: []
+""",
+    )
+
+    result = runner.invoke(app, ["dag", "register", str(dag)])
+
+    assert result.exit_code == 0
+    assert result.stdout == "DAG 'register_only_dag' registered (schedule: 10m, enabled).\n"
+    assert result.stderr == ""
+
+    store = StateStore()
+    try:
+        registered = store.get_dag("register_only_dag")
+        assert registered is not None
+        assert registered.schedule == "10m"
+        assert registered.enabled is True
+        assert registered.source_path == str(dag)
+        assert store.list_dag_runs("register_only_dag") == []  # never run
+    finally:
+        store.close()
+
+
+def test_dag_register_an_already_registered_dag_is_a_no_op_without_force(tmp_path: Path) -> None:
+    write_pipeline(tmp_path / "extract.yaml", name="extract")
+    dag = tmp_path / "workflow.yaml"
+    write_dag(
+        dag,
+        """
+name: idempotent_dag
+schedule: 5m
+tasks:
+  - name: extract
+    pipeline: extract.yaml
+    depends_on: []
+""",
+    )
+    first = runner.invoke(app, ["dag", "register", str(dag)])
+    assert first.exit_code == 0
+
+    # Edit the file's schedule after the first registration -- re-running
+    # register without --force must not pick this up (the same
+    # never-clobber-a-schedule convention DagExecutor.run() already applies
+    # to a manual run, deliberately extended here to this command too).
+    write_dag(
+        dag,
+        """
+name: idempotent_dag
+schedule: 30m
+tasks:
+  - name: extract
+    pipeline: extract.yaml
+    depends_on: []
+""",
+    )
+
+    second = runner.invoke(app, ["dag", "register", str(dag)])
+
+    assert second.exit_code == 0
+    assert "already registered" in second.stdout
+    assert "schedule: 5m" in second.stdout
+    assert "--force" in second.stdout
+
+    store = StateStore()
+    try:
+        registered = store.get_dag("idempotent_dag")
+        assert registered is not None
+        assert registered.schedule == "5m"  # unchanged
+    finally:
+        store.close()
+
+
+def test_dag_register_with_force_updates_schedule_but_preserves_enabled_state(
+    tmp_path: Path,
+) -> None:
+    write_pipeline(tmp_path / "extract.yaml", name="extract")
+    dag = tmp_path / "workflow.yaml"
+    write_dag(
+        dag,
+        """
+name: forced_dag
+schedule: 5m
+tasks:
+  - name: extract
+    pipeline: extract.yaml
+    depends_on: []
+""",
+    )
+    first = runner.invoke(app, ["dag", "register", str(dag)])
+    assert first.exit_code == 0
+
+    store = StateStore()
+    try:
+        store.set_dag_enabled("forced_dag", False)  # simulate an earlier explicit disable
+    finally:
+        store.close()
+
+    write_dag(
+        dag,
+        """
+name: forced_dag
+schedule: 30m
+tasks:
+  - name: extract
+    pipeline: extract.yaml
+    depends_on: []
+""",
+    )
+
+    forced = runner.invoke(app, ["dag", "register", str(dag), "--force"])
+
+    assert forced.exit_code == 0
+    assert forced.stdout == "DAG 'forced_dag' registration updated (schedule: 30m, disabled).\n"
+
+    store = StateStore()
+    try:
+        registered = store.get_dag("forced_dag")
+        assert registered is not None
+        assert registered.schedule == "30m"  # synced from the file
+        assert registered.enabled is False  # the earlier disable survives --force
+    finally:
+        store.close()
+
+
+def test_dag_register_invalid_dag_file_fails_validation_without_creating_a_row(
+    tmp_path: Path,
+) -> None:
+    write_pipeline(tmp_path / "a.yaml", name="a")
+    write_pipeline(tmp_path / "b.yaml", name="b")
+    dag = tmp_path / "cycle.yaml"
+    write_dag(
+        dag,
+        """
+name: cycle
+tasks:
+  - name: a
+    pipeline: a.yaml
+    depends_on: [b]
+  - name: b
+    pipeline: b.yaml
+    depends_on: [a]
+""",
+    )
+
+    result = runner.invoke(app, ["dag", "register", str(dag)])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "Error [configuration]: Cycle detected in DAG 'cycle': a -> b -> a" in result.stderr
+    assert "Traceback" not in result.stderr
+
+    store = StateStore()
+    try:
+        assert store.get_dag("cycle") is None
+    finally:
+        store.close()

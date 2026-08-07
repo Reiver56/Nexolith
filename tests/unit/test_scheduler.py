@@ -569,6 +569,44 @@ def test_a_dag_file_declared_schedule_is_registered_and_triggers_a_real_run(
         store.close()
 
 
+def test_a_dag_registered_via_register_dag_alone_triggers_on_the_schedulers_next_tick(
+    tmp_path: Path,
+) -> None:
+    """NXL-103: `register_dag()` is the only other way (besides an actual
+    manual run through `DagExecutor.run()`'s check-then-register side
+    effect) a DAG's `dags` row gets created. This proves the scheduler
+    treats a DAG registered that way identically to one that's already been
+    run once: due immediately on its first eligible tick -- same as
+    test_a_dag_with_no_prior_run_is_due_on_its_first_eligible_tick -- and
+    actually executes when tick() runs, not merely marked due. The DAG is
+    never run manually anywhere in this test; execute_dag()/DagExecutor.run()
+    are never called directly, only through the scheduler's own tick().
+    """
+    from nexolith.dag import register_dag
+
+    dag_path = write_scheduled_dag(tmp_path, name="never-run-dag", schedule="5m")
+
+    store = make_store(tmp_path)
+    try:
+        result = register_dag(dag_path, store)
+        assert result.created
+        assert result.record.schedule == "5m"
+        assert result.record.enabled is True
+        assert store.list_dag_runs("never-run-dag") == []  # confirm: truly never run
+
+        scheduler = Scheduler(store)
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 1
+        run = store.get_dag_run(triggered[0])
+        assert run is not None
+        assert run.dag_name == "never-run-dag"
+        assert run.status is DagRunStatus.SUCCEEDED
+        assert run.trigger_reason == "schedule"
+    finally:
+        store.close()
+
+
 def test_a_malformed_dag_file_declared_schedule_is_a_clear_validation_error(
     tmp_path: Path,
 ) -> None:

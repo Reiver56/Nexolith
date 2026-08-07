@@ -11,6 +11,7 @@ import typer
 
 from nexolith import __version__
 from nexolith.application import run_pipeline, validate_pipeline
+from nexolith.cli.dag_register_render import render_dag_registration
 from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
@@ -29,7 +30,7 @@ from nexolith.cli.scheduler_render import (
     render_scheduler_stopped,
     render_windows_stop_caveat,
 )
-from nexolith.dag import execute_dag, load_dag
+from nexolith.dag import execute_dag, load_dag, register_dag
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
 from nexolith.scheduler import (
@@ -50,8 +51,10 @@ app = typer.Typer(
 )
 scheduler_app = typer.Typer(help="Manage the scheduler daemon.")
 runs_app = typer.Typer(help="Observe DAG run history.")
+dag_app = typer.Typer(help="Manage registered DAGs.")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(runs_app, name="runs")
+app.add_typer(dag_app, name="dag")
 
 
 class ExitCode(IntEnum):
@@ -270,3 +273,32 @@ def runs_show(run_id: Annotated[int, typer.Argument(help="The DAG run id to show
     finally:
         store.close()
     typer.echo(render_run_detail(run, tasks, detect_render_context(), attempts))
+
+
+@dag_app.command("register")
+def dag_register(
+    path: Annotated[Path, typer.Argument(exists=False, readable=True)],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force", help="Update an already-registered DAG's schedule/source path from the file."
+        ),
+    ] = False,
+) -> None:
+    """Register a DAG for scheduled execution without running it.
+
+    Validates the file and creates (or, with --force, updates) its `dags`
+    row from the file's own `schedule:` -- no task is executed. The
+    scheduler daemon picks up a DAG registered this way on its next poll
+    tick exactly as if it had already been run manually once.
+    """
+    store = StateStore()
+    try:
+        try:
+            result = register_dag(path, store, force=force)
+        except ConfigurationError as exc:
+            _show_error(exc)
+            raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+    finally:
+        store.close()
+    typer.echo(render_dag_registration(result))

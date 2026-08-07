@@ -877,6 +877,74 @@ def test_runs_show_reports_not_found_for_a_nonexistent_run() -> None:
     assert "No DAG run found with id 999." in output
 
 
+def test_register_with_no_open_pipeline_prompts_to_open_one_first() -> None:
+    _, _, output = run_session(["/register", "/exit"])
+
+    assert "No pipeline is currently open. Use /open <path> first." in output
+
+
+def test_register_creates_a_new_registration_for_the_currently_open_dag(tmp_path: Path) -> None:
+    """NXL-103: `/register` with no path reuses the currently open DAG,
+    matching `/validate`/`/run`, and shares `render_dag_registration()` with
+    the classic CLI's `dag register` command -- same message either way.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/open {dag_path}", "/register", "/exit"])
+
+    assert "DAG 'interactive_dag' registered (schedule: none, enabled)." in output
+
+    from nexolith.state import StateStore
+
+    store = StateStore()
+    try:
+        registered = store.get_dag("interactive_dag")
+        assert registered is not None
+        assert registered.enabled is True
+        assert store.list_dag_runs("interactive_dag") == []  # never run
+    finally:
+        store.close()
+
+
+def test_register_with_an_explicit_path_does_not_require_opening_it_first(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/register {dag_path}", "/exit"])
+
+    assert "DAG 'interactive_dag' registered (schedule: none, enabled)." in output
+
+
+def test_register_an_already_registered_dag_hints_at_the_classic_forces_flag(
+    tmp_path: Path,
+) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/register {dag_path}", f"/register {dag_path}", "/exit"])
+
+    assert any("already registered" in line and "--force" in line for line in output)
+
+
+def test_register_an_invalid_dag_reports_the_real_validation_error(tmp_path: Path) -> None:
+    dag_path = tmp_path / "bad_dag.yaml"
+    dag_path.write_text("name: x\ntasks: []\n", encoding="utf-8")  # tasks must be non-empty
+
+    _, _, output = run_session([f"/register {dag_path}", "/exit"])
+
+    assert any(line.startswith("Could not register DAG:") for line in output)
+
+
 def test_scheduler_status_reports_not_running_when_no_marker_file_exists() -> None:
     _, _, output = run_session(["/scheduler status", "/exit"])
 

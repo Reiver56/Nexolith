@@ -9,6 +9,7 @@ from typing import Protocol
 
 from nexolith.application import PipelineApplication
 from nexolith.cli.context import SelectedPipeline, SessionContext
+from nexolith.cli.dag_register_render import render_dag_registration
 from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
@@ -26,7 +27,7 @@ from nexolith.cli.scheduler_render import (
     render_windows_stop_caveat,
 )
 from nexolith.config import PipelineConfig
-from nexolith.dag import execute_dag, load_dag
+from nexolith.dag import execute_dag, load_dag, register_dag
 from nexolith.events import EventSink, PipelineOperation
 from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
 from nexolith.models import ExecutionResult
@@ -51,6 +52,8 @@ HELP = (
     "  /run  Run the current pipeline or DAG.\n"
     "  /runs  List recent DAG runs.\n"
     "  /runs <id>  Show detail for one DAG run.\n"
+    "  /register [path]  Register a DAG for scheduling without running it "
+    "(the currently open DAG if no path is given).\n"
     "  /scheduler status  Report whether the scheduler daemon is running.\n"
     "  /scheduler stop  Stop a running scheduler daemon.\n"
     "  /exit  Exit the interactive session.\n"
@@ -75,6 +78,7 @@ class InteractiveCommand(StrEnum):
     VALIDATE = "validate"
     RUN = "run"
     RUNS = "runs"
+    REGISTER = "register"
     SCHEDULER = "scheduler"
     EXIT = "exit"
     UNKNOWN = "unknown"
@@ -111,6 +115,12 @@ def parse_command(value: str) -> ParsedCommand:
         parts = command.split(maxsplit=1)
         if parts[0] == "/runs" and len(parts) == 2:
             return ParsedCommand(InteractiveCommand.RUNS, parts[1])
+    if command == "/register":
+        return ParsedCommand(InteractiveCommand.REGISTER)
+    if command.startswith("/register"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/register" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.REGISTER, parts[1])
     if command == "/scheduler":
         return ParsedCommand(InteractiveCommand.SCHEDULER)
     if command.startswith("/scheduler"):
@@ -321,6 +331,9 @@ class InteractiveSession:
         if command.kind is InteractiveCommand.RUNS:
             self._show_runs(command.text)
             return True
+        if command.kind is InteractiveCommand.REGISTER:
+            self._register_dag(command.text)
+            return True
         if command.kind is InteractiveCommand.SCHEDULER:
             self._scheduler_command(command.text)
             return True
@@ -484,6 +497,36 @@ class InteractiveSession:
         finally:
             store.close()
         self._write(render_run_detail(run, tasks, self._output_render_context(), attempts))
+
+    def _register_dag(self, value: str) -> None:
+        """`/register [path]` -- registers a DAG for scheduled execution
+        without running it (NXL-103), reusing `nexolith.dag.register_dag()`
+        exactly as the classic CLI's `dag register` command does, so both
+        report an identical outcome via `render_dag_registration()`. Falls
+        back to the currently open pipeline/DAG when no path is given,
+        matching `/validate`/`/run`; unlike the classic command, there is no
+        `--force` here -- updating an already-registered DAG's schedule from
+        an edited file is left to `nexolith dag register <path> --force`,
+        consistent with this session's intentionally small command set.
+        """
+        if value:
+            path = Path(value)
+        else:
+            pipeline = self._require_pipeline()
+            if pipeline is None:
+                return
+            path = pipeline.resolved_path
+
+        store = StateStore()
+        try:
+            try:
+                result = register_dag(path, store)
+            except ConfigurationError as error:
+                self._write(f"Could not register DAG: {error}")
+                return
+        finally:
+            store.close()
+        self._write(render_dag_registration(result))
 
     def _scheduler_command(self, value: str) -> None:
         subcommand = value.strip()
