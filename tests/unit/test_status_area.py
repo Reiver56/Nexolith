@@ -5,6 +5,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from prompt_toolkit.utils import get_cwidth
+
 from nexolith.cli.context import SelectedPipeline
 from nexolith.cli.render_context import RenderContext
 from nexolith.cli.status_area import (
@@ -14,6 +16,7 @@ from nexolith.cli.status_area import (
     build_error_excerpt,
     render_execution_panel,
 )
+from nexolith.config import PipelineConfig
 from nexolith.events import (
     ExtractionCompleted,
     ExtractionStarted,
@@ -179,6 +182,34 @@ def test_active_step_marker_alternates_with_dot_state() -> None:
 
     state.dot_on = False
     assert "○" in plain(state)
+
+
+# --- Validation panel ----------------------------------------------------
+
+
+def validation_panel_lines(pipeline_name: str) -> list[str]:
+    config = PipelineConfig.model_validate(
+        {
+            "name": pipeline_name,
+            "source": {"type": "csv", "path": "input.csv"},
+            "destination": {"type": "csv", "path": "output.csv"},
+        }
+    )
+    state = StatusAreaState()
+    state.finish_with_validation(config)
+    return plain(state).splitlines()
+
+
+def test_validation_panel_ascii_rows_have_equal_display_width() -> None:
+    lines = validation_panel_lines("data_pipeline")
+
+    assert len({get_cwidth(line) for line in lines}) == 1
+
+
+def test_validation_panel_cjk_rows_have_equal_display_width() -> None:
+    lines = validation_panel_lines("数据管道")
+
+    assert len({get_cwidth(line) for line in lines}) == 1
 
 
 # --- Result panel (NXL-104: written to the output log, not this area) -----

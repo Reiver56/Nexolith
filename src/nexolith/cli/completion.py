@@ -48,7 +48,7 @@ class NexolithCompleter(Completer):
             return
         command = text[:first_space]
         if command in _PATH_COMMANDS:
-            yield from self._complete_path(text[first_space + 1 :])
+            yield from self._complete_path(text[first_space + 1 :].lstrip())
         elif command == "/scheduler":
             yield from self._complete_scheduler_subcommand(text[first_space + 1 :])
 

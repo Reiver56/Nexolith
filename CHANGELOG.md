@@ -102,6 +102,10 @@ what shipped, not when it's cut.
 
 #### Fixed
 
+- Fixed full-screen validation panels rendering a short right border when a pipeline name contains
+  wide Unicode characters such as CJK text.
+- Fixed `/open` path completion returning no matches when multiple spaces separate the command from
+  its path argument.
 - Fixed abandoned `running` DAG runs permanently blocking future interval and cross-DAG scheduling
   after an unclean scheduler stop. Runs now record their owner process; a fresh scheduler marks only
   ownerless legacy rows or rows whose owner is no longer alive as `interrupted`, preserving honest

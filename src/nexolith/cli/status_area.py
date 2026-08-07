@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from prompt_toolkit.formatted_text import StyleAndTextTuples
+from prompt_toolkit.utils import get_cwidth
 
 from nexolith.cli.context import SelectedPipeline
 from nexolith.cli.interactive import render_operation_error
@@ -191,12 +192,12 @@ def _render_bordered_panel(
     rows: list[tuple[str, str]], color_for: Callable[[str, str], tuple[int, int, int]]
 ) -> StyleAndTextTuples:
     plain_lines = [f"{label}: {value}" for label, value in rows]
-    width = max(len(line) for line in plain_lines)
+    width = max(get_cwidth(line) for line in plain_lines)
     border = _fg(BLURPLE)
 
     fragments: StyleAndTextTuples = [(border, "╭" + "─" * (width + 2) + "╮\n")]
     for (label, value), plain in zip(rows, plain_lines, strict=True):
-        pad = " " * (width - len(plain))
+        pad = " " * (width - get_cwidth(plain))
         fragments.append((border, "│ "))
         fragments.append(("", f"{label}: "))
         fragments.append((_fg(color_for(label, value), bold=True), value))

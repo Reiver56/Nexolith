@@ -79,6 +79,24 @@ def test_open_with_trailing_space_lists_cwd_entries(
     assert "/open pipeline.yaml" in results
 
 
+def test_open_with_multiple_spaces_completes_the_same_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pipeline.yaml").write_text("name: x\n", encoding="utf-8")
+
+    assert resulting_texts_for("/open  pipe") == ["/open  pipeline.yaml"]
+
+
+def test_open_with_only_multiple_spaces_lists_cwd_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pipeline.yaml").write_text("name: x\n", encoding="utf-8")
+
+    assert "/open    pipeline.yaml" in resulting_texts_for("/open    ")
+
+
 def test_no_match_path_completion_yields_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
