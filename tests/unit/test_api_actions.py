@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -204,6 +205,33 @@ def test_trigger_missing_and_changed_sources_fail_safely(tmp_path: Path) -> None
     invalid = client.post("/api/v1/dags/orders/runs", json={"confirm": True})
     assert invalid.status_code == 409
     assert invalid.json()["detail"]["code"] == "dag_configuration_invalid"
+
+
+def test_trigger_accepts_encoded_dag_names_with_path_separators(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    dag_path = tmp_path / "encoded.yaml"
+    _write_dag(dag_path)
+    dag_name = "orders / percent% 東京"
+    dag_path.write_text(
+        dag_path.read_text(encoding="utf-8").replace("name: orders", f"name: {dag_name}"),
+        encoding="utf-8",
+    )
+    client = _client(database)
+    assert (
+        client.post(
+            "/api/v1/dags/registrations",
+            json={"source_path": str(dag_path), "force": False},
+        ).status_code
+        == 201
+    )
+
+    response = client.post(
+        f"/api/v1/dags/{quote(dag_name, safe='')}/runs",
+        json={"confirm": True},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["dag_name"] == dag_name
 
 
 def test_unexpected_task_exception_remains_contained(

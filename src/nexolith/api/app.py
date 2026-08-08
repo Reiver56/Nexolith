@@ -322,7 +322,7 @@ def create_app(
         return await execute_query(lambda service: service.get_dag(dag_name))
 
     @app.post(
-        "/api/v1/dags/{dag_name}/runs",
+        "/api/v1/dags/{dag_name:path}/runs",
         response_model=DagRunActionResponse,
         status_code=201,
         responses={
