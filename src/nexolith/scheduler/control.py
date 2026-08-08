@@ -18,7 +18,6 @@ from nexolith.scheduler.pidfile import (
     PidFileOwnerStatus,
     PidFileRecord,
     default_pidfile_path,
-    is_process_alive,
     pidfile_owner_status,
     read_pidfile,
     stop_pidfile_owner,
@@ -83,7 +82,6 @@ SchedulerStatusQuery = Callable[[], SchedulerStatusSnapshot]
 PidFileReader = Callable[[Path], PidFileRecord | None]
 PidFileOwnerQuery = Callable[[PidFileRecord], PidFileOwnerStatus]
 PidFileTerminator = Callable[[PidFileRecord], ProcessTerminationStatus]
-ProcessAliveQuery = Callable[[int], bool]
 _START_LOCK = threading.Lock()
 
 
@@ -222,7 +220,6 @@ def stop_scheduler_process(
     read_record: PidFileReader = read_pidfile,
     owner_query: PidFileOwnerQuery = pidfile_owner_status,
     terminate: PidFileTerminator = stop_pidfile_owner,
-    alive: ProcessAliveQuery = is_process_alive,
     sleep: Callable[[float], None] = time.sleep,
     platform: str = sys.platform,
 ) -> SchedulerStopResult:
@@ -254,21 +251,20 @@ def stop_scheduler_process(
         )
 
     for _ in range(20):
-        if not alive(record.pid):
+        if owner_query(record) in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
             return SchedulerStopResult(
                 SchedulerStopState.STOPPED,
                 int(record.pid),
                 forced=platform == "win32",
             )
         sleep(0.1)
-    if alive(record.pid):
-        return SchedulerStopResult(
-            SchedulerStopState.UNCERTAIN,
-            int(record.pid),
-            forced=platform == "win32",
-        )
+    final_owner = owner_query(record)
+    if final_owner in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
+        state = SchedulerStopState.STOPPED
+    else:
+        state = SchedulerStopState.UNCERTAIN
     return SchedulerStopResult(
-        SchedulerStopState.STOPPED,
+        state,
         int(record.pid),
         forced=platform == "win32",
     )

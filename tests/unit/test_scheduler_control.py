@@ -17,6 +17,7 @@ from nexolith.scheduler import (
     SchedulerQueryState,
     SchedulerStartState,
     SchedulerStatusSnapshot,
+    SchedulerStopResult,
     SchedulerStopState,
     query_scheduler_status,
     start_scheduler_process,
@@ -111,66 +112,81 @@ def test_start_failure_and_timeout_clean_owned_child() -> None:
 
 
 @pytest.mark.parametrize(
-    ("owner_status", "termination", "alive_values", "expected"),
+    ("owner_statuses", "termination", "expected"),
     [
         (
-            PidFileOwnerStatus.DEAD,
+            [PidFileOwnerStatus.DEAD],
             ProcessTerminationStatus.SENT,
-            [],
             SchedulerStopState.NOT_RUNNING,
         ),
         (
-            PidFileOwnerStatus.REUSED,
+            [PidFileOwnerStatus.REUSED],
             ProcessTerminationStatus.SENT,
-            [],
             SchedulerStopState.NOT_RUNNING,
         ),
         (
-            PidFileOwnerStatus.MATCHING,
+            [PidFileOwnerStatus.MATCHING],
             ProcessTerminationStatus.IDENTITY_MISMATCH,
-            [],
             SchedulerStopState.NOT_RUNNING,
         ),
         (
-            PidFileOwnerStatus.MATCHING,
+            [PidFileOwnerStatus.MATCHING, PidFileOwnerStatus.DEAD],
             ProcessTerminationStatus.SENT,
-            [False],
             SchedulerStopState.STOPPED,
         ),
         (
-            PidFileOwnerStatus.MATCHING,
+            [PidFileOwnerStatus.MATCHING] * 22,
             ProcessTerminationStatus.SENT,
-            [True] * 21,
             SchedulerStopState.UNCERTAIN,
         ),
     ],
 )
 def test_stop_identity_bound_outcomes(
     tmp_path: Path,
-    owner_status: PidFileOwnerStatus,
+    owner_statuses: list[PidFileOwnerStatus],
     termination: ProcessTerminationStatus,
-    alive_values: list[bool],
     expected: SchedulerStopState,
 ) -> None:
     marker = tmp_path / "scheduler.pid"
     marker.write_text("owned", encoding="utf-8")
     record = PidFileRecord(4242, "then", 10)
     signals: list[PidFileRecord] = []
-    values = iter(alive_values)
+    statuses = iter(owner_statuses)
 
     result = stop_scheduler_process(
         marker,
         read_record=lambda _path: record,
-        owner_query=lambda _record: owner_status,
+        owner_query=lambda _record: next(statuses),
         terminate=lambda seen: signals.append(seen) or termination,
-        alive=lambda _pid: next(values),
         sleep=lambda _seconds: None,
         platform="win32",
     )
 
     assert result.state is expected
-    if owner_status is not PidFileOwnerStatus.MATCHING:
+    if owner_statuses[0] is not PidFileOwnerStatus.MATCHING:
         assert signals == []
+
+
+def test_stop_reports_stopped_if_pid_is_reused_during_wait(tmp_path: Path) -> None:
+    marker = tmp_path / "scheduler.pid"
+    marker.write_text("owned", encoding="utf-8")
+    record = PidFileRecord(4242, "then", 10)
+    statuses = iter([PidFileOwnerStatus.MATCHING, PidFileOwnerStatus.REUSED])
+
+    result = stop_scheduler_process(
+        marker,
+        read_record=lambda _path: record,
+        owner_query=lambda _record: next(statuses),
+        terminate=lambda _record: ProcessTerminationStatus.SENT,
+        sleep=lambda _seconds: None,
+        platform="win32",
+    )
+
+    assert result == SchedulerStopResult(
+        SchedulerStopState.STOPPED,
+        pid=4242,
+        forced=True,
+    )
 
 
 @pytest.mark.parametrize("status", [PidFileOwnerStatus.LEGACY, PidFileOwnerStatus.UNAVAILABLE])

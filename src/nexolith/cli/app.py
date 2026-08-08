@@ -47,7 +47,6 @@ from nexolith.scheduler import (
     SchedulerQueryState,
     acquire_pidfile,
     default_pidfile_path,
-    is_process_alive,
     pidfile_owner_status,
     query_scheduler_status,
     read_pidfile,
@@ -230,7 +229,6 @@ def scheduler_stop() -> None:
             read_record=read_pidfile,
             owner_query=pidfile_owner_status,
             terminate=stop_pidfile_owner,
-            alive=is_process_alive,
             sleep=time.sleep,
             platform=sys.platform,
         )
