@@ -84,6 +84,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/dags/{dag_name}/graph": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get DAG dependency graph data
+         * @description Returns the current safe DAG structure and latest persisted task statuses in one read-only response. Cross-DAG triggers remain DAG-level relationships.
+         */
+        get: operations["get_dag_graph"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/dags/{dag_name}/runs": {
         parameters: {
             query?: never;
@@ -269,6 +289,44 @@ export interface components {
             /** Tasks */
             tasks: components["schemas"]["DagTaskResponse"][];
             trigger: components["schemas"]["DagTriggerResponse"] | null;
+        };
+        /** DagGraphHistoricalTaskResponse */
+        DagGraphHistoricalTaskResponse: {
+            /** Name */
+            name: string;
+            status: components["schemas"]["TaskRunStatus"];
+        };
+        /** DagGraphResponse */
+        DagGraphResponse: {
+            latest_run: components["schemas"]["DagGraphRunResponse"] | null;
+            /** Name */
+            name: string;
+            /** Tasks */
+            tasks: components["schemas"]["DagGraphTaskResponse"][];
+            trigger: components["schemas"]["DagTriggerResponse"] | null;
+            /** Unmapped Task History */
+            unmapped_task_history: components["schemas"]["DagGraphHistoricalTaskResponse"][];
+        };
+        /** DagGraphRunResponse */
+        DagGraphRunResponse: {
+            /** Ended At */
+            ended_at: string | null;
+            /** Id */
+            id: number;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            status: components["schemas"]["DagRunStatus"];
+        };
+        /** DagGraphTaskResponse */
+        DagGraphTaskResponse: {
+            /** Depends On */
+            depends_on: string[];
+            /** Name */
+            name: string;
+            status: components["schemas"]["TaskRunStatus"] | null;
         };
         /** DagListResponse */
         DagListResponse: components["schemas"]["DagSummaryResponse"][];
@@ -732,6 +790,83 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DagDetailResponse"];
+                };
+            };
+            /** @description Host is not allowed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description DAG not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description DAG source unavailable or invalid. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal service error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description State or scheduler identity unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_dag_graph: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Registered DAG name. */
+                dag_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DagGraphResponse"];
                 };
             };
             /** @description Host is not allowed. */

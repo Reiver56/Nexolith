@@ -129,6 +129,32 @@ class DagDetailResponse(DagSummaryResponse):
     tasks: list[DagTaskResponse]
 
 
+class DagGraphTaskResponse(ApiModel):
+    name: str
+    depends_on: list[str]
+    status: TaskRunStatus | None
+
+
+class DagGraphHistoricalTaskResponse(ApiModel):
+    name: str
+    status: TaskRunStatus
+
+
+class DagGraphRunResponse(ApiModel):
+    id: int = Field(ge=1)
+    status: DagRunStatus
+    started_at: datetime
+    ended_at: datetime | None
+
+
+class DagGraphResponse(ApiModel):
+    name: str
+    trigger: DagTriggerResponse | None
+    tasks: list[DagGraphTaskResponse]
+    latest_run: DagGraphRunResponse | None
+    unmapped_task_history: list[DagGraphHistoricalTaskResponse]
+
+
 class RunSummaryResponse(ApiModel):
     id: int
     dag_name: str

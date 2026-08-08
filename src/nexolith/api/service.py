@@ -9,6 +9,10 @@ from typing import cast
 from nexolith.api.models import (
     ApiErrorCode,
     DagDetailResponse,
+    DagGraphHistoricalTaskResponse,
+    DagGraphResponse,
+    DagGraphRunResponse,
+    DagGraphTaskResponse,
     DagRegistrationResponse,
     DagRegistrationStatus,
     DagRunActionResponse,
@@ -75,6 +79,48 @@ class ApiQueryService:
                     retry_backoff_multiplier=task.retry_backoff_multiplier,
                 )
                 for task in config.tasks
+            ],
+        )
+
+    def get_dag_graph(self, dag_name: str) -> DagGraphResponse:
+        record = self._store.get_dag(dag_name)
+        if record is None:
+            raise ApiQueryError(ApiErrorCode.DAG_NOT_FOUND, 404, "DAG not found.")
+        config = self._required_dag_config(record)
+        latest = self._store.latest_dag_run(dag_name)
+        current_names = {task.name for task in config.tasks}
+        task_history = self._store.list_task_runs(latest.id) if latest is not None else []
+        statuses = {task.task_name: task.status for task in task_history}
+        trigger = (
+            DagTriggerResponse(on_success_of=list(config.trigger.on_success_of))
+            if config.trigger is not None
+            else None
+        )
+        return DagGraphResponse(
+            name=record.name,
+            trigger=trigger,
+            tasks=[
+                DagGraphTaskResponse(
+                    name=task.name,
+                    depends_on=list(task.depends_on),
+                    status=statuses.get(task.name),
+                )
+                for task in config.tasks
+            ],
+            latest_run=(
+                DagGraphRunResponse(
+                    id=latest.id,
+                    status=latest.status,
+                    started_at=_timestamp(latest.started_at),
+                    ended_at=_optional_timestamp(latest.ended_at),
+                )
+                if latest is not None
+                else None
+            ),
+            unmapped_task_history=[
+                DagGraphHistoricalTaskResponse(name=task.task_name, status=task.status)
+                for task in task_history
+                if task.task_name not in current_names
             ],
         )
 

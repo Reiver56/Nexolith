@@ -1,33 +1,48 @@
 # Nexolith React monitoring UI
 
-NXL-113 establishes the v0.3.4 browser monitoring foundation. It is a source-only React SPA with
-three stable views:
+NXL-113 establishes the v0.3.4 browser monitoring foundation and NXL-114 adds its read-only DAG
+graph. It is a source-only React SPA with these stable views:
 
 | Route | View |
 |---|---|
 | `/` | Redirect to `/dags` |
 | `/dags` | Registered DAG state, schedule, priority, severity, and trigger summary |
+| `/dags/:dagName/graph` | Interactive task dependencies and latest persisted task status |
 | `/runs` | Bounded newest-first run history |
 | `/runs/:runId` | Run, task, and retry-attempt history |
 
 The UI is intentionally read-only. It does not register or trigger DAGs, edit YAML, start or stop
-the scheduler, render a React Flow graph, stream logs, or retry mutation requests. NXL-114 owns the
-graph; NXL-115 owns action controls and confirmations.
+the scheduler, stream logs, or retry mutation requests. The graph permits view-only pan, zoom,
+selection, and reset interactions; it never changes dependencies or persisted state. NXL-115 owns
+action controls and confirmations.
 
 ## Stack and boundaries
 
 - React 19 and React DOM provide the view layer.
+- React Flow renders the controlled dependency canvas, default attribution included. Nexolith owns
+  deterministic layout and never enables node dragging, connecting, deletion, or persistence.
 - TypeScript strict mode and generated OpenAPI declarations keep the Python/TypeScript contract
   singular.
 - Vite 8 provides the development server and production build; a small internal History API router
-  avoids a routing dependency for three routes.
+  avoids a routing dependency for the small route set.
 - Vitest, jsdom, and Testing Library cover DOM behavior and accessibility semantics.
 - ESLint with `typescript-eslint` and React hooks rules provides static analysis.
-- `openapi-typescript` is build tooling only. React and React DOM are the only runtime dependencies.
+- `openapi-typescript` is build tooling only. React, React DOM, and React Flow are the runtime UI
+  dependencies.
 
 Node 24.18.0 LTS is pinned in the repository `.node-version`; npm 11 and the committed lockfile are
 required. No remote fonts, CDN assets, analytics, runtime scripts, component framework, global
-state framework, React Flow dependency, or frontend secret is used.
+state framework, automatic layout dependency, or frontend secret is used.
+
+The graph requests one typed `GET /api/v1/dags/{dag_name}/graph` response. Current task names and
+dependencies always come from the current DAG definition; statuses come only from its latest
+persisted run. Historical tasks no longer present in the definition are disclosed below the graph,
+not drawn as current nodes. Cross-DAG `on_success_of` relationships remain distinct DAG-level
+nodes and dashed edges. Equivalent inputs produce the same layered layout.
+
+Polling starts only after the preceding request settles, pauses and aborts while the document is
+hidden, and preserves the last good graph if a background refresh fails. Automatic refresh never
+resets the operator's viewport; the explicit Reset layout control does.
 
 ## Local development
 
@@ -81,9 +96,10 @@ npm run build
 ```
 
 Tests use deterministic `fetch` fixtures; they require no database, PostgreSQL, Docker, scheduler,
-or external network. They verify loading/empty/error states, status semantics, route validation,
-keyboard access, cancellation, responsive table metadata, secret/path exclusion, and the absence
-of mutating HTTP methods.
+or external network. They verify loading/empty/error states, deterministic layout and edge
+deduplication, task/cross-DAG separation, status semantics, encoded route names, keyboard access,
+poll cancellation/non-overlap, responsive metadata, secret/path exclusion, and the absence of
+mutating HTTP methods.
 
 The production output is temporary verification material under `web/dist/`; it is not committed,
 packaged in the Python wheel, published, or deployed by this story. The source distribution keeps

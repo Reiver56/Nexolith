@@ -6,6 +6,7 @@ import { EmptyState, ErrorState, LoadingState, RefreshButton } from "../../compo
 import { PageHeader } from "../../components/PageHeader";
 import { StatusBadge } from "../../components/StatusBadge";
 import { useApiResource } from "../../hooks/useApiResource";
+import { AppLink, dagGraphPath } from "../../router";
 
 function scheduleFor(dag: DagSummary): string {
   return dag.current_schedule ?? dag.registered_schedule ?? "Event-driven";
@@ -59,6 +60,7 @@ export function DagListPage() {
                   <th scope="col">Priority</th>
                   <th scope="col">Severity</th>
                   <th scope="col">Trigger</th>
+                  <th scope="col"><span className="sr-only">Graph</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -96,6 +98,15 @@ export function DagListPage() {
                         )}
                       </td>
                       <td data-label="Trigger">{triggerFor(dag)}</td>
+                      <td data-label="Graph">
+                        {dag.source_status === "available" ? (
+                          <AppLink className="run-link" to={dagGraphPath(dag.name)}>
+                            View graph <span aria-hidden="true">→</span>
+                          </AppLink>
+                        ) : (
+                          <span className="muted">Unavailable</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
               </tbody>

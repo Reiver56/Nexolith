@@ -1,5 +1,6 @@
 import type {
   ApiInfo,
+  DagGraph,
   DagList,
   RunDetail,
   RunList,
@@ -47,6 +48,23 @@ export const dags: DagList = [
     source_status: "available",
   },
 ];
+
+export const dagGraph: DagGraph = {
+  name: "billing-close",
+  trigger: { on_success_of: ["warehouse-refresh", "inventory sync"] },
+  tasks: [
+    { name: "extract", depends_on: [], status: "succeeded" },
+    { name: "enrich", depends_on: ["extract"], status: "running" },
+    { name: "publish", depends_on: ["extract", "enrich"], status: "blocked" },
+  ],
+  latest_run: {
+    id: 12,
+    status: "interrupted",
+    started_at: "2026-08-08T10:00:00Z",
+    ended_at: "2026-08-08T10:01:00Z",
+  },
+  unmapped_task_history: [{ name: "retired-task", status: "skipped" }],
+};
 
 export const runs: RunList = [
   {
