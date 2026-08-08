@@ -21,6 +21,7 @@ def run_api_server(
     host: str,
     port: int,
     *,
+    trusted_hosts: tuple[str, ...] = (),
     runner: ServerRunner | None = None,
     app_loader: Callable[[], object] | None = None,
 ) -> None:
@@ -35,8 +36,15 @@ def run_api_server(
             application = app_loader()
         else:
             app_module = importlib.import_module("nexolith.api.app")
-            create_app = cast(Callable[[], object], app_module.create_app)
-            application = create_app()
+            create_app = cast(Callable[..., object], app_module.create_app)
+            if host in {"0.0.0.0", "::"} and not trusted_hosts:
+                raise ApiServerStartupError(
+                    "Wildcard API binds require at least one explicit trusted host."
+                )
+            allowed_hosts = tuple(
+                dict.fromkeys(("127.0.0.1", "localhost", "::1", host, *trusted_hosts))
+            )
+            application = create_app(allowed_hosts=allowed_hosts)
     except ModuleNotFoundError as exc:
         if exc.name in {"fastapi", "uvicorn"}:
             raise ApiDependenciesUnavailable(

@@ -322,6 +322,7 @@ def execute_dag(
     application: PipelineRunnerApplication | None = None,
     *,
     trigger_reason: str = "manual",
+    expected_name: str | None = None,
 ) -> int:
     """Load, fully validate (via `load_dag()` -- structure, cycles, and
     every referenced pipeline), and execute the DAG at `path`. The one
@@ -330,4 +331,6 @@ def execute_dag(
     Returns the new `dag_runs` row's id.
     """
     dag = load_dag(path)
+    if expected_name is not None and dag.name != expected_name:
+        raise ConfigurationError("The registered DAG source declares a different DAG name.")
     return DagExecutor(store, application).run(dag, path, trigger_reason=trigger_reason)

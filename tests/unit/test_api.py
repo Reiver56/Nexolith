@@ -35,6 +35,7 @@ from nexolith.state import StateStore
 
 _IDENTITY = ProcessIdentity(pid=4242, create_time_ns=1_700_000_000_000_000_000)
 _SECRET = "NXL_SENTINEL_PASSWORD_7e3a"
+_BASE_URL = "http://127.0.0.1"
 
 
 def _dag_document(*, schedule: str = "5m") -> str:
@@ -85,7 +86,8 @@ def _client(
         create_app(
             store_factory=_store_factory(database_path),
             scheduler_status_query=scheduler_query,
-        )
+        ),
+        base_url=_BASE_URL,
     )
 
 
@@ -105,7 +107,7 @@ def test_application_creation_does_not_open_state_store() -> None:
 def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path]) -> None:
     database_path, _ = api_state
     application = create_app(store_factory=_store_factory(database_path))
-    client = TestClient(application)
+    client = TestClient(application, base_url=_BASE_URL)
 
     assert client.get("/docs").status_code == 200
     metadata = client.get("/api/v1")
@@ -113,25 +115,34 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert metadata.json() == {
         "api_version": "v1",
         "package_version": "0.3.0",
-        "read_only": True,
+        "read_only": False,
+        "actions_enabled": True,
     }
 
     schema = client.get("/openapi.json").json()
     expected_operations = {
         ("/api/v1", "get"): "get_api_info",
         ("/api/v1/dags", "get"): "list_dags",
+        ("/api/v1/dags/registrations", "post"): "register_dag",
         ("/api/v1/dags/{dag_name}", "get"): "get_dag",
+        ("/api/v1/dags/{dag_name}/runs", "post"): "trigger_dag_run",
         ("/api/v1/runs", "get"): "list_runs",
         ("/api/v1/runs/{run_id}", "get"): "get_run",
         ("/api/v1/scheduler", "get"): "get_scheduler_status",
+        ("/api/v1/scheduler/start", "post"): "start_scheduler",
+        ("/api/v1/scheduler/stop", "post"): "stop_scheduler",
     }
     expected_success_schemas = {
-        "/api/v1": {"$ref": "#/components/schemas/ApiInfoResponse"},
-        "/api/v1/dags": {"$ref": "#/components/schemas/DagListResponse"},
-        "/api/v1/dags/{dag_name}": {"$ref": "#/components/schemas/DagDetailResponse"},
-        "/api/v1/runs": {"$ref": "#/components/schemas/RunListResponse"},
-        "/api/v1/runs/{run_id}": {"$ref": "#/components/schemas/RunDetailResponse"},
-        "/api/v1/scheduler": {"$ref": "#/components/schemas/SchedulerStatusResponse"},
+        ("/api/v1", "get"): ("200", "ApiInfoResponse"),
+        ("/api/v1/dags", "get"): ("200", "DagListResponse"),
+        ("/api/v1/dags/registrations", "post"): ("200", "DagRegistrationResponse"),
+        ("/api/v1/dags/{dag_name}", "get"): ("200", "DagDetailResponse"),
+        ("/api/v1/dags/{dag_name}/runs", "post"): ("201", "DagRunActionResponse"),
+        ("/api/v1/runs", "get"): ("200", "RunListResponse"),
+        ("/api/v1/runs/{run_id}", "get"): ("200", "RunDetailResponse"),
+        ("/api/v1/scheduler", "get"): ("200", "SchedulerStatusResponse"),
+        ("/api/v1/scheduler/start", "post"): ("200", "SchedulerStartResponse"),
+        ("/api/v1/scheduler/stop", "post"): ("200", "SchedulerStopResponse"),
     }
     assert {
         (path, method): operation["operationId"]
@@ -141,13 +152,13 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert {tag["name"] for tag in schema["tags"]} == {"meta", "dags", "runs", "scheduler"}
     for path, method in expected_operations:
         operation = schema["paths"][path][method]
-        assert (
-            operation["responses"]["200"]["content"]["application/json"]["schema"]
-            == (expected_success_schemas[path])
-        )
+        success_code, component = expected_success_schemas[(path, method)]
+        assert operation["responses"][success_code]["content"]["application/json"]["schema"] == {
+            "$ref": f"#/components/schemas/{component}"
+        }
         assert operation["tags"]
         for code, response in operation["responses"].items():
-            if code != "200" and "content" in response:
+            if code not in {"200", "201", "202"} and "content" in response:
                 assert response["content"]["application/json"]["schema"] == {
                     "$ref": "#/components/schemas/ErrorResponse"
                 }
@@ -172,8 +183,23 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert run_parameter["required"] is True
     assert run_parameter["schema"]["type"] == "integer"
 
-    mutating_methods = {"post", "put", "patch", "delete"}
-    assert not any(mutating_methods.intersection(item) for item in schema["paths"].values())
+    mutation_operations = {
+        (path, method)
+        for path, item in schema["paths"].items()
+        for method in {"post", "put", "patch", "delete"}.intersection(item)
+    }
+    assert mutation_operations == {
+        ("/api/v1/dags/registrations", "post"),
+        ("/api/v1/dags/{dag_name}/runs", "post"),
+        ("/api/v1/scheduler/start", "post"),
+        ("/api/v1/scheduler/stop", "post"),
+    }
+    assert schema["paths"]["/api/v1/dags/registrations"]["post"]["responses"]["201"]["content"][
+        "application/json"
+    ]["schema"] == {"$ref": "#/components/schemas/DagRegistrationResponse"}
+    assert schema["paths"]["/api/v1/scheduler/stop"]["post"]["responses"]["202"]["content"][
+        "application/json"
+    ]["schema"] == {"$ref": "#/components/schemas/SchedulerStopResponse"}
     assert "HTTPValidationError" not in schema["components"]["schemas"]
     schema_text = json.dumps(schema)
     component_text = json.dumps(schema["components"]["schemas"]).lower()
@@ -181,7 +207,6 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert str(database_path) not in schema_text
     assert "examples" not in component_text
     forbidden_component_terms = {
-        "source_path",
         "owner_pid",
         "owner_create_time_ns",
         "parameters",
@@ -441,7 +466,7 @@ def test_request_scoped_store_stays_on_one_thread_and_closes(tmp_path: Path) -> 
         created.append(store)
         return store
 
-    client = TestClient(create_app(store_factory=factory))
+    client = TestClient(create_app(store_factory=factory), base_url=_BASE_URL)
     assert client.get("/api/v1/dags").status_code == 200
     assert client.get("/api/v1/dags").status_code == 200
 
@@ -474,7 +499,7 @@ async def test_slow_state_read_does_not_stall_event_loop(tmp_path: Path) -> None
     timer = threading.Timer(1, release.set)
     timer.start()
     try:
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with AsyncClient(transport=transport, base_url=_BASE_URL) as client:
             started_at = time.perf_counter()
             slow_request = asyncio.create_task(client.get("/api/v1/dags"))
             await asyncio.sleep(0.05)
@@ -495,7 +520,9 @@ def test_unavailable_state_returns_typed_safe_error() -> None:
     def unavailable() -> StateStore:
         raise sqlite3.OperationalError(_SECRET)
 
-    response = TestClient(create_app(store_factory=unavailable)).get("/api/v1/dags")
+    response = TestClient(create_app(store_factory=unavailable), base_url=_BASE_URL).get(
+        "/api/v1/dags"
+    )
 
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "state_unavailable"
@@ -503,20 +530,35 @@ def test_unavailable_state_returns_typed_safe_error() -> None:
 
 
 def test_api_cli_delegates_defaults_and_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[str, int, tuple[str, ...]]] = []
     monkeypatch.setattr(
         sys.modules["nexolith.cli.app"],
         "run_api_server",
-        lambda host, port: calls.append((host, port)),
+        lambda host, port, *, trusted_hosts=(): calls.append((host, port, trusted_hosts)),
     )
     runner = CliRunner()
 
     default = runner.invoke(cli_app, ["api", "start"])
-    custom = runner.invoke(cli_app, ["api", "start", "--host", "0.0.0.0", "--port", "9000"])
+    custom = runner.invoke(
+        cli_app,
+        [
+            "api",
+            "start",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+            "--trusted-host",
+            "nexolith.internal",
+        ],
+    )
 
     assert default.exit_code == 0
     assert custom.exit_code == 0
-    assert calls == [("127.0.0.1", 8765), ("0.0.0.0", 9000)]
+    assert calls == [
+        ("127.0.0.1", 8765, ()),
+        ("0.0.0.0", 9000, ("nexolith.internal",)),
+    ]
     assert "no authentication" in custom.stderr
 
 
@@ -530,7 +572,7 @@ def test_api_cli_delegates_defaults_and_options(monkeypatch: pytest.MonkeyPatch)
 def test_api_cli_expected_startup_errors_are_clean(
     monkeypatch: pytest.MonkeyPatch, error: RuntimeError
 ) -> None:
-    def fail(_host: str, _port: int) -> None:
+    def fail(_host: str, _port: int, **_kwargs: object) -> None:
         raise error
 
     monkeypatch.setattr(sys.modules["nexolith.cli.app"], "run_api_server", fail)
@@ -566,3 +608,8 @@ def test_api_server_redacts_bind_error() -> None:
             app_loader=object,
         )
     assert _SECRET not in str(caught.value)
+
+
+def test_api_server_wildcard_bind_requires_explicit_trusted_host() -> None:
+    with pytest.raises(ApiServerStartupError, match="explicit trusted host"):
+        run_api_server("0.0.0.0", 8765, runner=lambda _app, **_kwargs: None)

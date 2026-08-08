@@ -1,3 +1,13 @@
+from nexolith.scheduler.control import (
+    SchedulerControlError,
+    SchedulerControlFailure,
+    SchedulerStartResult,
+    SchedulerStartState,
+    SchedulerStopResult,
+    SchedulerStopState,
+    start_scheduler_process,
+    stop_scheduler_process,
+)
 from nexolith.scheduler.daemon import Scheduler
 from nexolith.scheduler.interval import parse_interval
 from nexolith.scheduler.pidfile import (
@@ -27,8 +37,14 @@ __all__ = [
     "PidFileOwnerStatus",
     "PidFileRecord",
     "Scheduler",
+    "SchedulerControlError",
+    "SchedulerControlFailure",
     "SchedulerQueryState",
     "SchedulerStatusSnapshot",
+    "SchedulerStartResult",
+    "SchedulerStartState",
+    "SchedulerStopResult",
+    "SchedulerStopState",
     "acquire_pidfile",
     "default_pidfile_path",
     "is_process_alive",
@@ -38,6 +54,8 @@ __all__ = [
     "read_pidfile",
     "release_pidfile",
     "stop_pidfile_owner",
+    "start_scheduler_process",
+    "stop_scheduler_process",
     "stop_process",
     "write_pidfile",
 ]

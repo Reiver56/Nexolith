@@ -21,6 +21,13 @@ class ApiErrorCode(StrEnum):
     RUN_NOT_FOUND = "run_not_found"
     DAG_SOURCE_MISSING = "dag_source_missing"
     DAG_CONFIGURATION_INVALID = "dag_configuration_invalid"
+    ORIGIN_NOT_ALLOWED = "origin_not_allowed"
+    UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
+    HOST_NOT_ALLOWED = "host_not_allowed"
+    RESOURCE_NOT_FOUND = "resource_not_found"
+    SCHEDULER_ALREADY_RUNNING = "scheduler_already_running"
+    SCHEDULER_CONTROL_UNAVAILABLE = "scheduler_control_unavailable"
     REQUEST_VALIDATION_ERROR = "request_validation_error"
     STATE_UNAVAILABLE = "state_unavailable"
     SCHEDULER_IDENTITY_UNAVAILABLE = "scheduler_identity_unavailable"
@@ -39,7 +46,47 @@ class ErrorResponse(ApiModel):
 class ApiInfoResponse(ApiModel):
     api_version: Literal["v1"]
     package_version: str
-    read_only: Literal[True]
+    read_only: bool
+    actions_enabled: Literal[True]
+
+
+class ConfirmedActionRequest(ApiModel):
+    confirm: Literal[True]
+
+
+class RegisterDagRequest(ApiModel):
+    source_path: str = Field(min_length=1)
+    force: bool = False
+
+
+class DagRegistrationStatus(StrEnum):
+    CREATED = "created"
+    UPDATED = "updated"
+    UNCHANGED = "unchanged"
+
+
+class DagRegistrationResponse(ApiModel):
+    dag_name: str
+    status: DagRegistrationStatus
+    enabled: bool
+    schedule: str | None
+
+
+class DagRunActionResponse(ApiModel):
+    run_id: int = Field(ge=1)
+    dag_name: str
+    status: DagRunStatus
+
+
+class SchedulerStartResponse(ApiModel):
+    state: Literal["started"]
+    pid: int = Field(ge=1)
+
+
+class SchedulerStopResponse(ApiModel):
+    state: Literal["stopped", "not_running", "uncertain"]
+    pid: int | None = Field(default=None, ge=1)
+    forced: bool
 
 
 class DagSourceStatus(StrEnum):

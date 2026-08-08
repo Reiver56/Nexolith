@@ -56,11 +56,16 @@ Presentation belongs here. The classic `validate` and `run` commands are thin ad
 shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
 
 `nexolith api start` is a foreground adapter over `nexolith.api.server`. It defaults to
-`127.0.0.1:8765`, supports explicit `--host` and `--port` options, and imports FastAPI/Uvicorn only
-after the command is invoked. Other CLI commands therefore work without the `api` extra. Expected
-missing-extra and bind failures are concise stderr diagnostics with exit code `1`; a non-loopback
-bind also warns that NXL-111 has no authentication. The command never starts a daemon, scheduler,
-browser, or background thread.
+`127.0.0.1:8765`, supports explicit `--host`, `--port`, and repeatable `--trusted-host` options,
+and imports FastAPI/Uvicorn only after invocation. Wildcard binds require an explicit trusted Host;
+non-loopback binds warn that the API has no authentication. The API process itself remains
+foreground. An explicit scheduler-start HTTP action launches the existing `nexolith scheduler
+start` implementation in a separate process; the scheduler survives API shutdown.
+
+Scheduler stop decisions live in `nexolith.scheduler.control` and are shared by CLI and HTTP
+renderers. CLI text and exit codes remain unchanged: PID-plus-creation-time verification,
+stable-handle/pidfd termination, bounded waiting, uncertain results, and observer non-unlinking all
+remain one implementation rather than parallel command logic.
 
 `diagnostics` prints deterministic, issue-friendly environment information. It reports Nexolith,
 Python, platform, dependency, and optional-feature versions without inspecting environment

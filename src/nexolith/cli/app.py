@@ -38,19 +38,21 @@ from nexolith.cli.scheduler_render import (
 from nexolith.dag import execute_dag, load_dag, register_dag
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
-from nexolith.process_identity import ProcessIdentityUnavailable, ProcessTerminationStatus
+from nexolith.process_identity import ProcessIdentityUnavailable
 from nexolith.scheduler import (
     PidFileOwnerStatus,
     Scheduler,
+    SchedulerControlError,
+    SchedulerControlFailure,
     SchedulerQueryState,
     acquire_pidfile,
     default_pidfile_path,
-    is_process_alive,
     pidfile_owner_status,
     query_scheduler_status,
     read_pidfile,
     release_pidfile,
     stop_pidfile_owner,
+    stop_scheduler_process,
 )
 from nexolith.state import DagRunStatus, StateStore
 
@@ -62,7 +64,7 @@ app = typer.Typer(
 scheduler_app = typer.Typer(help="Manage the scheduler daemon.")
 runs_app = typer.Typer(help="Observe DAG run history.")
 dag_app = typer.Typer(help="Manage registered DAGs.")
-api_app = typer.Typer(help="Run the read-only monitoring API.")
+api_app = typer.Typer(help="Run the query and explicit-action API.")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(runs_app, name="runs")
 app.add_typer(dag_app, name="dag")
@@ -221,58 +223,46 @@ def scheduler_stop() -> None:
     the scheduler's own terminal for a fully graceful stop.
     """
     pidfile_path = default_pidfile_path()
-    record = read_pidfile(pidfile_path)
-    if record is None:
-        if pidfile_path.exists():
+    try:
+        result = stop_scheduler_process(
+            pidfile_path,
+            read_record=read_pidfile,
+            owner_query=pidfile_owner_status,
+            terminate=stop_pidfile_owner,
+            sleep=time.sleep,
+            platform=sys.platform,
+        )
+    except SchedulerControlError as exc:
+        if exc.reason is SchedulerControlFailure.IDENTITY_UNAVAILABLE:
+            if exc.detail == "corrupt":
+                typer.echo(
+                    "Scheduler stop refused: PID file is corrupt or incomplete; ownership "
+                    "cannot be verified.",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    "Scheduler stop refused: PID file ownership cannot be verified "
+                    f"({exc.detail}).",
+                    err=True,
+                )
+        else:
             typer.echo(
-                "Scheduler stop refused: PID file is corrupt or incomplete; ownership cannot "
-                "be verified.",
+                "Scheduler stop refused: identity-bound termination is not available "
+                f"({exc.detail}).",
                 err=True,
             )
-            raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
+    if result.state.value == "not_running":
         typer.echo(render_scheduler_not_running())
         return
-    owner_status = pidfile_owner_status(record)
-    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
-        typer.echo(render_scheduler_not_running())
-        return
-    if owner_status is not PidFileOwnerStatus.MATCHING:
-        typer.echo(
-            "Scheduler stop refused: PID file ownership cannot be verified "
-            f"({owner_status.value}).",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    if sys.platform == "win32":
+    assert result.pid is not None
+    if result.forced:
         typer.echo(render_windows_stop_caveat(), err=True)
-    termination = stop_pidfile_owner(record)
-    if termination in {
-        ProcessTerminationStatus.NOT_FOUND,
-        ProcessTerminationStatus.IDENTITY_MISMATCH,
-    }:
-        typer.echo(render_scheduler_not_running())
-        return
-    if termination is not ProcessTerminationStatus.SENT:
-        typer.echo(
-            "Scheduler stop refused: identity-bound termination is not available "
-            f"({termination.value}).",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    for _ in range(20):  # ~2s budget for the process to actually exit
-        if not is_process_alive(record.pid):
-            break
-        time.sleep(0.1)
-
-    # Leave marker ownership unchanged: another scheduler may have acquired
-    # the path after this command observed `record`. A later start recovers
-    # the old marker atomically if it is still stale.
-    if is_process_alive(record.pid):
-        typer.echo(render_scheduler_stop_uncertain(record.pid))
+    if result.state.value == "uncertain":
+        typer.echo(render_scheduler_stop_uncertain(result.pid))
     else:
-        typer.echo(render_scheduler_stopped(record.pid))
+        typer.echo(render_scheduler_stopped(result.pid))
 
 
 @scheduler_app.command("status")
@@ -315,15 +305,22 @@ def api_start(
         int,
         typer.Option(min=1, max=65535, help="TCP port for the foreground API server."),
     ] = 8765,
+    trusted_host: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--trusted-host",
+            help="Accepted HTTP Host value; repeat for wildcard/non-loopback deployments.",
+        ),
+    ] = None,
 ) -> None:
-    """Run the read-only monitoring API in the foreground."""
+    """Run the query and explicit-action API in the foreground."""
     if host not in {"127.0.0.1", "::1", "localhost"}:
         typer.echo(
             "Warning: NXL-111 has no authentication; bind only within a trusted environment.",
             err=True,
         )
     try:
-        run_api_server(host, port)
+        run_api_server(host, port, trusted_hosts=tuple(trusted_host or ()))
     except (ApiDependenciesUnavailable, ApiServerStartupError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
