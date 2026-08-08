@@ -2,6 +2,7 @@ import type {
   ApiErrorCode,
   ApiErrorResponse,
   ApiInfo,
+  DagGraph,
   DagList,
   RunDetail,
   RunList,
@@ -16,6 +17,7 @@ export const READ_ONLY_ENDPOINTS = [
   "/api/v1",
   "/api/v1/dags",
   "/api/v1/dags/{dag_name}",
+  "/api/v1/dags/{dag_name}/graph",
   "/api/v1/runs",
   "/api/v1/runs/{run_id}",
   "/api/v1/scheduler",
@@ -90,6 +92,96 @@ export function getApiInfo(signal?: AbortSignal): Promise<ApiInfo> {
 
 export function listDags(signal?: AbortSignal): Promise<DagList> {
   return getJson<DagList>(`${API_BASE}/dags`, signal);
+}
+
+const TASK_STATUSES = new Set([
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "skipped",
+  "blocked",
+]);
+const RUN_STATUSES = new Set(["running", "succeeded", "failed", "interrupted"]);
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isDagGraph(value: unknown): value is DagGraph {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const graph = value as Record<string, unknown>;
+  if (typeof graph.name !== "string" || !Array.isArray(graph.tasks)) {
+    return false;
+  }
+  if (
+    graph.trigger !== null &&
+    (typeof graph.trigger !== "object" ||
+      !isStringArray((graph.trigger as Record<string, unknown>).on_success_of))
+  ) {
+    return false;
+  }
+  const validTasks = graph.tasks.every((task) => {
+    if (typeof task !== "object" || task === null) {
+      return false;
+    }
+    const candidate = task as Record<string, unknown>;
+    return (
+      typeof candidate.name === "string" &&
+      isStringArray(candidate.depends_on) &&
+      (candidate.status === null ||
+        (typeof candidate.status === "string" && TASK_STATUSES.has(candidate.status)))
+    );
+  });
+  if (!validTasks || !Array.isArray(graph.unmapped_task_history)) {
+    return false;
+  }
+  const validHistory = graph.unmapped_task_history.every((task) => {
+    if (typeof task !== "object" || task === null) {
+      return false;
+    }
+    const candidate = task as Record<string, unknown>;
+    return (
+      typeof candidate.name === "string" &&
+      typeof candidate.status === "string" &&
+      TASK_STATUSES.has(candidate.status)
+    );
+  });
+  if (!validHistory || graph.latest_run === undefined) {
+    return false;
+  }
+  if (graph.latest_run === null) {
+    return true;
+  }
+  if (typeof graph.latest_run !== "object") {
+    return false;
+  }
+  const run = graph.latest_run as Record<string, unknown>;
+  return (
+    typeof run.id === "number" &&
+    Number.isInteger(run.id) &&
+    run.id > 0 &&
+    typeof run.status === "string" &&
+    RUN_STATUSES.has(run.status) &&
+    typeof run.started_at === "string" &&
+    (run.ended_at === null || typeof run.ended_at === "string")
+  );
+}
+
+export async function getDagGraph(
+  dagName: string,
+  signal?: AbortSignal,
+): Promise<DagGraph> {
+  const payload = await getJson<unknown>(
+    `${API_BASE}/dags/${encodeURIComponent(dagName)}/graph`,
+    signal,
+  );
+  if (!isDagGraph(payload)) {
+    throw new ApiClientError("Nexolith returned malformed graph data.", 502);
+  }
+  return payload;
 }
 
 export function listRuns(limit = 50, signal?: AbortSignal): Promise<RunList> {

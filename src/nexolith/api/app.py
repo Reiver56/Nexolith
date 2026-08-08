@@ -19,6 +19,7 @@ from nexolith.api.models import (
     ApiInfoResponse,
     ConfirmedActionRequest,
     DagDetailResponse,
+    DagGraphResponse,
     DagListResponse,
     DagRegistrationResponse,
     DagRegistrationStatus,
@@ -240,6 +241,27 @@ def create_app(
     )
     async def list_dags() -> DagListResponse:
         return DagListResponse(await execute_query(lambda service: service.list_dags()))
+
+    @app.get(
+        "/api/v1/dags/{dag_name:path}/graph",
+        response_model=DagGraphResponse,
+        responses={
+            **_COMMON_ERRORS,
+            404: {"model": ErrorResponse, "description": "DAG not found."},
+            409: {"model": ErrorResponse, "description": "DAG source unavailable or invalid."},
+        },
+        tags=["dags"],
+        operation_id="get_dag_graph",
+        summary="Get DAG dependency graph data",
+        description=(
+            "Returns the current safe DAG structure and latest persisted task statuses in one "
+            "read-only response. Cross-DAG triggers remain DAG-level relationships."
+        ),
+    )
+    async def get_dag_graph(
+        dag_name: str = Path(min_length=1, description="Registered DAG name."),
+    ) -> DagGraphResponse:
+        return await execute_query(lambda service: service.get_dag_graph(dag_name))
 
     @app.post(
         "/api/v1/dags/registrations",

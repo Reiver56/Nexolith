@@ -44,6 +44,18 @@
   --text-secondary: var(--neutral-500);
   --border-subtle: rgba(23, 25, 30, 0.1);
   --border-strong: rgba(23, 25, 30, 0.17);
+  --graph-canvas: #f7f8fa;
+  --graph-node-surface: #ffffff;
+  --graph-dag-surface: #f0f5ff;
+  --graph-control-surface: rgba(255, 255, 255, 0.94);
+  --graph-node-border: rgba(23, 25, 30, 0.18);
+  --graph-edge: #667080;
+  --graph-cross-edge: #3978e6;
+  --graph-status-running: #3978e6;
+  --graph-status-succeeded: #147447;
+  --graph-status-failed: #c43b43;
+  --graph-status-warning: #a96500;
+  --graph-status-neutral: #89919f;
 
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -96,6 +108,18 @@
     --surface-muted: rgba(39, 43, 50, 0.72);
     --border-subtle: rgba(255, 255, 255, 0.09);
     --border-strong: rgba(255, 255, 255, 0.16);
+    --graph-canvas: #12151a;
+    --graph-node-surface: #20242b;
+    --graph-dag-surface: #172b4b;
+    --graph-control-surface: rgba(32, 36, 43, 0.96);
+    --graph-node-border: rgba(255, 255, 255, 0.17);
+    --graph-edge: #929baa;
+    --graph-cross-edge: #70a7ff;
+    --graph-status-running: #70a7ff;
+    --graph-status-succeeded: #62ce98;
+    --graph-status-failed: #ff8c92;
+    --graph-status-warning: #f0bd62;
+    --graph-status-neutral: #a2a8b4;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.14), 0 8px 20px rgba(0, 0, 0, 0.12);
     --shadow-lg: 0 22px 60px rgba(0, 0, 0, 0.26);
   }

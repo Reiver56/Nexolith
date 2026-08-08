@@ -106,7 +106,7 @@ export function AppShell({ children, pathname }: { children: ReactNode; pathname
       <footer className="app-footer">
         <span>Read-only monitoring</span>
         <span aria-hidden="true">·</span>
-        <span>NXL-113 · v0.3.4</span>
+        <span>NXL-114 · v0.3.4</span>
       </footer>
     </div>
   );

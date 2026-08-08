@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-import { apiInfo, dags, runDetail, runs, schedulerRunning } from "./fixtures";
+import { apiInfo, dagGraph, dags, runDetail, runs, schedulerRunning } from "./fixtures";
 
 export interface ObservedRequest {
   method: string;
@@ -18,6 +18,7 @@ type RouteValue = RouteResponse | Error;
 const defaultRoutes: Record<string, RouteValue> = {
   "/api/v1": { body: apiInfo },
   "/api/v1/dags": { body: dags },
+  "/api/v1/dags/billing-close/graph": { body: dagGraph },
   "/api/v1/runs": { body: runs },
   "/api/v1/runs/12": { body: runDetail },
   "/api/v1/scheduler": { body: schedulerRunning },

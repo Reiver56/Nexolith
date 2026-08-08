@@ -6,6 +6,7 @@ const NAVIGATION_EVENT = "nexolith:navigate";
 
 export type Route =
   | { page: "dags" }
+  | { page: "dag-graph"; dagName: string }
   | { page: "runs" }
   | { page: "run"; runId: string }
   | { page: "not-found" };
@@ -40,6 +41,14 @@ export function parseRoute(pathname: string): Route {
   if (normalized === "/runs") {
     return { page: "runs" };
   }
+  const graphMatch = /^\/dags\/([^/]+)\/graph$/.exec(normalized);
+  if (graphMatch?.[1] !== undefined) {
+    try {
+      return { page: "dag-graph", dagName: decodeURIComponent(graphMatch[1]) };
+    } catch {
+      return { page: "not-found" };
+    }
+  }
   const runMatch = /^\/runs\/([^/]+)$/.exec(normalized);
   if (runMatch?.[1] !== undefined) {
     try {
@@ -49,6 +58,10 @@ export function parseRoute(pathname: string): Route {
     }
   }
   return { page: "not-found" };
+}
+
+export function dagGraphPath(dagName: string): string {
+  return `/dags/${encodeURIComponent(dagName)}/graph`;
 }
 
 export function useRoute(): { pathname: string; route: Route } {

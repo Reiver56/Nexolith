@@ -31,6 +31,11 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   loading/empty/error states, and no action controls. TypeScript types are generated
   deterministically from the local FastAPI OpenAPI contract and checked for drift in a dedicated
   pinned-Node frontend CI job (NXL-113).
+- Added a read-only interactive DAG dependency graph with deterministic layered layout, latest-run
+  task statuses, distinct cross-DAG trigger boundaries, accessible text summaries, responsive
+  pan/zoom/reset controls, and visibility-aware non-overlapping polling. A minimal typed graph GET
+  endpoint keeps the browser contract complete without exposing source paths or error details
+  (NXL-114).
 
 ### v0.3.1 — CLI Aesthetics
 

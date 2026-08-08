@@ -55,8 +55,8 @@ process](RELEASING.md).
 - Small registries for adding connectors and transformations
 - A Typer CLI with non-zero exit codes on failure
 - An optional, versioned API for DAG/run monitoring and explicit DAG/scheduler actions
-- A polished, responsive React monitoring UI for DAGs, recent runs, run/task/attempt history,
-  and read-only API/scheduler status
+- A polished, responsive React monitoring UI for DAGs, interactive dependency graphs, recent
+  runs, run/task/attempt history, and read-only API/scheduler status
 
 ## Architecture
 
@@ -209,9 +209,12 @@ OpenAPI compatibility guarantees.
 ### React monitoring UI (v0.3.4)
 
 The source-only frontend in [`web/`](web/README.md) provides read-only routes for registered DAGs,
-recent runs, and run detail. It also reports API reachability and scheduler state without exposing
-PID or process identity. NXL-113 intentionally has no registration, trigger, edit, scheduler
-control, or other action button; the NXL-114 graph and NXL-115 actions remain future work.
+interactive task dependency graphs, recent runs, and run detail. Graphs combine the current DAG
+definition with task statuses from its latest persisted run, and display cross-DAG triggers at a
+separate DAG boundary. They support pan, zoom, reset, keyboard focus, and a textual dependency
+summary. The UI also reports API reachability and scheduler state without exposing PID or process
+identity. It has no registration, trigger, edit, scheduler control, or other action button;
+NXL-115 owns browser actions.
 
 Install the API and frontend dependencies, then run both development processes:
 
@@ -545,6 +548,7 @@ Available:
 - [x] A scheduler daemon and persisted execution history
 - [x] A typed REST API for monitoring and explicit DAG/scheduler actions
 - [x] A responsive read-only React UI for DAG and run monitoring
+- [x] Interactive read-only DAG dependency graphs with latest-run task status
 
 See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
@@ -554,7 +558,7 @@ Planned, not implemented:
 - [ ] A custom transformation plugin system
 - [ ] Parallel task execution within a DAG (currently sequential)
 - [ ] Data-quality checks
-- [ ] DAG graph visualization, browser action controls, lineage, metrics, and observability
+- [ ] Browser action controls, lineage, metrics, and observability
 
 ## Contributing, security, and license
 

@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -124,6 +125,7 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1", "get"): "get_api_info",
         ("/api/v1/dags", "get"): "list_dags",
         ("/api/v1/dags/registrations", "post"): "register_dag",
+        ("/api/v1/dags/{dag_name}/graph", "get"): "get_dag_graph",
         ("/api/v1/dags/{dag_name}", "get"): "get_dag",
         ("/api/v1/dags/{dag_name}/runs", "post"): "trigger_dag_run",
         ("/api/v1/runs", "get"): "list_runs",
@@ -136,6 +138,7 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1", "get"): ("200", "ApiInfoResponse"),
         ("/api/v1/dags", "get"): ("200", "DagListResponse"),
         ("/api/v1/dags/registrations", "post"): ("200", "DagRegistrationResponse"),
+        ("/api/v1/dags/{dag_name}/graph", "get"): ("200", "DagGraphResponse"),
         ("/api/v1/dags/{dag_name}", "get"): ("200", "DagDetailResponse"),
         ("/api/v1/dags/{dag_name}/runs", "post"): ("201", "DagRunActionResponse"),
         ("/api/v1/runs", "get"): ("200", "RunListResponse"),
@@ -281,6 +284,75 @@ def test_dag_list_and_detail_read_current_safe_configuration(
     assert client.get("/api/v1/dags/orders").json()["current_schedule"] == "30m"
 
 
+def test_dag_graph_combines_current_structure_with_latest_run_safely(
+    api_state: tuple[Path, Path],
+) -> None:
+    database_path, dag_path = api_state
+    client = _client(database_path)
+
+    no_history = client.get("/api/v1/dags/orders/graph")
+    assert no_history.status_code == 200
+    assert no_history.json() == {
+        "name": "orders",
+        "trigger": {"on_success_of": ["ingest"]},
+        "tasks": [
+            {"name": "extract", "depends_on": [], "status": None},
+            {"name": "publish", "depends_on": ["extract"], "status": None},
+        ],
+        "latest_run": None,
+        "unmapped_task_history": [],
+    }
+
+    store = StateStore(database_path, process_identity=lambda: _IDENTITY)
+    run_id = store.start_dag_run(
+        "orders",
+        ["extract", "publish", "retired_task"],
+        trigger_reason="manual",
+    )
+    store.start_task_run(run_id, "extract")
+    store.complete_task_run(run_id, "extract", success=True)
+    store.start_task_run(run_id, "publish")
+    store.block_task_run(run_id, "retired_task")
+    store.interrupt_abandoned_dag_runs(lambda _pid: ProcessIdentityLookup.not_found())
+    store.close()
+
+    graph = client.get("/api/v1/dags/orders/graph")
+    assert graph.status_code == 200
+    payload = graph.json()
+    assert payload["tasks"] == [
+        {"name": "extract", "depends_on": [], "status": "succeeded"},
+        {"name": "publish", "depends_on": ["extract"], "status": "running"},
+    ]
+    assert payload["latest_run"]["id"] == run_id
+    assert payload["latest_run"]["status"] == "interrupted"
+    assert payload["unmapped_task_history"] == [{"name": "retired_task", "status": "blocked"}]
+    assert _SECRET not in graph.text
+    assert str(dag_path) not in graph.text
+
+
+@pytest.mark.parametrize(
+    "dag_name",
+    ["percent%name", "slash/name", "space name", "caffè-東京", "query?#name"],
+)
+def test_dag_graph_route_round_trips_encoded_names(tmp_path: Path, dag_name: str) -> None:
+    database_path = tmp_path / "state.db"
+    dag_path = tmp_path / "encoded-name.yaml"
+    document = _dag_document().replace(
+        "name: orders",
+        f"name: {json.dumps(dag_name, ensure_ascii=False)}",
+    )
+    dag_path.write_text(document, encoding="utf-8")
+    store = StateStore(database_path, process_identity=lambda: _IDENTITY)
+    store.register_dag(dag_name, dag_path, "1h")
+    store.close()
+
+    response = _client(database_path).get(f"/api/v1/dags/{quote(dag_name, safe='')}/graph")
+
+    assert response.status_code == 200
+    assert response.json()["name"] == dag_name
+    assert response.json()["tasks"][0]["name"] == "extract"
+
+
 def test_missing_invalid_and_unknown_dags_return_safe_errors(
     api_state: tuple[Path, Path],
 ) -> None:
@@ -295,16 +367,25 @@ def test_missing_invalid_and_unknown_dags_return_safe_errors(
     assert missing.status_code == 409
     assert missing.json()["detail"]["code"] == "dag_source_missing"
     assert _SECRET not in missing.text
+    missing_graph = client.get("/api/v1/dags/orders/graph")
+    assert missing_graph.status_code == 409
+    assert missing_graph.json()["detail"]["code"] == "dag_source_missing"
 
     dag_path.write_text(f"not: a DAG\nsecret: {_SECRET}\n", encoding="utf-8")
     invalid = client.get("/api/v1/dags/orders")
     assert invalid.status_code == 409
     assert invalid.json()["detail"]["code"] == "dag_configuration_invalid"
     assert _SECRET not in invalid.text
+    invalid_graph = client.get("/api/v1/dags/orders/graph")
+    assert invalid_graph.status_code == 409
+    assert invalid_graph.json()["detail"]["code"] == "dag_configuration_invalid"
 
     unknown = client.get("/api/v1/dags/unknown")
     assert unknown.status_code == 404
     assert unknown.json()["detail"]["code"] == "dag_not_found"
+    unknown_graph = client.get("/api/v1/dags/unknown/graph")
+    assert unknown_graph.status_code == 404
+    assert unknown_graph.json()["detail"]["code"] == "dag_not_found"
 
 
 def test_run_list_detail_statuses_attempts_and_redaction(api_state: tuple[Path, Path]) -> None:

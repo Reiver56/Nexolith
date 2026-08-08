@@ -76,3 +76,29 @@ test("redirects the overview and provides a useful unknown-route view", async ()
   renderAt("/runs/%");
   expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
 });
+
+test.each(["percent%name", "slash/name", "space name", "caffè-東京", "query?#name"])(
+  "round-trips encoded DAG names through the graph route",
+  async (name) => {
+    installApiMock({
+      [`/api/v1/dags/${encodeURIComponent(name)}/graph`]: {
+        body: {
+          name,
+          trigger: null,
+          tasks: [],
+          latest_run: null,
+          unmapped_task_history: [],
+        },
+      },
+    });
+    renderAt(`/dags/${encodeURIComponent(name)}/graph`);
+    expect(await screen.findByRole("heading", { name, level: 1 })).toBeInTheDocument();
+  },
+);
+
+test("rejects malformed graph route encoding without making a graph request", () => {
+  const { requests } = installApiMock();
+  renderAt("/dags/%/graph");
+  expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  expect(requests.some((request) => request.path.includes("/graph"))).toBe(false);
+});

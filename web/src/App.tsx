@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { AppShell } from "./components/AppShell";
 import { DagListPage } from "./features/dags/DagListPage";
+import { DagGraphPage } from "./features/dags/graph/DagGraphPage";
 import { RunDetailRoute } from "./features/runs/RunDetailPage";
 import { RunListPage } from "./features/runs/RunListPage";
 import { AppLink, navigate, useRoute } from "./router";
@@ -31,6 +32,9 @@ export function App() {
   return (
     <AppShell pathname={pathname}>
       {route.page === "dags" ? <DagListPage /> : null}
+      {route.page === "dag-graph" ? (
+        <DagGraphPage key={route.dagName} dagName={route.dagName} />
+      ) : null}
       {route.page === "runs" ? <RunListPage /> : null}
       {route.page === "run" ? <RunDetailRoute key={route.runId} rawRunId={route.runId} /> : null}
       {route.page === "not-found" ? <UnknownRoute /> : null}

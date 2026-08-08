@@ -13,6 +13,7 @@ contract.
 | `GET` | `/api/v1` | API/package versions and capabilities | `get_api_info` |
 | `GET` | `/api/v1/dags` | Registered DAG summaries | `list_dags` |
 | `GET` | `/api/v1/dags/{dag_name}` | Current registered DAG structure | `get_dag` |
+| `GET` | `/api/v1/dags/{dag_name}/graph` | Current dependencies and latest task statuses | `get_dag_graph` |
 | `POST` | `/api/v1/dags/registrations` | Register or explicitly refresh a DAG | `register_dag` |
 | `POST` | `/api/v1/dags/{dag_name}/runs` | Execute a registered DAG synchronously | `trigger_dag_run` |
 | `GET` | `/api/v1/runs` | Bounded recent run history | `list_runs` |
@@ -73,3 +74,10 @@ local backend instead of adding wildcard CORS.
 Responses omit raw persisted exceptions, connection details, environment values, process
 arguments, source paths, owner creation timestamps, usernames, and home directories. Errors use
 fixed typed summaries without tracebacks or internal exception text.
+
+The graph query performs one read-only aggregation for the browser: current task identities and
+dependencies come from the registered source, while task statuses come from the latest persisted
+run for that DAG. A status is `null` when no trustworthy persisted task status exists. Historical
+task rows absent from the current definition remain visible in `unmapped_task_history` instead of
+being presented as current graph nodes. Cross-DAG triggers remain DAG-level relationships. The
+response includes no task parameters, scripts, source paths, or persisted error text.
