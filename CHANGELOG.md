@@ -25,7 +25,12 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   separate identity-verified process; stop preserves stable-handle/pidfd and replacement-marker
   guarantees. Action requests require JSON, enforce trusted Host/same-origin browser boundaries,
   are never retried automatically, and retain secret-safe deterministic OpenAPI models (NXL-112).
-  The NXL-113–NXL-115 React work remains future work.
+  The NXL-114 graph and NXL-115 browser action work remain future work.
+- Added the first React monitoring UI with a restrained responsive shell, registered-DAG and
+  newest-first run lists, run/task/retry-attempt detail, API/scheduler status, accessible
+  loading/empty/error states, and no action controls. TypeScript types are generated
+  deterministically from the local FastAPI OpenAPI contract and checked for drift in a dedicated
+  pinned-Node frontend CI job (NXL-113).
 
 ### v0.3.1 — CLI Aesthetics
 

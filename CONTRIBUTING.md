@@ -11,6 +11,10 @@ dependencies:
 uv sync --extra api --extra dev
 ```
 
+Frontend work additionally uses the Node 24 LTS version pinned in `.node-version`. Install the
+locked dependencies from `web/` with `npm ci`; never commit `node_modules`, `dist`, coverage, Vite
+cache files, or temporary OpenAPI exports.
+
 Create a focused branch from an up-to-date `main`:
 
 ```bash
@@ -32,10 +36,26 @@ Code should be typed, small, readable, and separated by responsibility. Prefer e
 domain errors, avoid global mutable state, never execute pipeline content as code, and add
 tests for changed behavior. Ruff is the source of truth for formatting and lint rules.
 
+For frontend changes, also run from `web/`:
+
+```bash
+npm ci
+npm run api:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
 The OpenAPI document is a typed compatibility contract for generated clients. Every route must
 declare stable operation IDs, tags, response and error models, and typed parameters. Do not commit
 a generated schema snapshot or frontend interfaces that duplicate it. Backward-incompatible
 schema changes must be intentional, called out in the pull request, and explicitly reviewed.
+`scripts/export_openapi.py` exports the local application-factory schema without a server, database,
+or network call; `npm run api:generate` updates the committed `web/src/api/schema.d.ts`, and
+`npm run api:check` fails on drift. Frontend code must consume that generated contract rather than
+maintaining duplicate response interfaces. Monitoring components must not call POST, PUT, PATCH,
+or DELETE endpoints unless a later story explicitly authorizes actions.
 
 ## Issues and proposals
 

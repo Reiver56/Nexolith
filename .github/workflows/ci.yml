@@ -9,6 +9,44 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Python dependencies
+        run: uv sync --frozen --extra api --python 3.12
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: web
+      - name: Verify generated API types
+        run: npm run api:check
+        working-directory: web
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: web
+      - name: Type-check frontend
+        run: npm run typecheck
+        working-directory: web
+      - name: Test frontend
+        run: npm test
+        working-directory: web
+      - name: Build frontend
+        run: npm run build
+        working-directory: web
+
   quality:
     runs-on: ubuntu-latest
     steps:
