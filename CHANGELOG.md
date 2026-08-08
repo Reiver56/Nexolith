@@ -124,6 +124,10 @@ what shipped, not when it's cut.
   identity-mismatched markers, while legacy and unverifiable markers fail closed. Remote stop uses
   one identity-bound Windows process handle or Linux pidfd and never falls back to PID-only
   signaling (NXL-121).
+- Fixed unexpected ordinary task exceptions terminating scheduler polling and leaving attempt,
+  task, and DAG rows `running`. They now follow configured retries and failure policy with
+  secret-safe terminal history, while process-level interruptions still propagate for restart
+  reconciliation (NXL-122).
 - **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
   pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
   validate/run DAG files correctly.

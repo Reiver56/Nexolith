@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+from nexolith.dag import DagExecutor
+from nexolith.dag.validator import read_dag_config
+from nexolith.models import ExecutionResult
 from nexolith.process_identity import ProcessIdentity, ProcessIdentityLookup
 from nexolith.scheduler import Scheduler, parse_interval
 from nexolith.scheduler.daemon import _default_execute
@@ -35,6 +38,46 @@ def make_fake_execute(
         return run_id
 
     return fake_execute
+
+
+class _UnexpectedTaskApplication:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def run_pipeline(
+        self,
+        path: Path,
+        *,
+        parameter_overrides: object = None,
+        event_sink: object = None,
+    ) -> ExecutionResult:
+        self.calls.append(path.name)
+        if path.name == "unexpected.yaml":
+            raise ValueError("unexpected adapter failure")
+        return ExecutionResult(path.stem)
+
+
+def write_single_task_dag(path: Path, *, name: str, pipeline: str) -> None:
+    path.write_text(
+        f"""
+name: {name}
+tasks:
+  - name: only
+    pipeline: {pipeline}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def execute_with_application(
+    application: _UnexpectedTaskApplication,
+) -> Callable[[Path, StateStore], int]:
+    def execute(path: Path, store: StateStore) -> int:
+        dag = read_dag_config(path)
+        return DagExecutor(store, application).run(dag, path, trigger_reason="schedule")
+
+    return execute
 
 
 class Clock:
@@ -405,6 +448,78 @@ def test_a_malformed_schedule_is_skipped_without_crashing_the_scheduler(tmp_path
 
         assert calls == ["good.yaml"]
         assert len(triggered) == 1
+    finally:
+        store.close()
+
+
+def test_unexpected_task_failure_does_not_prevent_later_due_dag_execution(
+    tmp_path: Path,
+) -> None:
+    failing_path = tmp_path / "a-failing.yaml"
+    successful_path = tmp_path / "b-successful.yaml"
+    write_single_task_dag(
+        failing_path,
+        name="a-failing",
+        pipeline="unexpected.yaml",
+    )
+    write_single_task_dag(
+        successful_path,
+        name="b-successful",
+        pipeline="success.yaml",
+    )
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("a-failing", failing_path, "1s", enabled=True)
+        store.register_dag("b-successful", successful_path, "1s", enabled=True)
+        application = _UnexpectedTaskApplication()
+        scheduler = Scheduler(store, execute=execute_with_application(application))
+
+        triggered = scheduler.tick()
+
+        assert len(triggered) == 2
+        assert application.calls == ["unexpected.yaml", "success.yaml"]
+        assert store.get_dag_run(triggered[0]).status is DagRunStatus.FAILED  # type: ignore[union-attr]
+        assert store.get_dag_run(triggered[1]).status is DagRunStatus.SUCCEEDED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_polling_continues_after_unexpected_task_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failing_path = tmp_path / "failing.yaml"
+    write_single_task_dag(
+        failing_path,
+        name="failing",
+        pipeline="unexpected.yaml",
+    )
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("failing", failing_path, "1h", enabled=True)
+        application = _UnexpectedTaskApplication()
+        scheduler = Scheduler(
+            store,
+            execute=execute_with_application(application),
+            poll_interval_seconds=0,
+        )
+        tick_count = 0
+        real_tick = scheduler.tick
+
+        def counting_tick() -> list[int]:
+            nonlocal tick_count
+            tick_count += 1
+            return real_tick()
+
+        monkeypatch.setattr(scheduler, "tick", counting_tick)
+
+        scheduler.run(install_signal_handlers=False, max_ticks=2)
+
+        assert tick_count == 2
+        assert application.calls == ["unexpected.yaml"]
+        run = store.latest_dag_run("failing")
+        assert run is not None
+        assert run.status is DagRunStatus.FAILED
     finally:
         store.close()
 

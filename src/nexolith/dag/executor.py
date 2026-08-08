@@ -22,6 +22,11 @@ from nexolith.state import DagRunStatus, StateStore
 from nexolith.types import Scalar
 
 
+def _unexpected_task_error(exc: Exception) -> str:
+    """Return a stable diagnostic without persisting arbitrary user text."""
+    return f"Unexpected task failure ({type(exc).__name__})."
+
+
 class PipelineRunnerApplication(Protocol):
     """Duck-typed to `PipelineApplication`'s `run_pipeline()` -- matching
     `interactive.py`'s own `InteractiveApplication` Protocol pattern for
@@ -277,11 +282,15 @@ class DagExecutor:
         behavior). Each attempt is a real call to `attempt()` -- either
         `PipelineApplication.run_pipeline()` for a `pipeline:` task, or
         `nexolith.jobs.run_script()` for a `script:` task (NXL-88); both
-        raise `(ConfigurationError | ExecutionError)` on failure, so this
-        loop, and everything it records to the store, is identical either
-        way. Recorded as its own task_attempts row the moment each attempt
-        starts and finishes -- never batched, never simulated, satisfying
-        "no silent retries" directly rather than by convention.
+        normally raise `(ConfigurationError | ExecutionError)` on expected
+        failure. Other ordinary exceptions from the task boundary are
+        recorded with a type-only diagnostic so one faulty adapter cannot
+        terminate the scheduler or expose arbitrary exception text.
+        `BaseException` is deliberately not caught: a genuine process-level
+        interruption must retain incomplete history for restart reconciliation.
+        Recorded as its own task_attempts row the moment each attempt starts
+        and finishes -- never batched, never simulated, satisfying "no silent
+        retries" directly rather than by convention.
         """
         max_attempts = 1 + task.retries
         last_error: str | None = None
@@ -298,11 +307,12 @@ class DagExecutor:
                 attempt()
             except (ConfigurationError, ExecutionError) as exc:
                 last_error = str(exc)
-                self._store.complete_task_attempt(attempt_id, success=False, error=last_error)
-                continue
+            except Exception as exc:
+                last_error = _unexpected_task_error(exc)
             else:
                 self._store.complete_task_attempt(attempt_id, success=True)
                 return True, None
+            self._store.complete_task_attempt(attempt_id, success=False, error=last_error)
         return False, last_error
 
 

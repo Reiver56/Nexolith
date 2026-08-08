@@ -1,11 +1,24 @@
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from nexolith.application import PipelineApplication
-from nexolith.dag import DagExecutor, execute_dag, load_dag
+from nexolith.cli.render_context import RenderContext
+from nexolith.cli.runs_render import render_run_detail
+from nexolith.dag import DagConfig, DagExecutor, DagTaskConfig, execute_dag, load_dag
 from nexolith.events import EventSink
 from nexolith.models import ExecutionResult
-from nexolith.state import DagRunStatus, StateStore, TaskRunRecord, TaskRunStatus
+from nexolith.process_identity import ProcessIdentity, ProcessIdentityLookup
+from nexolith.scheduler import Scheduler
+from nexolith.state import (
+    DagRunStatus,
+    StateStore,
+    TaskAttemptStatus,
+    TaskRunRecord,
+    TaskRunStatus,
+)
 from nexolith.types import Scalar
 
 
@@ -56,8 +69,6 @@ def write_dag(path: Path, content: str) -> None:
 
 
 def write_sqlite_db_with_items(path: Path) -> None:
-    import sqlite3
-
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE items (id INTEGER, status TEXT)")
     connection.executemany(
@@ -86,6 +97,38 @@ destination:
   path: {(path.parent / f"{name}_out.csv").as_posix()}
 """,
         encoding="utf-8",
+    )
+
+
+class _SequencedApplication:
+    def __init__(self, outcomes: list[Exception | None]) -> None:
+        self._outcomes = outcomes
+        self.calls: list[str] = []
+
+    def run_pipeline(
+        self,
+        path: Path,
+        *,
+        parameter_overrides: Mapping[str, Scalar] | None = None,
+        event_sink: EventSink | None = None,
+    ) -> ExecutionResult:
+        self.calls.append(path.name)
+        outcome = self._outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return ExecutionResult(path.stem)
+
+
+def single_task_dag(*, retries: int = 0) -> DagConfig:
+    return DagConfig(
+        name="unexpected-task",
+        tasks=[
+            DagTaskConfig(
+                name="only",
+                pipeline="only.yaml",
+                retries=retries,
+            )
+        ],
     )
 
 
@@ -456,12 +499,7 @@ tasks:
 
 
 def test_abrupt_stop_mid_run_leaves_an_accurate_partial_record(tmp_path: Path) -> None:
-    """Simulates a crash: a task raises something DagExecutor does not
-    catch (only ConfigurationError/ExecutionError are caught, matching
-    PipelineApplication's real contract), propagating out of run()
-    entirely -- and the store must already reflect real partial progress,
-    not nothing, because nothing here is batched until the end.
-    """
+    """A process-level interruption propagates and stays reconcilable."""
     write_pipeline(tmp_path / "a.yaml", name="a")
     write_pipeline(tmp_path / "b.yaml", name="b")
     dag_path = tmp_path / "workflow.yaml"
@@ -478,9 +516,13 @@ tasks:
     depends_on: [a]
 """,
     )
-    store = StateStore(tmp_path / "state.db")
+    owner = ProcessIdentity(pid=999999, create_time_ns=1_000_000_000)
+    store = StateStore(tmp_path / "state.db", process_identity=lambda: owner)
     try:
         dag = load_dag(dag_path)
+
+        class _SimulatedProcessInterruption(BaseException):
+            pass
 
         class _CrashingApplication:
             def __init__(self) -> None:
@@ -496,19 +538,15 @@ tasks:
             ) -> ExecutionResult:
                 self._calls += 1
                 if self._calls == 2:
-                    raise RuntimeError("process died")
+                    raise _SimulatedProcessInterruption()
                 return self._real.run_pipeline(
                     path, parameter_overrides=parameter_overrides, event_sink=event_sink
                 )
 
         executor = DagExecutor(store, _CrashingApplication())
 
-        try:
+        with pytest.raises(_SimulatedProcessInterruption):
             executor.run(dag, dag_path)
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError("expected the simulated crash to propagate")
 
         run = store.latest_dag_run("crashes")
         assert run is not None
@@ -520,8 +558,231 @@ tasks:
         assert tasks["b"].status is TaskRunStatus.RUNNING
         assert tasks["b"].ended_at is None
 
+        attempts = store.list_task_attempts(run.id, "b")
+        assert len(attempts) == 1
+        assert attempts[0].status is TaskAttemptStatus.RUNNING
+        assert attempts[0].ended_at is None
+
         incomplete = store.list_incomplete_dag_runs()
         assert [incomplete_run.id for incomplete_run in incomplete] == [run.id]
+
+        scheduler = Scheduler(
+            store,
+            process_identity_lookup=lambda pid: ProcessIdentityLookup.not_found(),
+        )
+        assert scheduler.tick() == []
+        reconciled = store.get_dag_run(run.id)
+        assert reconciled is not None
+        assert reconciled.status is DagRunStatus.INTERRUPTED
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ValueError("unexpected value"), OSError("unexpected operating-system error")],
+    ids=["value-error", "os-error"],
+)
+def test_unexpected_ordinary_exception_records_terminal_failed_history(
+    tmp_path: Path,
+    failure: Exception,
+) -> None:
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(store, _SequencedApplication([failure])).run(
+            single_task_dag(),
+            tmp_path / "workflow.yaml",
+        )
+
+        expected_error = f"Unexpected task failure ({type(failure).__name__})."
+        attempts = store.list_task_attempts(run_id, "only")
+        assert len(attempts) == 1
+        assert attempts[0].status is TaskAttemptStatus.FAILED
+        assert attempts[0].ended_at is not None
+        assert attempts[0].error == expected_error
+
+        task = store.list_task_runs(run_id)[0]
+        assert task.status is TaskRunStatus.FAILED
+        assert task.ended_at is not None
+        assert task.error == expected_error
+
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        assert run.status is DagRunStatus.FAILED
+        assert run.ended_at is not None
+        assert run.error == f"Task 'only' failed: {expected_error}"
+    finally:
+        store.close()
+
+
+def test_unexpected_exception_retry_can_succeed(tmp_path: Path) -> None:
+    application = _SequencedApplication([ValueError("transient"), None])
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(store, application).run(
+            single_task_dag(retries=1),
+            tmp_path / "workflow.yaml",
+        )
+
+        attempts = store.list_task_attempts(run_id, "only")
+        assert [attempt.status for attempt in attempts] == [
+            TaskAttemptStatus.FAILED,
+            TaskAttemptStatus.SUCCEEDED,
+        ]
+        assert attempts[0].error == "Unexpected task failure (ValueError)."
+        assert attempts[1].error is None
+        assert store.list_task_runs(run_id)[0].status is TaskRunStatus.SUCCEEDED
+        assert store.get_dag_run(run_id).status is DagRunStatus.SUCCEEDED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_unexpected_exception_exhausts_every_configured_retry(tmp_path: Path) -> None:
+    application = _SequencedApplication([OSError("first"), OSError("second"), OSError("third")])
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(store, application).run(
+            single_task_dag(retries=2),
+            tmp_path / "workflow.yaml",
+        )
+
+        attempts = store.list_task_attempts(run_id, "only")
+        assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
+        assert all(attempt.status is TaskAttemptStatus.FAILED for attempt in attempts)
+        assert all(attempt.ended_at is not None for attempt in attempts)
+        assert {attempt.error for attempt in attempts} == {"Unexpected task failure (OSError)."}
+        assert store.list_task_runs(run_id)[0].status is TaskRunStatus.FAILED
+        assert store.get_dag_run(run_id).status is DagRunStatus.FAILED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_unexpected_failure_skip_policy_preserves_independent_branch(tmp_path: Path) -> None:
+    dag = DagConfig(
+        name="skip-unexpected",
+        on_failure="skip",
+        tasks=[
+            DagTaskConfig(name="fails", pipeline="fails.yaml"),
+            DagTaskConfig(
+                name="dependent",
+                pipeline="dependent.yaml",
+                depends_on=["fails"],
+            ),
+            DagTaskConfig(name="independent", pipeline="independent.yaml"),
+        ],
+    )
+    application = _SequencedApplication([ValueError("unexpected"), None])
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(store, application).run(dag, tmp_path / "workflow.yaml")
+
+        tasks = {task.task_name: task for task in store.list_task_runs(run_id)}
+        assert tasks["fails"].status is TaskRunStatus.FAILED
+        assert tasks["dependent"].status is TaskRunStatus.SKIPPED
+        assert tasks["independent"].status is TaskRunStatus.SUCCEEDED
+        assert application.calls == ["fails.yaml", "independent.yaml"]
+        assert store.get_dag_run(run_id).status is DagRunStatus.FAILED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_unexpected_failure_block_policy_blocks_all_remaining_tasks(tmp_path: Path) -> None:
+    dag = DagConfig(
+        name="block-unexpected",
+        on_failure="block",
+        tasks=[
+            DagTaskConfig(name="fails", pipeline="fails.yaml"),
+            DagTaskConfig(name="independent", pipeline="independent.yaml"),
+        ],
+    )
+    application = _SequencedApplication([ValueError("unexpected")])
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(store, application).run(dag, tmp_path / "workflow.yaml")
+
+        tasks = {task.task_name: task for task in store.list_task_runs(run_id)}
+        assert tasks["fails"].status is TaskRunStatus.FAILED
+        assert tasks["independent"].status is TaskRunStatus.BLOCKED
+        assert application.calls == ["fails.yaml"]
+        assert store.get_dag_run(run_id).status is DagRunStatus.FAILED  # type: ignore[union-attr]
+    finally:
+        store.close()
+
+
+def test_unexpected_failure_diagnostic_redacts_arbitrary_exception_text(tmp_path: Path) -> None:
+    sensitive_values = (
+        "nxl122-sentinel-password",
+        "nxl122-sentinel-token",
+        "postgresql://private-user:private-password@db.internal/private",
+        "/private/home/sentinel-user/workflow.py",
+    )
+    failure_text = " | ".join(sensitive_values)
+    store = StateStore(tmp_path / "state.db")
+    try:
+        run_id = DagExecutor(
+            store,
+            _SequencedApplication([ValueError(failure_text), ValueError(failure_text)]),
+        ).run(
+            single_task_dag(retries=1),
+            tmp_path / "workflow.yaml",
+        )
+        run = store.get_dag_run(run_id)
+        assert run is not None
+        tasks = store.list_task_runs(run_id)
+        attempts = store.list_run_attempts(run_id)
+        rendered = render_run_detail(
+            run,
+            tasks,
+            RenderContext(is_tty=False, color_enabled=False, width=120),
+            attempts,
+        )
+        persisted_and_rendered = "\n".join(
+            [
+                run.error or "",
+                *(task.error or "" for task in tasks),
+                *(attempt.error or "" for attempt in attempts),
+                rendered,
+            ]
+        )
+        if any(value in persisted_and_rendered for value in sensitive_values):
+            pytest.fail("unexpected task diagnostics exposed a sentinel value", pytrace=False)
+        assert persisted_and_rendered.count("Unexpected task failure (ValueError).") >= 4
+    finally:
+        store.close()
+
+
+def test_state_store_failure_is_not_mislabeled_as_a_task_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = StateStore(tmp_path / "state.db")
+
+    def fail_attempt_persistence(
+        attempt_id: int,
+        *,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        raise sqlite3.OperationalError("controlled persistence failure")
+
+    monkeypatch.setattr(store, "complete_task_attempt", fail_attempt_persistence)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="controlled persistence failure"):
+            DagExecutor(store, _SequencedApplication([ValueError("task failed")])).run(
+                single_task_dag(),
+                tmp_path / "workflow.yaml",
+            )
+
+        run = store.latest_dag_run("unexpected-task")
+        assert run is not None
+        assert run.status is DagRunStatus.RUNNING
+        assert run.error is None
+        task = store.list_task_runs(run.id)[0]
+        assert task.status is TaskRunStatus.RUNNING
+        assert task.error is None
+        attempt = store.list_task_attempts(run.id, "only")[0]
+        assert attempt.status is TaskAttemptStatus.RUNNING
+        assert attempt.error is None
     finally:
         store.close()
 
