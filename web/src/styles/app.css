@@ -316,6 +316,189 @@ h4 {
   color: white;
 }
 
+.button--danger {
+  background: var(--negative-600);
+  color: white;
+}
+
+.button--compact {
+  min-height: 2.25rem;
+  padding-block: 0.4rem;
+}
+
+.button:disabled,
+.field input:disabled,
+.checkbox-field input:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.button-group,
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.table-actions {
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.action-stack {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.action-feedback {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.action-feedback--success {
+  border-color: color-mix(in srgb, var(--positive-600) 24%, transparent);
+  background: var(--positive-50);
+  color: var(--positive-600);
+}
+
+.action-feedback--warning {
+  border-color: color-mix(in srgb, var(--warning-700) 24%, transparent);
+  background: var(--warning-50);
+  color: var(--warning-700);
+}
+
+.action-feedback--error {
+  border-color: color-mix(in srgb, var(--negative-600) 24%, transparent);
+  background: var(--negative-50);
+  color: var(--negative-600);
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  padding: var(--space-4);
+  place-items: center;
+  background: rgba(10, 13, 18, 0.62);
+  backdrop-filter: blur(5px);
+}
+
+.confirmation-dialog {
+  width: min(100%, 34rem);
+  max-height: calc(100vh - 2rem);
+  padding: var(--space-8);
+  overflow-y: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow-lg);
+}
+
+.confirmation-dialog h2 {
+  margin-bottom: var(--space-3);
+  font-size: var(--text-xl);
+}
+
+.confirmation-dialog__description {
+  color: var(--text-secondary);
+}
+
+.confirmation-dialog__actions {
+  display: flex;
+  margin-top: var(--space-6);
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+
+.field {
+  display: grid;
+  margin-top: var(--space-5);
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.field input {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.checkbox-field {
+  display: flex;
+  margin-top: var(--space-4);
+  align-items: flex-start;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.checkbox-field input {
+  width: 1.1rem;
+  height: 1.1rem;
+  flex: 0 0 auto;
+  margin-top: 0.16rem;
+}
+
+.scheduler-refresh-state {
+  margin-top: calc(var(--space-6) * -1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.scheduler-overview {
+  display: grid;
+  padding: var(--space-8);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+.scheduler-overview > div {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+}
+
+.scheduler-overview strong {
+  font-size: var(--text-sm);
+}
+
+.scheduler-actions {
+  display: flex;
+  margin-top: var(--space-8);
+  padding: var(--space-6);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+}
+
+.scheduler-actions h2 {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-lg);
+}
+
+.scheduler-actions p:not(.eyebrow) {
+  max-width: 42rem;
+  margin-bottom: 0;
+  color: var(--text-secondary);
+}
+
+.scheduler-actions + .action-feedback {
+  margin-top: var(--space-4);
+}
+
 .surface {
   overflow: hidden;
   border: 1px solid var(--border-subtle);
@@ -809,8 +992,17 @@ h4 {
   }
 
   .page-header__action,
-  .page-header__action .button {
+  .page-header__action > .button,
+  .page-header__action > .button-group,
+  .page-header__action > .button-group > .button,
+  .page-header__action > .button-group > .action-stack,
+  .page-header__action > .button-group > .action-stack > .button {
     width: 100%;
+  }
+
+  .page-header__action .button-group {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .page-header__description {
@@ -886,6 +1078,40 @@ h4 {
 
   .data-table tbody tr:hover {
     background: var(--surface);
+  }
+
+  .table-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .table-actions .button,
+  .table-actions .run-link {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .confirmation-dialog {
+    padding: var(--space-6);
+  }
+
+  .confirmation-dialog__actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .scheduler-overview {
+    padding: var(--space-5);
+    grid-template-columns: 1fr;
+  }
+
+  .scheduler-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .scheduler-actions .button {
+    width: 100%;
   }
 
   .run-overview {

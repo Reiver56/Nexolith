@@ -8,6 +8,7 @@ import { StatusBadge } from "../../../components/StatusBadge";
 import { usePollingResource } from "../../../hooks/usePollingResource";
 import { AppLink } from "../../../router";
 import { formatTimestamp } from "../../../utils/format";
+import { TriggerDagControl } from "../DagActions";
 import { DagGraphCanvas } from "./DagGraphCanvas";
 import { buildDagFlow } from "./layout";
 import type { DagFlowModel } from "./layout";
@@ -150,7 +151,12 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
         eyebrow="Dependency graph"
         title={graph.name}
         description="Current task structure with statuses from the latest persisted run. Pan, zoom, or use the text summary below."
-        action={<RefreshButton onClick={refresh} />}
+        action={
+          <div className="button-group">
+            <RefreshButton onClick={refresh} />
+            <TriggerDagControl dagName={graph.name} />
+          </div>
+        }
       />
       <p className="graph-refresh-state" aria-live="polite">
         {refreshing ? "Refreshing graph data…" : refreshError ?? "Graph data refreshes every 5 seconds while this tab is visible."}

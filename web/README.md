@@ -1,7 +1,7 @@
-# Nexolith React monitoring UI
+# Nexolith React operations UI
 
-NXL-113 establishes the v0.3.4 browser monitoring foundation and NXL-114 adds its read-only DAG
-graph. It is a source-only React SPA with these stable views:
+The source-only React SPA provides monitoring and explicit operational controls through these
+stable views:
 
 | Route | View |
 |---|---|
@@ -10,11 +10,13 @@ graph. It is a source-only React SPA with these stable views:
 | `/dags/:dagName/graph` | Interactive task dependencies and latest persisted task status |
 | `/runs` | Bounded newest-first run history |
 | `/runs/:runId` | Run, task, and retry-attempt history |
+| `/scheduler` | Live scheduler status with explicit start and stop controls |
 
-The UI is intentionally read-only. It does not register or trigger DAGs, edit YAML, start or stop
-the scheduler, stream logs, or retry mutation requests. The graph permits view-only pan, zoom,
-selection, and reset interactions; it never changes dependencies or persisted state. NXL-115 owns
-action controls and confirmations.
+The DAG views can register a YAML definition and explicitly trigger a registered run. The scheduler
+view can start or stop the verified scheduler process. Every consequential action uses an
+accessible custom confirmation dialog, prevents duplicate submission, never retries automatically,
+and refreshes authoritative backend state after success. The UI does not edit YAML, schedules, or
+graph dependencies and does not stream logs.
 
 ## Stack and boundaries
 
@@ -44,6 +46,12 @@ Polling starts only after the preceding request settles, pauses and aborts while
 hidden, and preserves the last good graph if a background refresh fails. Automatic refresh never
 resets the operator's viewport; the explicit Reset layout control does.
 
+Action transport stays in `src/api/client.ts` and uses generated OpenAPI request and response
+types. Requests remain same-origin JSON POSTs. Error messages are filtered before rendering, and
+the UI never displays scheduler PIDs, process identities, internal exceptions, credentials, or
+backend paths. A successfully triggered run navigates to its persisted run-detail route instead of
+inventing an optimistic state.
+
 ## Local development
 
 From the repository root, install and start the optional API:
@@ -62,9 +70,11 @@ npm run dev
 ```
 
 Open `http://127.0.0.1:5173`. Vite proxies relative `/api` requests to
-`http://127.0.0.1:8765`, preserving the backend's Host/origin posture without wildcard CORS.
+`http://127.0.0.1:8765` and rewrites the proxy Host/Origin pair to that loopback target so action
+requests remain same-origin from the API's perspective, without wildcard CORS. Vite itself binds
+only to loopback.
 Direct route refreshes work in Vite's development fallback. A future production host must provide
-an equivalent SPA fallback; NXL-113 does not deploy or serve these files through FastAPI.
+an equivalent SPA fallback; this source-only frontend is not deployed or served through FastAPI.
 
 ## OpenAPI generation
 
@@ -97,9 +107,9 @@ npm run build
 
 Tests use deterministic `fetch` fixtures; they require no database, PostgreSQL, Docker, scheduler,
 or external network. They verify loading/empty/error states, deterministic layout and edge
-deduplication, task/cross-DAG separation, status semantics, encoded route names, keyboard access,
-poll cancellation/non-overlap, responsive metadata, secret/path exclusion, and the absence of
-mutating HTTP methods.
+deduplication, task/cross-DAG separation, status semantics, encoded route and action names,
+confirmation/cancellation, focus trapping and restoration, duplicate-submission prevention,
+authoritative refresh, typed safe errors, and poll cancellation/non-overlap.
 
 The production output is temporary verification material under `web/dist/`; it is not committed,
 packaged in the Python wheel, published, or deployed by this story. The source distribution keeps

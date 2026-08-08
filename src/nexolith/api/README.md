@@ -1,7 +1,7 @@
 # Query and action API
 
-NXL-111 and NXL-112 provide the v0.3.4 FastAPI foundation over Nexolith's existing application,
-DAG, state, and scheduler boundaries. Install it with `pip install "nexolith[api]"` or
+The v0.3.4 FastAPI layer builds on Nexolith's existing application, DAG, state, and scheduler
+boundaries. Install it with `pip install "nexolith[api]"` or
 `uv sync --extra api --extra dev`, then run `nexolith api start`. The API server remains a
 foreground process at `127.0.0.1:8765` by default. `/docs` and `/openapi.json` expose the typed
 contract.
@@ -23,7 +23,7 @@ contract.
 | `POST` | `/api/v1/scheduler/stop` | Stop only the verified scheduler owner | `stop_scheduler` |
 
 All requests, responses, parameters, and errors have explicit models. Stable operation IDs and
-tags support automated TypeScript generation in NXL-113. `scripts/export_openapi.py` calls the
+tags support automated TypeScript generation. `scripts/export_openapi.py` calls the
 application factory without starting a server or opening state; `npm run api:generate` from
 `web/` commits the resulting TypeScript declarations, never an intermediate OpenAPI JSON file.
 Frontend code imports generated types instead of handwritten shadow interfaces, and CI fails on
@@ -68,8 +68,9 @@ There is **no authentication or authorization**. Keep the server on localhost or
 Non-loopback binding prints a warning; wildcard binds also require explicit repeated
 `--trusted-host` values. The API accepts only configured Host names, sends no wildcard CORS policy,
 requires JSON for every action, rejects cross-origin browser actions by default, and exposes no GET
-mutation. The NXL-113 development server uses same-origin relative paths and proxies `/api` to the
-local backend instead of adding wildcard CORS.
+mutation. The development server uses same-origin relative paths and proxies `/api` to the local
+backend instead of adding wildcard CORS. Its loopback-only proxy rewrites the upstream Host/Origin
+pair together so the API still sees one trusted origin.
 
 Responses omit raw persisted exceptions, connection details, environment values, process
 arguments, source paths, owner creation timestamps, usernames, and home directories. Errors use

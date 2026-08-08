@@ -18,24 +18,25 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
 - Added an optional, versioned FastAPI monitoring backend for registered DAGs, persisted run/task/
   attempt history, and PID-plus-creation-time-verified scheduler status. The API opens one SQLite
   state store per request, exposes only explicit read models and GET operations, redacts persisted
-  error details, and includes stable OpenAPI operation IDs for future generated TypeScript clients
-  (NXL-111).
+  error details, and includes stable OpenAPI operation IDs for future generated TypeScript clients.
 - Added explicit typed POST actions to register DAGs, synchronously trigger registered DAG runs,
   and start/stop the scheduler through shared CLI-independent services. Scheduler start remains a
   separate identity-verified process; stop preserves stable-handle/pidfd and replacement-marker
   guarantees. Action requests require JSON, enforce trusted Host/same-origin browser boundaries,
-  are never retried automatically, and retain secret-safe deterministic OpenAPI models (NXL-112).
-  The NXL-114 graph and NXL-115 browser action work remain future work.
+  are never retried automatically, and retain secret-safe deterministic OpenAPI models.
 - Added the first React monitoring UI with a restrained responsive shell, registered-DAG and
   newest-first run lists, run/task/retry-attempt detail, API/scheduler status, accessible
   loading/empty/error states, and no action controls. TypeScript types are generated
   deterministically from the local FastAPI OpenAPI contract and checked for drift in a dedicated
-  pinned-Node frontend CI job (NXL-113).
+  pinned-Node frontend CI job.
 - Added a read-only interactive DAG dependency graph with deterministic layered layout, latest-run
   task statuses, distinct cross-DAG trigger boundaries, accessible text summaries, responsive
   pan/zoom/reset controls, and visibility-aware non-overlapping polling. A minimal typed graph GET
-  endpoint keeps the browser contract complete without exposing source paths or error details
-  (NXL-114).
+  endpoint keeps the browser contract complete without exposing source paths or error details.
+- Connected the React interface to typed DAG registration/run-trigger and scheduler start/stop
+  endpoints. Consequential actions use accessible confirmation dialogs, prevent duplicate
+  submission, never retry automatically, refresh authoritative state after success, preserve
+  encoded DAG names, and keep protected backend details out of rendered feedback.
 
 ### v0.3.1 — CLI Aesthetics
 
