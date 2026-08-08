@@ -20,4 +20,9 @@ values and identifying local paths.
 Release validation tests cover exact stable tags, synchronized package versions, dated changelog
 sections, and complete wheel/source-distribution sets without contacting PyPI.
 
+`test_api.py` covers the v0.3.4 read-only query and HTTP adapters, semantic OpenAPI stability,
+request-scoped SQLite connections, safe DAG/run representations, scheduler process identity,
+redaction, optional dependencies, and CLI server delegation. It uses only in-process ASGI requests;
+no listener, browser, scheduler daemon, or external service is required.
+
 Run them with `uv run pytest tests/unit`.

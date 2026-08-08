@@ -15,6 +15,11 @@ from nexolith.scheduler.pidfile import (
     stop_process,
     write_pidfile,
 )
+from nexolith.scheduler.status import (
+    SchedulerQueryState,
+    SchedulerStatusSnapshot,
+    query_scheduler_status,
+)
 
 __all__ = [
     "PidFileClaim",
@@ -22,11 +27,14 @@ __all__ = [
     "PidFileOwnerStatus",
     "PidFileRecord",
     "Scheduler",
+    "SchedulerQueryState",
+    "SchedulerStatusSnapshot",
     "acquire_pidfile",
     "default_pidfile_path",
     "is_process_alive",
     "parse_interval",
     "pidfile_owner_status",
+    "query_scheduler_status",
     "read_pidfile",
     "release_pidfile",
     "stop_pidfile_owner",

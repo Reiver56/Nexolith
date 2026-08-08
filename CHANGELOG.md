@@ -7,10 +7,19 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Everything below has landed on `feature/v0.3.3-advanced-pipeline-capabilities` since `0.3.0` but is
-not yet released — grouped by the milestone each was built for. A version bump (`0.3.1`/`0.3.2`/
-`0.3.3`, or a single combined release) is a separate, not-yet-authorized step; this file records
-what shipped, not when it's cut.
+Everything below has landed since `0.3.0` but is not yet released, grouped by the milestone each
+change was built for. A version bump (`0.3.1`–`0.3.4`, or a combined release) is a separate,
+not-yet-authorized step; this file records what shipped, not when it is cut.
+
+### v0.3.4 — Web UI Foundations
+
+#### Added
+
+- Added an optional, versioned FastAPI monitoring backend for registered DAGs, persisted run/task/
+  attempt history, and PID-plus-creation-time-verified scheduler status. The API opens one SQLite
+  state store per request, exposes only explicit read models and GET operations, redacts persisted
+  error details, and includes stable OpenAPI operation IDs for future generated TypeScript clients
+  (NXL-111). NXL-112 mutation endpoints and the NXL-113–NXL-115 React work remain out of scope.
 
 ### v0.3.1 — CLI Aesthetics
 
