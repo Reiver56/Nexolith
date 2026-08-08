@@ -9,8 +9,10 @@ from nexolith.process_identity import (
     ProcessIdentity,
     ProcessIdentityLookup,
     ProcessIdentityLookupStatus,
+    ProcessTerminationStatus,
     current_process_identity,
     lookup_process_identity,
+    terminate_process_identity,
 )
 
 
@@ -90,3 +92,57 @@ def test_lookup_returns_typed_failure_status(
 
     assert result.status is expected
     assert result.identity is None
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" and not sys.platform.startswith("linux"),
+    reason="Identity-bound termination is implemented on Windows and Linux",
+)
+def test_real_identity_bound_termination_rejects_mismatch_then_stops_match() -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        lookup = lookup_process_identity(process.pid)
+        assert lookup.identity is not None
+        mismatch = ProcessIdentity(process.pid, lookup.identity.create_time_ns - 1_000_000_000)
+
+        assert terminate_process_identity(mismatch) is ProcessTerminationStatus.IDENTITY_MISMATCH
+        assert process.poll() is None
+
+        assert terminate_process_identity(lookup.identity) is ProcessTerminationStatus.SENT
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows handle-specific coverage")
+def test_windows_identity_bound_termination_never_calls_pid_only_os_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        lookup = lookup_process_identity(process.pid)
+        assert lookup.identity is not None
+
+        def forbidden_pid_signal(pid: int, sig: int) -> None:
+            raise AssertionError(f"PID-only signal attempted for {pid} with {sig}")
+
+        monkeypatch.setattr(os, "kill", forbidden_pid_signal)
+
+        assert terminate_process_identity(lookup.identity) is ProcessTerminationStatus.SENT
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def test_platform_without_identity_bound_signal_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    result = terminate_process_identity(ProcessIdentity(4242, 10))
+
+    assert result is ProcessTerminationStatus.UNSUPPORTED

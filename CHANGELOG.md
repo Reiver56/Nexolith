@@ -118,6 +118,11 @@ what shipped, not when it's cut.
   launching duplicate schedulers. PID ownership now uses atomic exclusive creation; stale markers
   are removed under a serialized cleanup claim before one bounded retry, while `status` and `stop`
   never unlink a marker that may have been concurrently reacquired (NXL-117).
+- Fixed scheduler PID reuse making `status` trust, and `stop` terminate, an unrelated process.
+  Scheduler markers now persist PID plus process creation time; startup safely recovers dead or
+  identity-mismatched markers, while legacy and unverifiable markers fail closed. Remote stop uses
+  one identity-bound Windows process handle or Linux pidfd and never falls back to PID-only
+  signaling (NXL-121).
 - **The classic CLI's `validate`/`run` commands didn't recognize DAG files at all** — only plain
   pipeline YAML — despite DAG support existing since v0.3.2. Both commands now detect and
   validate/run DAG files correctly.

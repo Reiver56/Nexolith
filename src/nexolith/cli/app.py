@@ -33,14 +33,17 @@ from nexolith.cli.scheduler_render import (
 from nexolith.dag import execute_dag, load_dag, register_dag
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.process_identity import ProcessIdentityUnavailable, ProcessTerminationStatus
 from nexolith.scheduler import (
+    PidFileOwnerStatus,
     Scheduler,
     acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
+    pidfile_owner_status,
     read_pidfile,
-    remove_pidfile,
-    stop_process,
+    remove_pidfile_if_owned,
+    stop_pidfile_owner,
 )
 from nexolith.state import DagRunStatus, StateStore
 
@@ -160,16 +163,31 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
 def scheduler_start() -> None:
     """Run the scheduler daemon in the foreground until stopped (Ctrl+C)."""
     pidfile_path = default_pidfile_path()
-    claim = acquire_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
+    try:
+        claim = acquire_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
+    except ProcessIdentityUnavailable as exc:
+        typer.echo(f"Scheduler start refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     if not claim.acquired:
         if claim.existing is None:
-            typer.echo("Scheduler start already in progress.", err=True)
-        else:
             typer.echo(
-                f"Scheduler already appears to be running (PID {claim.existing.pid}, "
-                f"started {claim.existing.started_at}).",
+                "Scheduler start refused: PID file is corrupt, incomplete, or being acquired.",
                 err=True,
             )
+        else:
+            owner_status = pidfile_owner_status(claim.existing)
+            if owner_status is PidFileOwnerStatus.MATCHING:
+                typer.echo(
+                    f"Scheduler already appears to be running (PID {claim.existing.pid}, "
+                    f"started {claim.existing.started_at}).",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    "Scheduler start refused: existing PID file ownership cannot be verified "
+                    f"({owner_status.value}).",
+                    err=True,
+                )
         raise typer.Exit(code=1)
 
     store: StateStore | None = None
@@ -179,7 +197,8 @@ def scheduler_start() -> None:
         typer.echo(render_scheduler_started(os.getpid()))
         scheduler.run()
     finally:
-        remove_pidfile(pidfile_path)
+        assert claim.owned is not None
+        remove_pidfile_if_owned(pidfile_path, claim.owned)
         if store is not None:
             store.close()
 
@@ -188,26 +207,50 @@ def scheduler_start() -> None:
 def scheduler_stop() -> None:
     """Stop a running scheduler daemon.
 
-    Best-effort on Windows: this forcibly stops the process rather than
-    signaling it to shut down gracefully -- there is no reliable
-    cross-process graceful-stop mechanism on Windows in the standard
-    library (verified directly against a real process, not assumed; see
-    nexolith.scheduler.pidfile's own docstring for the investigation). An
-    in-progress DAG run is not waited on. Use Ctrl+C in the scheduler's own
-    terminal for a fully graceful stop.
+    On Windows this forcibly stops the identity verified through one stable
+    process handle. An in-progress DAG run is not waited on. Use Ctrl+C in
+    the scheduler's own terminal for a fully graceful stop.
     """
     pidfile_path = default_pidfile_path()
     record = read_pidfile(pidfile_path)
     if record is None:
+        if pidfile_path.exists():
+            typer.echo(
+                "Scheduler stop refused: PID file is corrupt or incomplete; ownership cannot "
+                "be verified.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         typer.echo(render_scheduler_not_running())
         return
-    if not is_process_alive(record.pid):
+    owner_status = pidfile_owner_status(record)
+    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
         typer.echo(render_scheduler_not_running())
         return
+    if owner_status is not PidFileOwnerStatus.MATCHING:
+        typer.echo(
+            "Scheduler stop refused: PID file ownership cannot be verified "
+            f"({owner_status.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     if sys.platform == "win32":
         typer.echo(render_windows_stop_caveat(), err=True)
-    stop_process(record.pid)
+    termination = stop_pidfile_owner(record)
+    if termination in {
+        ProcessTerminationStatus.NOT_FOUND,
+        ProcessTerminationStatus.IDENTITY_MISMATCH,
+    }:
+        typer.echo(render_scheduler_not_running())
+        return
+    if termination is not ProcessTerminationStatus.SENT:
+        typer.echo(
+            "Scheduler stop refused: identity-bound termination is not available "
+            f"({termination.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     for _ in range(20):  # ~2s budget for the process to actually exit
         if not is_process_alive(record.pid):
@@ -229,9 +272,27 @@ def scheduler_status() -> None:
     pidfile_path = default_pidfile_path()
     record = read_pidfile(pidfile_path)
     render_context = detect_render_context()
-    if record is None or not is_process_alive(record.pid):
+    if record is None:
+        if pidfile_path.exists():
+            typer.echo(
+                "Scheduler status unknown: PID file is corrupt or incomplete; ownership cannot "
+                "be verified.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
         typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
         return
+    owner_status = pidfile_owner_status(record)
+    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
+        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+        return
+    if owner_status is not PidFileOwnerStatus.MATCHING:
+        typer.echo(
+            "Scheduler status unknown: PID file ownership cannot be verified "
+            f"({owner_status.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     typer.echo(
         render_scheduler_status(
             SchedulerStatus(True, record.pid, record.started_at), render_context

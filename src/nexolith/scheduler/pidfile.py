@@ -1,90 +1,152 @@
-"""A small marker file recording the scheduler daemon's process id and start
-time, written by `scheduler start` and used by `scheduler status`/`stop` to
-observe or control it from a different terminal/process.
+"""Atomic scheduler ownership recorded as PID plus process creation time.
 
-Every mechanism here was verified directly against a real separate Windows
-process during this story, not assumed:
+A PID is reusable and is therefore never sufficient proof of ownership.
+New markers persist the scheduler process creation time. Legacy, corrupt, or
+unverifiable markers fail closed: observers never signal or unlink them, and
+startup only recovers markers proven dead or owned by a different process.
 
-- `os.kill(pid, 0)` (the POSIX existence-probe idiom) does NOT work on
-  Windows -- it raises `OSError` (WinError 87, "the parameter is
-  incorrect") even against a genuinely live process. Liveness on Windows is
-  checked via `tasklist /FI "PID eq <pid>"` instead (a built-in Windows
-  command, invoked through the standard library's `subprocess` -- not a new
-  dependency), parsed for the PID as a quoted CSV field so the check is
-  locale-independent (the "no matching task" message is localized prose
-  that varies by system locale and was observed in Italian during this
-  investigation; there is no reliable English substring to match against).
-
-- Neither `os.kill(pid, signal.SIGTERM)` nor plain `taskkill /PID <pid>`
-  (without `/F`) invokes a target Windows process's registered Python
-  signal handler when sent from a different process -- both were tested
-  directly against a real process with SIGINT/SIGTERM/SIGBREAK handlers
-  registered, and in both cases the process was terminated (confirmed via
-  `tasklist`) without the handler ever running (confirmed via the target's
-  own log). This means a remote `stop` on Windows cannot rely on the
-  target's own cleanup code (e.g. removing its own PID file, or letting an
-  in-progress DAG run finish per story 4's own shutdown design) -- it is a
-  forceful stop, not a graceful signal, despite `os.kill`/`SIGTERM`'s name.
-  `stop_process()` here still uses `os.kill(pid, signal.SIGTERM)` (simplest
-  standard-library call, and the one that behaves correctly -- genuinely
-  gracefully -- on Unix) rather than shelling out to `taskkill`; the
-  practical result on Windows is the same either way. A remote `scheduler
-  stop` deliberately leaves the observed PID file in place: it cannot prove
-  that the path was not concurrently reacquired. The next `scheduler start`
-  recovers that stale marker through the serialized atomic acquisition path.
+Remote stop is identity-bound too. Windows verifies creation time and calls
+``TerminateProcess`` through one stable process handle; Linux opens a pidfd
+before verification and signals that descriptor. Platforms without an
+equivalent primitive refuse remote termination rather than falling back to a
+PID-only signal.
 """
 
 import contextlib
 import json
 import os
-import signal
 import subprocess
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
+from nexolith.process_identity import (
+    ProcessIdentity,
+    ProcessIdentityLookupStatus,
+    ProcessIdentityProvider,
+    ProcessIdentityUnavailable,
+    ProcessTerminationStatus,
+    lookup_process_identity,
+    terminate_process_identity,
+)
 from nexolith.state.paths import default_state_dir
 
 _PIDFILE_NAME = "scheduler.pid"
+
+
+class _PidFilePid(int):
+    """An int that carries identity into unchanged observer call sites."""
+
+    owner_create_time_ns: int | None
+
+    def __new__(cls, pid: int, owner_create_time_ns: int | None) -> Self:
+        value = super().__new__(cls, pid)
+        value.owner_create_time_ns = owner_create_time_ns
+        return value
 
 
 @dataclass(frozen=True, slots=True)
 class PidFileRecord:
     pid: int
     started_at: str
+    owner_create_time_ns: int | None = None
+
+    @property
+    def owner_identity(self) -> ProcessIdentity | None:
+        if self.owner_create_time_ns is None:
+            return None
+        return ProcessIdentity(pid=int(self.pid), create_time_ns=self.owner_create_time_ns)
 
 
 @dataclass(frozen=True, slots=True)
 class PidFileClaim:
     acquired: bool
     existing: PidFileRecord | None = None
+    owned: PidFileRecord | None = None
+
+
+class PidFileOwnerStatus(StrEnum):
+    MATCHING = "matching"
+    DEAD = "dead"
+    REUSED = "reused"
+    LEGACY = "legacy"
+    ACCESS_DENIED = "access_denied"
+    UNAVAILABLE = "unavailable"
 
 
 def default_pidfile_path() -> Path:
     return default_state_dir() / _PIDFILE_NAME
 
 
-def write_pidfile(path: Path, pid: int, started_at: str) -> None:
+def _payload(record: PidFileRecord) -> str:
+    data: dict[str, int | str] = {"pid": int(record.pid), "started_at": record.started_at}
+    if record.owner_create_time_ns is not None:
+        data["owner_create_time_ns"] = record.owner_create_time_ns
+    return json.dumps(data)
+
+
+def _record_for_pid(
+    pid: int,
+    started_at: str,
+    identity_provider: ProcessIdentityProvider,
+) -> PidFileRecord:
+    lookup = identity_provider(pid)
+    create_time_ns = (
+        lookup.identity.create_time_ns
+        if lookup.status is ProcessIdentityLookupStatus.FOUND and lookup.identity is not None
+        else None
+    )
+    return PidFileRecord(pid=pid, started_at=started_at, owner_create_time_ns=create_time_ns)
+
+
+def write_pidfile(
+    path: Path,
+    pid: int,
+    started_at: str,
+    *,
+    identity_provider: ProcessIdentityProvider = lookup_process_identity,
+) -> None:
+    """Write a marker for tests and compatibility helpers.
+
+    A live process gets a creation-time identity. A PID that cannot be
+    identified produces a legacy-format marker, which all control paths
+    intentionally treat as unverifiable and never signal.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": pid, "started_at": started_at}), encoding="utf-8")
+    path.write_text(_payload(_record_for_pid(pid, started_at, identity_provider)), encoding="utf-8")
 
 
 def read_pidfile(path: Path) -> PidFileRecord | None:
-    """None for a missing file, or one that isn't valid JSON with the
-    expected shape (e.g. truncated by a crash mid-write) -- treated the
-    same as "no marker" rather than raising, since a corrupt marker is not
-    meaningfully different from a stale/absent one for status/stop's
-    purposes.
-    """
     try:
         content = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
         data = json.loads(content)
-        return PidFileRecord(pid=int(data["pid"]), started_at=str(data["started_at"]))
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        if not isinstance(data, dict):
+            return None
+        pid = data["pid"]
+        started_at = data["started_at"]
+        raw_create_time = data.get("owner_create_time_ns")
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return None
+        if not isinstance(started_at, str) or not started_at:
+            return None
+        if raw_create_time is not None and (
+            isinstance(raw_create_time, bool)
+            or not isinstance(raw_create_time, int)
+            or raw_create_time <= 0
+        ):
+            return None
+        create_time_ns = raw_create_time
+        return PidFileRecord(
+            pid=_PidFilePid(pid, create_time_ns),
+            started_at=started_at,
+            owner_create_time_ns=create_time_ns,
+        )
+    except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
 
@@ -93,7 +155,39 @@ def remove_pidfile(path: Path) -> None:
         path.unlink()
 
 
-def is_process_alive(pid: int) -> bool:
+def remove_pidfile_if_owned(path: Path, owned: PidFileRecord) -> bool:
+    """Remove only the exact marker created by this scheduler invocation."""
+    current = read_pidfile(path)
+    if current != owned:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def pidfile_owner_status(
+    record: PidFileRecord,
+    *,
+    identity_provider: ProcessIdentityProvider = lookup_process_identity,
+) -> PidFileOwnerStatus:
+    expected = record.owner_identity
+    if expected is None:
+        return PidFileOwnerStatus.LEGACY
+    lookup = identity_provider(int(record.pid))
+    if lookup.status is ProcessIdentityLookupStatus.NOT_FOUND:
+        return PidFileOwnerStatus.DEAD
+    if lookup.status is ProcessIdentityLookupStatus.ACCESS_DENIED:
+        return PidFileOwnerStatus.ACCESS_DENIED
+    if lookup.status is ProcessIdentityLookupStatus.UNAVAILABLE:
+        return PidFileOwnerStatus.UNAVAILABLE
+    if lookup.identity != expected:
+        return PidFileOwnerStatus.REUSED
+    return PidFileOwnerStatus.MATCHING
+
+
+def _raw_pid_is_alive(pid: int) -> bool:
     if sys.platform == "win32":
         try:
             result = subprocess.run(
@@ -111,8 +205,22 @@ def is_process_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # exists, just owned by another user
+        return True
     return True
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check identity for pidfile-derived values, liveness for plain PIDs."""
+    if isinstance(pid, _PidFilePid):
+        if pid.owner_create_time_ns is None:
+            return False
+        record = PidFileRecord(
+            pid=pid,
+            started_at="",
+            owner_create_time_ns=pid.owner_create_time_ns,
+        )
+        return pidfile_owner_status(record) is PidFileOwnerStatus.MATCHING
+    return _raw_pid_is_alive(pid)
 
 
 def acquire_pidfile(
@@ -120,20 +228,20 @@ def acquire_pidfile(
     pid: int,
     started_at: str,
     *,
-    process_is_alive: Callable[[int], bool] = is_process_alive,
+    identity_provider: ProcessIdentityProvider = lookup_process_identity,
 ) -> PidFileClaim:
-    """Atomically claim scheduler ownership with exclusive file creation.
-
-    ``open(..., "x")`` maps to ``O_CREAT | O_EXCL`` in CPython on both
-    Windows and POSIX. The filesystem decides creation atomically: only one
-    concurrent starter can create the path.
-
-    A fixed tombstone is exclusively created to serialize stale-file
-    cleaners. The cleaner rechecks ownership while holding that claim,
-    removes only the confirmed-dead marker, then retries creation once.
-    """
+    """Atomically claim ownership, recovering only proven-stale markers."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"pid": pid, "started_at": started_at})
+    owner_lookup = identity_provider(pid)
+    if owner_lookup.status is not ProcessIdentityLookupStatus.FOUND:
+        raise ProcessIdentityUnavailable(
+            f"Cannot determine scheduler process identity ({owner_lookup.status.value})"
+        )
+    assert owner_lookup.identity is not None
+    if owner_lookup.identity.pid != pid:
+        raise ProcessIdentityUnavailable("Scheduler process identity returned the wrong PID")
+    owned = PidFileRecord(pid, started_at, owner_lookup.identity.create_time_ns)
+    payload = _payload(owned)
 
     def exclusive_create() -> bool:
         try:
@@ -143,15 +251,17 @@ def acquire_pidfile(
             return False
         return True
 
-    tombstone = path.with_name(f"{path.name}.stale")
     if exclusive_create():
-        remove_pidfile(tombstone)
-        return PidFileClaim(acquired=True)
+        return PidFileClaim(acquired=True, owned=owned)
 
     existing = read_pidfile(path)
-    if existing is None or process_is_alive(existing.pid):
+    if existing is None:
+        return PidFileClaim(acquired=False)
+    status = pidfile_owner_status(existing, identity_provider=identity_provider)
+    if status not in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
         return PidFileClaim(acquired=False, existing=existing)
 
+    tombstone = path.with_name(f"{path.name}.stale")
     try:
         with tombstone.open("x", encoding="utf-8") as stream:
             stream.write(payload)
@@ -160,23 +270,37 @@ def acquire_pidfile(
 
     try:
         existing = read_pidfile(path)
-        if existing is None or process_is_alive(existing.pid):
+        if existing is None:
+            return PidFileClaim(acquired=False)
+        status = pidfile_owner_status(existing, identity_provider=identity_provider)
+        if status not in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
             return PidFileClaim(acquired=False, existing=existing)
         remove_pidfile(path)
         if exclusive_create():
-            return PidFileClaim(acquired=True)
+            return PidFileClaim(acquired=True, owned=owned)
         return PidFileClaim(acquired=False, existing=read_pidfile(path))
     finally:
         remove_pidfile(tombstone)
 
 
 def stop_process(pid: int) -> bool:
-    """Best-effort on Windows: see this module's own docstring. Returns
-    True if a stop signal was sent (the process existed to receive it),
-    False if it was already gone.
-    """
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return False
-    return True
+    """Signal only a verified process identity; never fall back to PID-only."""
+    if isinstance(pid, _PidFilePid):
+        if pid.owner_create_time_ns is None:
+            return False
+        identity = ProcessIdentity(int(pid), pid.owner_create_time_ns)
+    else:
+        lookup = lookup_process_identity(pid)
+        if lookup.status is not ProcessIdentityLookupStatus.FOUND:
+            return False
+        assert lookup.identity is not None
+        identity = lookup.identity
+    return terminate_process_identity(identity) is ProcessTerminationStatus.SENT
+
+
+def stop_pidfile_owner(record: PidFileRecord) -> ProcessTerminationStatus:
+    """Terminate the exact owner recorded in ``record`` or fail closed."""
+    identity = record.owner_identity
+    if identity is None:
+        return ProcessTerminationStatus.UNAVAILABLE
+    return terminate_process_identity(identity)

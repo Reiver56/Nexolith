@@ -6,6 +6,8 @@ persisted DAG-run owner is still the same process.
 """
 
 import os
+import signal
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,6 +15,7 @@ from enum import StrEnum
 import psutil
 
 _NANOSECONDS_PER_SECOND = 1_000_000_000
+_WINDOWS_CREATE_TIME_TOLERANCE_NS = 1_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,3 +94,134 @@ def current_process_identity() -> ProcessIdentity:
     raise ProcessIdentityUnavailable(
         f"Cannot determine current process identity ({result.status.value})"
     )
+
+
+class ProcessTerminationStatus(StrEnum):
+    SENT = "sent"
+    NOT_FOUND = "not_found"
+    IDENTITY_MISMATCH = "identity_mismatch"
+    ACCESS_DENIED = "access_denied"
+    UNAVAILABLE = "unavailable"
+    UNSUPPORTED = "unsupported"
+
+
+def terminate_process_identity(identity: ProcessIdentity) -> ProcessTerminationStatus:
+    """Terminate exactly ``identity``, never whichever process owns its PID later.
+
+    Windows keeps one process handle from identity verification through
+    ``TerminateProcess``. Linux opens a pidfd before rechecking identity and
+    signals through that descriptor. Other POSIX platforms have no standard
+    identity-bound signaling primitive, so remote termination fails closed.
+    """
+    if sys.platform == "win32":
+        return _terminate_process_identity_windows(identity)
+    if sys.platform.startswith("linux"):
+        return _terminate_process_identity_linux(identity)
+    return ProcessTerminationStatus.UNSUPPORTED
+
+
+def _terminate_process_identity_windows(identity: ProcessIdentity) -> ProcessTerminationStatus:
+    import ctypes
+    from ctypes import wintypes
+
+    process_terminate = 0x0001
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    windows_to_unix_ticks = 116_444_736_000_000_000
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(
+        process_terminate | process_query_limited_information, False, identity.pid
+    )
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == error_invalid_parameter:
+            return ProcessTerminationStatus.NOT_FOUND
+        if error == error_access_denied:
+            return ProcessTerminationStatus.ACCESS_DENIED
+        return ProcessTerminationStatus.UNAVAILABLE
+
+    try:
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return ProcessTerminationStatus.UNAVAILABLE
+        filetime = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        create_time_ns = (filetime - windows_to_unix_ticks) * 100
+        # ProcessIdentity intentionally uses psutil's cross-platform float
+        # seconds. Around present-day epoch values that serialization can
+        # differ from the exact 100 ns FILETIME by a few hundred nanoseconds.
+        # One microsecond covers that representation loss while remaining far
+        # below the time needed to exit, recycle a PID, and create a process.
+        if abs(create_time_ns - identity.create_time_ns) > _WINDOWS_CREATE_TIME_TOLERANCE_NS:
+            return ProcessTerminationStatus.IDENTITY_MISMATCH
+        if not kernel32.TerminateProcess(handle, 1):
+            error = ctypes.get_last_error()
+            if error == error_access_denied:
+                return ProcessTerminationStatus.ACCESS_DENIED
+            return ProcessTerminationStatus.UNAVAILABLE
+        return ProcessTerminationStatus.SENT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _terminate_process_identity_linux(identity: ProcessIdentity) -> ProcessTerminationStatus:
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None:
+        return ProcessTerminationStatus.UNSUPPORTED
+
+    try:
+        pidfd = pidfd_open(identity.pid, 0)
+    except ProcessLookupError:
+        return ProcessTerminationStatus.NOT_FOUND
+    except PermissionError:
+        return ProcessTerminationStatus.ACCESS_DENIED
+    except OSError:
+        return ProcessTerminationStatus.UNAVAILABLE
+
+    try:
+        lookup = lookup_process_identity(identity.pid)
+        if lookup.status is ProcessIdentityLookupStatus.NOT_FOUND:
+            return ProcessTerminationStatus.NOT_FOUND
+        if lookup.status is ProcessIdentityLookupStatus.ACCESS_DENIED:
+            return ProcessTerminationStatus.ACCESS_DENIED
+        if lookup.status is ProcessIdentityLookupStatus.UNAVAILABLE:
+            return ProcessTerminationStatus.UNAVAILABLE
+        if lookup.identity != identity:
+            return ProcessTerminationStatus.IDENTITY_MISMATCH
+        try:
+            pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)
+        except ProcessLookupError:
+            return ProcessTerminationStatus.NOT_FOUND
+        except PermissionError:
+            return ProcessTerminationStatus.ACCESS_DENIED
+        except OSError:
+            return ProcessTerminationStatus.UNAVAILABLE
+        return ProcessTerminationStatus.SENT
+    finally:
+        os.close(pidfd)

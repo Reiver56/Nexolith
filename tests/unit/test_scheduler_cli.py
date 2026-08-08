@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -9,6 +10,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
@@ -20,10 +22,20 @@ from nexolith.cli.scheduler_render import SchedulerStatus, render_scheduler_stat
 from nexolith.dag import execute_dag
 from nexolith.events import EventSink
 from nexolith.models import ExecutionResult
+from nexolith.process_identity import (
+    ProcessIdentity,
+    ProcessIdentityLookup,
+    ProcessTerminationStatus,
+)
 from nexolith.scheduler import (
+    PidFileOwnerStatus,
+    PidFileRecord,
+    acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
+    pidfile_owner_status,
     read_pidfile,
+    remove_pidfile_if_owned,
     stop_process,
     write_pidfile,
 )
@@ -31,6 +43,25 @@ from nexolith.state import StateStore
 from nexolith.types import Scalar
 
 runner = CliRunner()
+
+
+def write_identity_pidfile(
+    path: Path,
+    pid: int,
+    started_at: str,
+    create_time_ns: int,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "started_at": started_at,
+                "owner_create_time_ns": create_time_ns,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +119,46 @@ def test_is_process_alive_false_for_a_pid_that_does_not_exist() -> None:
     assert is_process_alive(999999) is False
 
 
+def test_new_pidfile_records_pid_and_creation_time(tmp_path: Path) -> None:
+    pidfile_path = tmp_path / "scheduler.pid"
+
+    write_pidfile(pidfile_path, os.getpid(), "now")
+
+    data = json.loads(pidfile_path.read_text(encoding="utf-8"))
+    record = read_pidfile(pidfile_path)
+    assert data["pid"] == os.getpid()
+    assert isinstance(data["owner_create_time_ns"], int)
+    assert record is not None
+    assert record.owner_identity == ProcessIdentity(os.getpid(), data["owner_create_time_ns"])
+
+
+@pytest.mark.parametrize(
+    ("lookup", "expected"),
+    [
+        (ProcessIdentityLookup.found(ProcessIdentity(4242, 10)), PidFileOwnerStatus.MATCHING),
+        (ProcessIdentityLookup.found(ProcessIdentity(4242, 11)), PidFileOwnerStatus.REUSED),
+        (ProcessIdentityLookup.not_found(), PidFileOwnerStatus.DEAD),
+        (ProcessIdentityLookup.access_denied(), PidFileOwnerStatus.ACCESS_DENIED),
+        (ProcessIdentityLookup.unavailable(), PidFileOwnerStatus.UNAVAILABLE),
+    ],
+)
+def test_pidfile_owner_status_is_typed_and_identity_aware(
+    lookup: ProcessIdentityLookup,
+    expected: PidFileOwnerStatus,
+) -> None:
+    record = PidFileRecord(4242, "then", 10)
+
+    status = pidfile_owner_status(record, identity_provider=lambda pid: lookup)
+
+    assert status is expected
+
+
+def test_legacy_pidfile_owner_is_never_treated_as_live() -> None:
+    record = PidFileRecord(4242, "then")
+
+    assert pidfile_owner_status(record) is PidFileOwnerStatus.LEGACY
+
+
 def test_is_process_alive_against_a_real_separate_child_process() -> None:
     """Not just this test's own PID -- a genuinely separate process,
     spawned and then torn down, matching how a real scheduler daemon in a
@@ -110,12 +181,7 @@ def test_is_process_alive_against_a_real_separate_child_process() -> None:
 
 
 def test_stop_process_genuinely_terminates_a_real_process() -> None:
-    """stop_process() (os.kill(pid, SIGTERM)) was verified during this
-    story's investigation to reliably terminate a real Windows process,
-    even though it does not invoke the target's own graceful-shutdown
-    code -- see nexolith.scheduler.pidfile's docstring. This test proves
-    the part that's actually reliable: the process really goes away.
-    """
+    """A plain PID is captured as an identity before safe termination."""
     proc = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
@@ -185,7 +251,7 @@ def test_status_reports_not_running_and_leaves_a_stale_marker(
     without going through `scheduler stop`) must not make status lie.
     """
     pidfile_path = default_pidfile_path()
-    write_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00")
+    write_identity_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00", 1)
     assert pidfile_path.exists()
 
     result = runner.invoke(app, ["scheduler", "status"])
@@ -202,15 +268,14 @@ def test_status_does_not_delete_a_concurrently_replaced_marker(
 ) -> None:
     pidfile_path = default_pidfile_path()
     replacement_pid = os.getpid()
-    write_pidfile(pidfile_path, 111111, "old-start")
+    write_identity_pidfile(pidfile_path, 111111, "old-start", 1)
 
-    def replace_before_reporting_dead(pid: int) -> bool:
-        assert pid == 111111
+    def replace_before_reporting_dead(record: object) -> PidFileOwnerStatus:
         write_pidfile(pidfile_path, replacement_pid, "new-start")
-        return False
+        return PidFileOwnerStatus.DEAD
 
     monkeypatch.setattr(
-        sys.modules["nexolith.cli.app"], "is_process_alive", replace_before_reporting_dead
+        sys.modules["nexolith.cli.app"], "pidfile_owner_status", replace_before_reporting_dead
     )
 
     result = runner.invoke(app, ["scheduler", "status"])
@@ -256,6 +321,26 @@ def test_start_writes_and_clean_exit_removes_the_marker_file(
     assert not pidfile_path.exists()  # removed after run() returned
 
 
+def test_start_clean_exit_preserves_a_replacement_claim(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nexolith.scheduler.daemon import Scheduler
+
+    pidfile_path = default_pidfile_path()
+
+    def replace_during_run(self: Scheduler, **kwargs: object) -> None:
+        write_pidfile(pidfile_path, os.getpid(), "replacement")
+
+    monkeypatch.setattr(Scheduler, "run", replace_during_run)
+
+    result = runner.invoke(app, ["scheduler", "start"])
+
+    assert result.exit_code == 0
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert record.started_at == "replacement"
+
+
 def test_start_refuses_when_a_real_live_process_already_holds_the_marker(
     isolated_state_dir: Path,
 ) -> None:
@@ -290,13 +375,108 @@ def test_start_cleans_up_a_stale_marker_and_proceeds(
         seen_owner.append(record.pid)
 
     monkeypatch.setattr(Scheduler, "run", record_owner)
-    write_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00")  # stale: 999999 is dead
+    write_identity_pidfile(
+        pidfile_path, 999999, "2026-01-01T00:00:00+00:00", 1
+    )  # stale: 999999 is dead
 
     result = runner.invoke(app, ["scheduler", "start"])
 
     assert result.exit_code == 0
     assert "already" not in result.output.lower()
     assert seen_owner == [os.getpid()]
+
+
+def test_start_recovers_a_live_reused_pid_identity(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nexolith.scheduler.daemon import Scheduler
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    pidfile_path = default_pidfile_path()
+    ran: list[bool] = []
+    try:
+        time.sleep(0.3)
+        actual = round(psutil.Process(proc.pid).create_time() * 1_000_000_000)
+        write_identity_pidfile(pidfile_path, proc.pid, "old", actual - 1_000_000_000)
+        monkeypatch.setattr(Scheduler, "run", lambda self, **kwargs: ran.append(True))
+
+        result = runner.invoke(app, ["scheduler", "start"])
+
+        assert result.exit_code == 0
+        assert ran == [True]
+        assert proc.poll() is None
+        assert not pidfile_path.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "existing_lookup",
+    [
+        ProcessIdentityLookup.access_denied(),
+        ProcessIdentityLookup.unavailable(),
+    ],
+)
+def test_acquire_fails_closed_when_existing_identity_cannot_be_checked(
+    tmp_path: Path,
+    existing_lookup: ProcessIdentityLookup,
+) -> None:
+    pidfile_path = tmp_path / "scheduler.pid"
+    write_identity_pidfile(pidfile_path, 4242, "old", 10)
+    original = pidfile_path.read_bytes()
+
+    def provider(pid: int) -> ProcessIdentityLookup:
+        if pid == os.getpid():
+            return ProcessIdentityLookup.found(ProcessIdentity(pid, 20))
+        return existing_lookup
+
+    claim = acquire_pidfile(
+        pidfile_path,
+        os.getpid(),
+        "new",
+        identity_provider=provider,
+    )
+
+    assert claim.acquired is False
+    assert pidfile_path.read_bytes() == original
+
+
+def test_acquire_fails_closed_for_legacy_and_corrupt_markers(tmp_path: Path) -> None:
+    for name, payload in [
+        ("legacy.pid", '{"pid": 4242, "started_at": "old"}'),
+        ("corrupt.pid", "{"),
+    ]:
+        pidfile_path = tmp_path / name
+        pidfile_path.write_text(payload, encoding="utf-8")
+        original = pidfile_path.read_bytes()
+
+        claim = acquire_pidfile(pidfile_path, os.getpid(), "new")
+
+        assert claim.acquired is False
+        assert pidfile_path.read_bytes() == original
+
+
+def test_clean_exit_does_not_remove_a_replacement_claim(tmp_path: Path) -> None:
+    pidfile_path = tmp_path / "scheduler.pid"
+    claim = acquire_pidfile(pidfile_path, os.getpid(), "owned")
+    assert claim.acquired
+    assert claim.owned is not None
+    replacement = PidFileRecord(
+        pid=os.getpid(),
+        started_at="replacement",
+        owner_create_time_ns=claim.owned.owner_create_time_ns,
+    )
+    write_identity_pidfile(
+        pidfile_path,
+        int(replacement.pid),
+        replacement.started_at,
+        replacement.owner_create_time_ns or 0,
+    )
+
+    assert remove_pidfile_if_owned(pidfile_path, claim.owned) is False
+    assert read_pidfile(pidfile_path) == replacement
 
 
 def test_two_real_processes_cannot_both_acquire_the_scheduler_pidfile(tmp_path: Path) -> None:
@@ -448,9 +628,113 @@ def test_stop_genuinely_terminates_a_real_running_scheduler_and_leaves_its_marke
             proc.kill()
 
 
+def test_stop_refuses_to_signal_a_reused_pid_with_a_different_identity(
+    isolated_state_dir: Path,
+) -> None:
+    """A live process reusing an old scheduler PID is not the scheduler."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    pidfile_path = default_pidfile_path()
+    try:
+        time.sleep(0.3)
+        live_create_time_ns = round(psutil.Process(proc.pid).create_time() * 1_000_000_000)
+        pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+        pidfile_path.write_text(
+            json.dumps(
+                {
+                    "pid": proc.pid,
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "owner_create_time_ns": live_create_time_ns - 1_000_000_000,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["scheduler", "stop"])
+
+        assert result.exit_code == 0
+        assert "not running" in result.output.lower()
+        assert proc.poll() is None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+def test_stop_refuses_to_signal_a_live_legacy_pidfile(isolated_state_dir: Path) -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    pidfile_path = default_pidfile_path()
+    try:
+        time.sleep(0.3)
+        pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+        pidfile_path.write_text(
+            json.dumps({"pid": proc.pid, "started_at": "legacy"}), encoding="utf-8"
+        )
+
+        result = runner.invoke(app, ["scheduler", "stop"])
+
+        assert result.exit_code == 1
+        assert "cannot be verified" in result.output.lower()
+        assert proc.poll() is None
+        assert pidfile_path.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "owner_status",
+    [PidFileOwnerStatus.ACCESS_DENIED, PidFileOwnerStatus.UNAVAILABLE],
+)
+def test_stop_fails_closed_when_owner_lookup_is_inconclusive(
+    isolated_state_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_status: PidFileOwnerStatus,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    write_identity_pidfile(pidfile_path, 4242, "old", 10)
+    signaled: list[bool] = []
+    monkeypatch.setattr(
+        sys.modules["nexolith.cli.app"],
+        "pidfile_owner_status",
+        lambda record: owner_status,
+    )
+    monkeypatch.setattr(
+        sys.modules["nexolith.cli.app"],
+        "stop_pidfile_owner",
+        lambda record: signaled.append(True),
+    )
+
+    result = runner.invoke(app, ["scheduler", "stop"])
+
+    assert result.exit_code == 1
+    assert owner_status.value in result.output
+    assert signaled == []
+    assert pidfile_path.exists()
+
+
+@pytest.mark.parametrize("command", ["start", "status", "stop"])
+def test_scheduler_commands_fail_closed_for_a_corrupt_pidfile(
+    isolated_state_dir: Path,
+    command: str,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    pidfile_path.parent.mkdir(parents=True, exist_ok=True)
+    pidfile_path.write_text("{", encoding="utf-8")
+
+    result = runner.invoke(app, ["scheduler", command])
+
+    assert result.exit_code == 1
+    assert "corrupt" in result.output.lower()
+    assert pidfile_path.read_text(encoding="utf-8") == "{"
+
+
 def test_stop_reports_not_running_and_leaves_a_stale_marker(isolated_state_dir: Path) -> None:
     pidfile_path = default_pidfile_path()
-    write_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00")
+    write_identity_pidfile(pidfile_path, 999999, "2026-01-01T00:00:00+00:00", 1)
 
     result = runner.invoke(app, ["scheduler", "stop"])
 
@@ -466,27 +750,24 @@ def test_stop_does_not_delete_a_concurrently_replaced_marker(
 ) -> None:
     pidfile_path = default_pidfile_path()
     replacement_pid = os.getpid()
-    write_pidfile(pidfile_path, 111111, "old-start")
-    liveness = iter((True, False, False))
+    write_identity_pidfile(pidfile_path, 111111, "old-start", 1)
 
-    def observed_process_is_alive(pid: int) -> bool:
-        assert pid == 111111
-        return next(liveness)
+    def observed_owner_status(record: object) -> PidFileOwnerStatus:
+        return PidFileOwnerStatus.MATCHING
 
-    def stop_old_process(pid: int) -> bool:
-        assert pid == 111111
+    def stop_old_process(record: object) -> ProcessTerminationStatus:
         write_pidfile(pidfile_path, replacement_pid, "new-start")
-        return True
+        return ProcessTerminationStatus.NOT_FOUND
 
     monkeypatch.setattr(
-        sys.modules["nexolith.cli.app"], "is_process_alive", observed_process_is_alive
+        sys.modules["nexolith.cli.app"], "pidfile_owner_status", observed_owner_status
     )
-    monkeypatch.setattr(sys.modules["nexolith.cli.app"], "stop_process", stop_old_process)
+    monkeypatch.setattr(sys.modules["nexolith.cli.app"], "stop_pidfile_owner", stop_old_process)
 
     result = runner.invoke(app, ["scheduler", "stop"])
 
     assert result.exit_code == 0
-    assert "stopped" in result.output.lower()
+    assert "not running" in result.output.lower()
     record = read_pidfile(pidfile_path)
     assert record is not None
     assert (record.pid, record.started_at) == (replacement_pid, "new-start")
