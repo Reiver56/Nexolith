@@ -29,6 +29,8 @@ process](RELEASING.md).
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
 [![Typer](https://img.shields.io/badge/Typer-CLI-009688)](https://typer.tiangolo.com/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-API-009688)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?logo=vite&logoColor=white)](https://vite.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-supported-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![pytest](https://img.shields.io/badge/pytest-tested-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
@@ -53,6 +55,8 @@ process](RELEASING.md).
 - Small registries for adding connectors and transformations
 - A Typer CLI with non-zero exit codes on failure
 - An optional, versioned API for DAG/run monitoring and explicit DAG/scheduler actions
+- A polished, responsive React monitoring UI for DAGs, recent runs, run/task/attempt history,
+  and read-only API/scheduler status
 
 ## Architecture
 
@@ -75,6 +79,7 @@ scheduler, or state packages depend on FastAPI.
 ## Requirements and installation
 
 - Python 3.12, 3.13, or 3.14
+- Node.js 24 LTS and npm 11 when developing the optional React UI
 
 Install Nexolith from PyPI:
 
@@ -197,9 +202,33 @@ that survives API shutdown; stop remains PID-plus-creation-time-bound.
 Interactive documentation is at `/docs` and the typed contract at `/openapi.json`. There is no
 authentication or authorization: keep it on localhost or a trusted network. Actions require JSON,
 Host values are allowlisted, cross-origin browser actions are rejected by default, and no wildcard
-CORS is enabled. NXL-113 through NXL-115 React work remains future work. See
+CORS is enabled. See
 [the API package documentation](src/nexolith/api/README.md) for lifecycle, error, security, and
 OpenAPI compatibility guarantees.
+
+### React monitoring UI (v0.3.4)
+
+The source-only frontend in [`web/`](web/README.md) provides read-only routes for registered DAGs,
+recent runs, and run detail. It also reports API reachability and scheduler state without exposing
+PID or process identity. NXL-113 intentionally has no registration, trigger, edit, scheduler
+control, or other action button; the NXL-114 graph and NXL-115 actions remain future work.
+
+Install the API and frontend dependencies, then run both development processes:
+
+```bash
+uv sync --extra api --extra dev
+uv run nexolith api start
+
+# Separate terminal
+cd web
+npm ci
+npm run dev
+```
+
+Vite serves `http://127.0.0.1:5173` and proxies relative `/api` reads to the local Nexolith API at
+`http://127.0.0.1:8765`; no wildcard CORS or developer-machine hostname is required. The current
+story does not serve frontend assets from FastAPI, package them in the Python wheel, publish them,
+or add a `nexolith ui` command.
 
 ### Known limitations
 
@@ -434,6 +463,17 @@ uv run mypy src
 uv run pytest
 ```
 
+Frontend checks run from `web/` with the Node version pinned in `.node-version`:
+
+```bash
+npm ci
+npm run api:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
 These commands run without Docker or external services. PostgreSQL tests are marked and skipped
 unless explicitly selected. The same standard checks run in GitHub Actions on pushes to `master`
 and pull requests. CI also builds the package and installs the wheel on every supported Python
@@ -504,6 +544,7 @@ Available:
       triggers, and priority/severity classification
 - [x] A scheduler daemon and persisted execution history
 - [x] A typed REST API for monitoring and explicit DAG/scheduler actions
+- [x] A responsive read-only React UI for DAG and run monitoring
 
 See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
@@ -513,7 +554,7 @@ Planned, not implemented:
 - [ ] A custom transformation plugin system
 - [ ] Parallel task execution within a DAG (currently sequential)
 - [ ] Data-quality checks
-- [ ] Lineage, metrics, observability, and a web dashboard
+- [ ] DAG graph visualization, browser action controls, lineage, metrics, and observability
 
 ## Contributing, security, and license
 

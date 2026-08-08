@@ -22,8 +22,11 @@ contract.
 | `POST` | `/api/v1/scheduler/stop` | Stop only the verified scheduler owner | `stop_scheduler` |
 
 All requests, responses, parameters, and errors have explicit models. Stable operation IDs and
-tags support automated TypeScript generation in NXL-113; no generated schema or handwritten
-frontend interfaces are committed. Backward-incompatible changes to paths, operation IDs,
+tags support automated TypeScript generation in NXL-113. `scripts/export_openapi.py` calls the
+application factory without starting a server or opening state; `npm run api:generate` from
+`web/` commits the resulting TypeScript declarations, never an intermediate OpenAPI JSON file.
+Frontend code imports generated types instead of handwritten shadow interfaces, and CI fails on
+drift. Backward-incompatible changes to paths, operation IDs,
 parameters, enums, fields, or errors must be deliberate, documented, and reviewed.
 
 Registration calls the shared `register_dag()` action. A first registration is `201 created`;
@@ -64,8 +67,8 @@ There is **no authentication or authorization**. Keep the server on localhost or
 Non-loopback binding prints a warning; wildcard binds also require explicit repeated
 `--trusted-host` values. The API accepts only configured Host names, sends no wildcard CORS policy,
 requires JSON for every action, rejects cross-origin browser actions by default, and exposes no GET
-mutation. NXL-113 must deliberately configure its exact frontend origin instead of adding wildcard
-CORS.
+mutation. The NXL-113 development server uses same-origin relative paths and proxies `/api` to the
+local backend instead of adding wildcard CORS.
 
 Responses omit raw persisted exceptions, connection details, environment values, process
 arguments, source paths, owner creation timestamps, usernames, and home directories. Errors use

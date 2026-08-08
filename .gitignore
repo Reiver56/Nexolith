@@ -22,3 +22,8 @@ examples/medallion/gold/
 examples/fonolink/data/
 examples/fonolink/state/
 examples/fonolink/state_cascade_demo/
+node_modules/
+web/dist/
+web/coverage/
+web/.vite/
+web/.openapi*.json
