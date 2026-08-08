@@ -32,10 +32,11 @@ same schema.
 
 ## Lifecycle and boundaries
 
-`create_app()` is injectable and performs no state or scheduler I/O. Each request creates and
-closes its own `StateStore` on the request's async execution thread; SQLite's default thread check
-remains enabled, and no connection is shared globally. DAG declarations are read fresh from their
-registered files, while run/task/attempt history comes directly from the existing state queries.
+`create_app()` is injectable and performs no state or scheduler I/O. Each request creates, queries,
+and closes its own `StateStore` within one worker-thread invocation. SQLite's default thread check
+remains enabled, no connection is shared globally, and lock waits or file I/O do not stall the
+async event loop. DAG declarations are read fresh from their registered files, while
+run/task/attempt history comes directly from the existing state queries.
 Scheduler status uses the shared read-only PID-file query and verifies both PID and process creation
 time. It never signals a process, deletes a stale marker, or performs cleanup.
 

@@ -1,10 +1,11 @@
 """FastAPI adapter for Nexolith's typed read-only query service."""
 
 import sqlite3
-from collections.abc import AsyncIterator, Callable
-from typing import Annotated
+from collections.abc import Callable
+from typing import Annotated, TypeVar
 
-from fastapi import Depends, FastAPI, Path, Query, Request
+from fastapi import FastAPI, Path, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -26,6 +27,7 @@ from nexolith.scheduler import query_scheduler_status
 from nexolith.state import StateStore
 
 StoreFactory = Callable[[], StateStore]
+QueryResult = TypeVar("QueryResult")
 
 _TAGS = [
     {"name": "meta", "description": "Stable API contract metadata."},
@@ -62,21 +64,24 @@ def create_app(
         openapi_tags=_TAGS,
     )
 
-    async def query_service() -> AsyncIterator[ApiQueryService]:
-        try:
-            store = store_factory()
-        except (OSError, sqlite3.Error) as exc:
-            raise ApiQueryError(
-                ApiErrorCode.STATE_UNAVAILABLE,
-                503,
-                "Nexolith state is unavailable.",
-            ) from exc
-        try:
-            yield ApiQueryService(store, scheduler_status_query)
-        finally:
-            store.close()
+    async def execute_query(
+        operation: Callable[[ApiQueryService], QueryResult],
+    ) -> QueryResult:
+        def run_query() -> QueryResult:
+            try:
+                store = store_factory()
+            except (OSError, sqlite3.Error) as exc:
+                raise ApiQueryError(
+                    ApiErrorCode.STATE_UNAVAILABLE,
+                    503,
+                    "Nexolith state is unavailable.",
+                ) from exc
+            try:
+                return operation(ApiQueryService(store, scheduler_status_query))
+            finally:
+                store.close()
 
-    Service = Annotated[ApiQueryService, Depends(query_service, scope="function")]
+        return await run_in_threadpool(run_query)
 
     @app.exception_handler(ApiQueryError)
     async def handle_query_error(_request: Request, exc: ApiQueryError) -> JSONResponse:
@@ -123,8 +128,8 @@ def create_app(
         summary="List registered DAGs",
         description="Lists registered DAGs with safe current declarative metadata.",
     )
-    async def list_dags(service: Service) -> DagListResponse:
-        return DagListResponse(service.list_dags())
+    async def list_dags() -> DagListResponse:
+        return DagListResponse(await execute_query(lambda service: service.list_dags()))
 
     @app.get(
         "/api/v1/dags/{dag_name}",
@@ -140,10 +145,9 @@ def create_app(
         description="Reads the current registered DAG source and returns its safe structure.",
     )
     async def get_dag(
-        service: Service,
         dag_name: Annotated[str, Path(min_length=1, description="Registered DAG name.")],
     ) -> DagDetailResponse:
-        return service.get_dag(dag_name)
+        return await execute_query(lambda service: service.get_dag(dag_name))
 
     @app.get(
         "/api/v1/runs",
@@ -155,13 +159,12 @@ def create_app(
         description="Returns a bounded newest-first view of persisted DAG runs.",
     )
     async def list_runs(
-        service: Service,
         limit: Annotated[
             int,
             Query(ge=1, le=100, description="Maximum number of recent runs to return."),
         ] = 20,
     ) -> RunListResponse:
-        return RunListResponse(service.list_runs(limit))
+        return RunListResponse(await execute_query(lambda service: service.list_runs(limit)))
 
     @app.get(
         "/api/v1/runs/{run_id}",
@@ -176,10 +179,9 @@ def create_app(
         description="Returns the persisted run, task, and retry-attempt history.",
     )
     async def get_run(
-        service: Service,
         run_id: Annotated[int, Path(ge=1, description="Persisted DAG run identifier.")],
     ) -> RunDetailResponse:
-        return service.get_run(run_id)
+        return await execute_query(lambda service: service.get_run(run_id))
 
     @app.get(
         "/api/v1/scheduler",
@@ -190,7 +192,7 @@ def create_app(
         summary="Get scheduler status",
         description="Checks PID and creation-time ownership without changing scheduler state.",
     )
-    async def get_scheduler_status(service: Service) -> SchedulerStatusResponse:
-        return service.get_scheduler_status()
+    async def get_scheduler_status() -> SchedulerStatusResponse:
+        return await execute_query(lambda service: service.get_scheduler_status())
 
     return app

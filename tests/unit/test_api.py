@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx2 import ASGITransport, AsyncClient
 from typer.testing import CliRunner
 
 from nexolith.api.app import create_app
@@ -446,6 +449,46 @@ def test_request_scoped_store_stays_on_one_thread_and_closes(tmp_path: Path) -> 
     assert len({id(store) for store in created}) == 2
     assert all(store.query_threads == [store.created_thread] for store in created)
     assert all(store.closed for store in created)
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_slow_state_read_does_not_stall_event_loop(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.db"
+    release = threading.Event()
+
+    class SlowStore(StateStore):
+        def __init__(self) -> None:
+            super().__init__(database_path, process_identity=lambda: _IDENTITY)
+
+        def list_dags(self) -> list[object]:  # type: ignore[override]
+            release.wait(timeout=2)
+            return []
+
+    application = create_app(store_factory=SlowStore)
+    transport = ASGITransport(app=application)
+    timer = threading.Timer(1, release.set)
+    timer.start()
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            started_at = time.perf_counter()
+            slow_request = asyncio.create_task(client.get("/api/v1/dags"))
+            await asyncio.sleep(0.05)
+            metadata = await client.get("/api/v1")
+            elapsed = time.perf_counter() - started_at
+            release.set()
+            slow_response = await slow_request
+    finally:
+        release.set()
+        timer.cancel()
+
+    assert metadata.status_code == 200
+    assert slow_response.status_code == 200
+    assert elapsed < 0.5
 
 
 def test_unavailable_state_returns_typed_safe_error() -> None:
