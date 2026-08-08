@@ -7,6 +7,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { StatusBadge } from "../../components/StatusBadge";
 import { useApiResource } from "../../hooks/useApiResource";
 import { AppLink, dagGraphPath } from "../../router";
+import { RegisterDagControl, TriggerDagControl } from "./DagActions";
 
 function scheduleFor(dag: DagSummary): string {
   return dag.current_schedule ?? dag.registered_schedule ?? "Event-driven";
@@ -32,7 +33,12 @@ export function DagListPage() {
         eyebrow="Pipeline landscape"
         title="DAGs"
         description="Registered workflows, their scheduling posture, and operational importance."
-        action={<RefreshButton onClick={reload} />}
+        action={
+          <div className="button-group">
+            <RefreshButton onClick={reload} />
+            <RegisterDagControl onRegistered={reload} />
+          </div>
+        }
       />
       {resource.status === "loading" ? <LoadingState label="Loading DAGs" /> : null}
       {resource.status === "error" ? (
@@ -41,7 +47,7 @@ export function DagListPage() {
       {resource.status === "success" && resource.data.length === 0 ? (
         <EmptyState
           title="No registered DAGs"
-          message="Run a DAG or register one from the Nexolith CLI to see it here."
+          message="Register a DAG YAML file to add it to this scheduling registry."
         />
       ) : null}
       {resource.status === "success" && resource.data.length > 0 ? (
@@ -60,7 +66,7 @@ export function DagListPage() {
                   <th scope="col">Priority</th>
                   <th scope="col">Severity</th>
                   <th scope="col">Trigger</th>
-                  <th scope="col"><span className="sr-only">Graph</span></th>
+                  <th scope="col"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -98,14 +104,19 @@ export function DagListPage() {
                         )}
                       </td>
                       <td data-label="Trigger">{triggerFor(dag)}</td>
-                      <td data-label="Graph">
-                        {dag.source_status === "available" ? (
-                          <AppLink className="run-link" to={dagGraphPath(dag.name)}>
-                            View graph <span aria-hidden="true">→</span>
-                          </AppLink>
-                        ) : (
-                          <span className="muted">Unavailable</span>
-                        )}
+                      <td data-label="Actions">
+                        <div className="table-actions">
+                          {dag.source_status === "available" ? (
+                            <>
+                              <AppLink className="run-link" to={dagGraphPath(dag.name)}>
+                                View graph <span aria-hidden="true">→</span>
+                              </AppLink>
+                              <TriggerDagControl dagName={dag.name} />
+                            </>
+                          ) : (
+                            <span className="muted">Unavailable</span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}

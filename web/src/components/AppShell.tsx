@@ -1,7 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import type { ReactNode } from "react";
 
 import { getApiInfo, getSchedulerStatus } from "../api/client";
+import { BACKEND_STATE_CHANGED_EVENT } from "../api/events";
 import { useApiResource } from "../hooks/useApiResource";
 import { AppLink } from "../router";
 import { StatusBadge } from "./StatusBadge";
@@ -41,6 +42,14 @@ export function AppShell({ children, pathname }: { children: ReactNode; pathname
   const { resource, reload } = useApiResource(loader, "Nexolith API is unreachable.");
   const dagsActive = pathname === "/" || pathname.startsWith("/dags");
   const runsActive = pathname.startsWith("/runs");
+  const schedulerActive = pathname.startsWith("/scheduler");
+
+  useEffect(() => {
+    window.addEventListener(BACKEND_STATE_CHANGED_EVENT, reload);
+    return () => {
+      window.removeEventListener(BACKEND_STATE_CHANGED_EVENT, reload);
+    };
+  }, [reload]);
 
   return (
     <div className="app-frame">
@@ -62,6 +71,12 @@ export function AppShell({ children, pathname }: { children: ReactNode; pathname
             </AppLink>
             <AppLink to="/runs" aria-current={runsActive ? "page" : undefined}>
               Runs
+            </AppLink>
+            <AppLink
+              to="/scheduler"
+              aria-current={schedulerActive ? "page" : undefined}
+            >
+              Scheduler
             </AppLink>
           </nav>
           <div className="system-status" aria-live="polite">
@@ -104,9 +119,9 @@ export function AppShell({ children, pathname }: { children: ReactNode; pathname
         {children}
       </main>
       <footer className="app-footer">
-        <span>Read-only monitoring</span>
+        <span>Monitoring and explicit actions</span>
         <span aria-hidden="true">·</span>
-        <span>NXL-114 · v0.3.4</span>
+        <span>v0.3.4</span>
       </footer>
     </div>
   );

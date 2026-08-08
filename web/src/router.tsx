@@ -9,6 +9,7 @@ export type Route =
   | { page: "dag-graph"; dagName: string }
   | { page: "runs" }
   | { page: "run"; runId: string }
+  | { page: "scheduler" }
   | { page: "not-found" };
 
 function subscribe(listener: () => void): () => void {
@@ -41,6 +42,9 @@ export function parseRoute(pathname: string): Route {
   if (normalized === "/runs") {
     return { page: "runs" };
   }
+  if (normalized === "/scheduler") {
+    return { page: "scheduler" };
+  }
   const graphMatch = /^\/dags\/([^/]+)\/graph$/.exec(normalized);
   if (graphMatch?.[1] !== undefined) {
     try {
@@ -62,6 +66,10 @@ export function parseRoute(pathname: string): Route {
 
 export function dagGraphPath(dagName: string): string {
   return `/dags/${encodeURIComponent(dagName)}/graph`;
+}
+
+export function runDetailPath(runId: number): string {
+  return `/runs/${String(runId)}`;
 }
 
 export function useRoute(): { pathname: string; route: Route } {

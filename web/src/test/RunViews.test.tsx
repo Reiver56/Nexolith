@@ -99,17 +99,18 @@ test("aborts an in-flight read when its component unmounts", () => {
   expect(observedSignal?.aborted).toBe(true);
 });
 
-test("production source contains no mutating request or handwritten response schema", () => {
+test("production actions use the generated contract without handwritten response schemas", () => {
   const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const client = readFileSync(resolve(sourceRoot, "api", "client.ts"), "utf8");
   const aliases = readFileSync(resolve(sourceRoot, "api", "types.ts"), "utf8");
   const styles = readFileSync(resolve(sourceRoot, "styles", "app.css"), "utf8");
 
-  expect(client).not.toMatch(/method:\s*["'](?:POST|PUT|PATCH|DELETE)["']/i);
-  expect(client).not.toContain("/scheduler/start");
-  expect(client).not.toContain("/scheduler/stop");
-  expect(client).not.toContain("/dags/registrations");
-  expect(aliases).toContain('import type { components } from "./schema"');
+  expect(client).toContain('method: "POST"');
+  expect(client).toContain("/scheduler/start");
+  expect(client).toContain("/scheduler/stop");
+  expect(client).toContain("/dags/registrations");
+  expect(client).not.toMatch(/method:\s*["'](?:PUT|PATCH|DELETE)["']/i);
+  expect(aliases).toContain('import type { components, operations } from "./schema"');
   expect(aliases).not.toMatch(/interface\s+(?:Dag|Run|Scheduler)/);
   expect(styles).toContain("@media (max-width: 44rem)");
   expect(styles).toContain("content: attr(data-label)");

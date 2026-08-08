@@ -1,4 +1,4 @@
-import type { components } from "./schema";
+import type { components, operations } from "./schema";
 
 export type ApiInfo = components["schemas"]["ApiInfoResponse"];
 export type ApiErrorCode = components["schemas"]["ApiErrorCode"];
@@ -16,3 +16,11 @@ export type TaskRun = components["schemas"]["TaskRunResponse"];
 export type TaskAttempt = components["schemas"]["TaskAttemptResponse"];
 export type SchedulerStatus = components["schemas"]["SchedulerStatusResponse"];
 export type TaskRunStatus = components["schemas"]["TaskRunStatus"];
+export type RegisterDagRequest =
+  operations["register_dag"]["requestBody"]["content"]["application/json"];
+export type DagRegistration = components["schemas"]["DagRegistrationResponse"];
+export type ConfirmedActionRequest =
+  operations["trigger_dag_run"]["requestBody"]["content"]["application/json"];
+export type DagRunAction = components["schemas"]["DagRunActionResponse"];
+export type SchedulerStart = components["schemas"]["SchedulerStartResponse"];
+export type SchedulerStop = components["schemas"]["SchedulerStopResponse"];

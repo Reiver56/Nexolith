@@ -25,4 +25,8 @@ request-scoped SQLite connections, safe DAG/run representations, scheduler proce
 redaction, optional dependencies, and CLI server delegation. It uses only in-process ASGI requests;
 no listener, browser, scheduler daemon, or external service is required.
 
+`test_api_actions.py` covers explicit registration, run-trigger, and scheduler controls, including
+same-origin/content-type protection, safe errors, encoded DAG names with path separators, and
+process-control outcomes.
+
 Run them with `uv run pytest tests/unit`.

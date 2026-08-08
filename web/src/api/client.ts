@@ -2,10 +2,16 @@ import type {
   ApiErrorCode,
   ApiErrorResponse,
   ApiInfo,
+  ConfirmedActionRequest,
   DagGraph,
   DagList,
+  DagRegistration,
+  DagRunAction,
+  RegisterDagRequest,
   RunDetail,
   RunList,
+  SchedulerStart,
+  SchedulerStop,
   SchedulerStatus,
 } from "./types";
 
@@ -13,7 +19,7 @@ const API_BASE = "/api/v1";
 const SENSITIVE_VALUE =
   /(?:[a-z]:[\\/]|\/(?:home|users|var|tmp|etc)\/|(?:postgres(?:ql)?|mysql|sqlite|file):\/\/|traceback|secret|sentinel|password|token)/i;
 
-export const READ_ONLY_ENDPOINTS = [
+export const API_ENDPOINTS = [
   "/api/v1",
   "/api/v1/dags",
   "/api/v1/dags/{dag_name}",
@@ -21,6 +27,10 @@ export const READ_ONLY_ENDPOINTS = [
   "/api/v1/runs",
   "/api/v1/runs/{run_id}",
   "/api/v1/scheduler",
+  "/api/v1/dags/registrations",
+  "/api/v1/dags/{dag_name}/runs",
+  "/api/v1/scheduler/start",
+  "/api/v1/scheduler/stop",
 ] as const;
 
 export class ApiClientError extends Error {
@@ -62,6 +72,43 @@ async function getJson<ResponseBody>(path: string, signal?: AbortSignal): Promis
     method: "GET",
     headers: { Accept: "application/json" },
     credentials: "same-origin",
+    signal,
+  });
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new ApiClientError("Nexolith returned an unreadable response.", response.status);
+  }
+
+  if (!response.ok) {
+    if (isApiErrorResponse(payload)) {
+      throw new ApiClientError(
+        safeBackendMessage(payload.detail.message),
+        response.status,
+        payload.detail.code,
+      );
+    }
+    throw new ApiClientError("Nexolith could not complete the request.", response.status);
+  }
+
+  return payload as ResponseBody;
+}
+
+async function postJson<ResponseBody>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<ResponseBody> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
     signal,
   });
 
@@ -195,4 +242,44 @@ export function getRun(runId: number, signal?: AbortSignal): Promise<RunDetail> 
 
 export function getSchedulerStatus(signal?: AbortSignal): Promise<SchedulerStatus> {
   return getJson<SchedulerStatus>(`${API_BASE}/scheduler`, signal);
+}
+
+export function registerDag(
+  request: RegisterDagRequest,
+  signal?: AbortSignal,
+): Promise<DagRegistration> {
+  return postJson<DagRegistration>(
+    `${API_BASE}/dags/registrations`,
+    request,
+    signal,
+  );
+}
+
+const CONFIRMED_ACTION: ConfirmedActionRequest = { confirm: true };
+
+export function triggerDagRun(
+  dagName: string,
+  signal?: AbortSignal,
+): Promise<DagRunAction> {
+  return postJson<DagRunAction>(
+    `${API_BASE}/dags/${encodeURIComponent(dagName)}/runs`,
+    CONFIRMED_ACTION,
+    signal,
+  );
+}
+
+export function startScheduler(signal?: AbortSignal): Promise<SchedulerStart> {
+  return postJson<SchedulerStart>(
+    `${API_BASE}/scheduler/start`,
+    CONFIRMED_ACTION,
+    signal,
+  );
+}
+
+export function stopScheduler(signal?: AbortSignal): Promise<SchedulerStop> {
+  return postJson<SchedulerStop>(
+    `${API_BASE}/scheduler/stop`,
+    CONFIRMED_ACTION,
+    signal,
+  );
 }
