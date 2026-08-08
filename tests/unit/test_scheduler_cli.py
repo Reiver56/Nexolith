@@ -598,7 +598,9 @@ def test_release_serializes_a_competing_replacement_claim(
         stopped = runner.invoke(app, ["scheduler", "stop"])
         replacement_process.wait(timeout=5)
         assert stopped.exit_code == 0
-        assert "stopped" in stopped.output.lower()
+        stop_output = stopped.output.lower()
+        assert str(replacement_process.pid) in stop_output
+        assert "scheduler stopped" in stop_output or "stop signal sent" in stop_output
         assert read_pidfile(pidfile_path) == replacement_claim.owned
         assert release_pidfile(replacement_claim)
         assert not pidfile_path.exists()
