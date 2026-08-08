@@ -19,7 +19,13 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   attempt history, and PID-plus-creation-time-verified scheduler status. The API opens one SQLite
   state store per request, exposes only explicit read models and GET operations, redacts persisted
   error details, and includes stable OpenAPI operation IDs for future generated TypeScript clients
-  (NXL-111). NXL-112 mutation endpoints and the NXL-113–NXL-115 React work remain out of scope.
+  (NXL-111).
+- Added explicit typed POST actions to register DAGs, synchronously trigger registered DAG runs,
+  and start/stop the scheduler through shared CLI-independent services. Scheduler start remains a
+  separate identity-verified process; stop preserves stable-handle/pidfd and replacement-marker
+  guarantees. Action requests require JSON, enforce trusted Host/same-origin browser boundaries,
+  are never retried automatically, and retain secret-safe deterministic OpenAPI models (NXL-112).
+  The NXL-113–NXL-115 React work remains future work.
 
 ### v0.3.1 — CLI Aesthetics
 

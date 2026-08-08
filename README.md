@@ -52,7 +52,7 @@ process](RELEASING.md).
 - Execution status, timing, row counts, and safe error reporting
 - Small registries for adding connectors and transformations
 - A Typer CLI with non-zero exit codes on failure
-- An optional, versioned read-only monitoring API for DAG, run, and scheduler state
+- An optional, versioned API for DAG/run monitoring and explicit DAG/scheduler actions
 
 ## Architecture
 
@@ -68,8 +68,8 @@ SQLite store (`nexolith.state`) that a polling scheduler daemon (`nexolith.sched
 to trigger due or cross-DAG-triggered DAGs. See [src/nexolith/cli/README.md](src/nexolith/cli/README.md)
 for how the CLI presentation layer is organized.
 
-The optional HTTP adapter (`nexolith.api`) composes explicit response models from those existing
-read layers. It opens one state store per request and does not make the domain, executor,
+The optional HTTP adapter (`nexolith.api`) composes explicit models over existing query and shared
+action layers. It opens one state store per DAG request and does not make the domain, executor,
 scheduler, or state packages depend on FastAPI.
 
 ## Requirements and installation
@@ -96,7 +96,7 @@ Install PostgreSQL support when needed:
 uv sync --extra dev --extra postgres
 ```
 
-Install the v0.3.4 read-only monitoring API when needed:
+Install the v0.3.4 query and action API when needed:
 
 ```bash
 pip install "nexolith[api]"
@@ -177,24 +177,27 @@ connection details. `validate` parses YAML, resolves environment variables, and 
 configuration without reading or writing data. `run` executes the ordered pipeline and prints
 status, duration, row counts, and an error when applicable.
 
-### Read-only monitoring API (v0.3.4)
+### Query and action API (v0.3.4)
 
 Start the foreground server on its local-only default (`127.0.0.1:8765`):
 
 ```bash
 nexolith api start
 nexolith api start --host 127.0.0.1 --port 9000
+# Wildcard binds require one or more exact Host values:
+nexolith api start --host 0.0.0.0 --trusted-host nexolith.internal
 ```
 
-The API exposes `GET /api/v1`, `/api/v1/dags`, `/api/v1/dags/{dag_name}`, `/api/v1/runs`,
-`/api/v1/runs/{run_id}`, and `/api/v1/scheduler`. Interactive documentation is available at
-`/docs`, and the typed contract at `/openapi.json`. NXL-111 has no authentication or authorization:
-keep it on localhost or an otherwise trusted network. Binding another address is an explicit
-operator choice and prints a warning.
+The API retains all NXL-111 GET routes and adds explicit POST operations to register a DAG, trigger
+a registered DAG run, and start or stop the scheduler. DAG triggers complete synchronously and
+return the persisted run ID/status. No layer retries actions; retrying after a lost response can
+create another run. Scheduler start launches the existing foreground command as a separate process
+that survives API shutdown; stop remains PID-plus-creation-time-bound.
 
-This contract is strictly read-only: it cannot register or run DAGs, alter schedules, start or
-stop the scheduler, edit configuration, or delete state. NXL-112 mutation endpoints and the
-NXL-113–NXL-115 React UI remain out of scope. See
+Interactive documentation is at `/docs` and the typed contract at `/openapi.json`. There is no
+authentication or authorization: keep it on localhost or a trusted network. Actions require JSON,
+Host values are allowlisted, cross-origin browser actions are rejected by default, and no wildcard
+CORS is enabled. NXL-113 through NXL-115 React work remains future work. See
 [the API package documentation](src/nexolith/api/README.md) for lifecycle, error, security, and
 OpenAPI compatibility guarantees.
 
@@ -500,13 +503,13 @@ Available:
 - [x] DAG orchestration, configurable retries and failure-propagation policy, cross-DAG
       triggers, and priority/severity classification
 - [x] A scheduler daemon and persisted execution history
-- [x] A read-only monitoring REST API
+- [x] A typed REST API for monitoring and explicit DAG/scheduler actions
 
 See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
 Planned, not implemented:
 
-- [ ] Authenticated mutation APIs, MySQL, and additional connectors
+- [ ] API authentication/authorization, MySQL, and additional connectors
 - [ ] A custom transformation plugin system
 - [ ] Parallel task execution within a DAG (currently sequential)
 - [ ] Data-quality checks

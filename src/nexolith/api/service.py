@@ -9,6 +9,9 @@ from typing import cast
 from nexolith.api.models import (
     ApiErrorCode,
     DagDetailResponse,
+    DagRegistrationResponse,
+    DagRegistrationStatus,
+    DagRunActionResponse,
     DagSourceStatus,
     DagSummaryResponse,
     DagTaskResponse,
@@ -20,6 +23,12 @@ from nexolith.api.models import (
     Severity,
     TaskAttemptResponse,
     TaskRunResponse,
+)
+from nexolith.application.actions import (
+    DagActionService,
+    RegisteredDagConfigurationError,
+    RegisteredDagNotFoundError,
+    RegisteredDagSourceMissingError,
 )
 from nexolith.dag.models import DagConfig
 from nexolith.dag.validator import read_dag_config
@@ -186,6 +195,59 @@ class ApiQueryService:
             severity=cast(Severity, run.severity),
             started_at=_timestamp(run.started_at),
             ended_at=_optional_timestamp(run.ended_at),
+        )
+
+
+class ApiDagActionService:
+    """Map shared DAG actions onto stable, secret-safe HTTP representations."""
+
+    def __init__(self, store: StateStore) -> None:
+        self._actions = DagActionService(store)
+
+    def register(self, source_path: str, *, force: bool) -> DagRegistrationResponse:
+        try:
+            result = self._actions.register(Path(source_path), force=force)
+        except ConfigurationError as exc:
+            raise ApiQueryError(
+                ApiErrorCode.DAG_CONFIGURATION_INVALID,
+                409,
+                "The DAG configuration is invalid.",
+            ) from exc
+        status = (
+            DagRegistrationStatus.CREATED
+            if result.created
+            else DagRegistrationStatus.UPDATED
+            if result.updated
+            else DagRegistrationStatus.UNCHANGED
+        )
+        return DagRegistrationResponse(
+            dag_name=result.record.name,
+            status=status,
+            enabled=result.record.enabled,
+            schedule=result.record.schedule,
+        )
+
+    def trigger(self, dag_name: str) -> DagRunActionResponse:
+        try:
+            result = self._actions.trigger(dag_name)
+        except RegisteredDagNotFoundError as exc:
+            raise ApiQueryError(ApiErrorCode.DAG_NOT_FOUND, 404, "DAG not found.") from exc
+        except RegisteredDagSourceMissingError as exc:
+            raise ApiQueryError(
+                ApiErrorCode.DAG_SOURCE_MISSING,
+                409,
+                "The registered DAG source is unavailable.",
+            ) from exc
+        except RegisteredDagConfigurationError as exc:
+            raise ApiQueryError(
+                ApiErrorCode.DAG_CONFIGURATION_INVALID,
+                409,
+                "The registered DAG configuration is invalid.",
+            ) from exc
+        return DagRunActionResponse(
+            run_id=result.run_id,
+            dag_name=result.dag_name,
+            status=result.status,
         )
 
 
