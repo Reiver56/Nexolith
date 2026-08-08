@@ -11,11 +11,30 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol, cast
 
 import psutil
 
 _NANOSECONDS_PER_SECOND = 1_000_000_000
 _WINDOWS_CREATE_TIME_TOLERANCE_NS = 1_000
+
+
+class _WindowsApiFunction(Protocol):
+    argtypes: list[object]
+    restype: object
+
+    def __call__(self, *args: object) -> object: ...
+
+
+class _Kernel32(Protocol):
+    OpenProcess: _WindowsApiFunction
+    GetProcessTimes: _WindowsApiFunction
+    TerminateProcess: _WindowsApiFunction
+    CloseHandle: _WindowsApiFunction
+
+
+class _WinDllFactory(Protocol):
+    def __call__(self, name: str, *, use_last_error: bool) -> _Kernel32: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +149,10 @@ def _terminate_process_identity_windows(identity: ProcessIdentity) -> ProcessTer
     error_invalid_parameter = 87
     windows_to_unix_ticks = 116_444_736_000_000_000
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ctypes_members = vars(ctypes)
+    win_dll = cast(_WinDllFactory, ctypes_members["WinDLL"])
+    get_last_error = cast(Callable[[], int], ctypes_members["get_last_error"])
+    kernel32 = win_dll("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.GetProcessTimes.argtypes = [
@@ -150,7 +172,7 @@ def _terminate_process_identity_windows(identity: ProcessIdentity) -> ProcessTer
         process_terminate | process_query_limited_information, False, identity.pid
     )
     if not handle:
-        error = ctypes.get_last_error()
+        error = get_last_error()
         if error == error_invalid_parameter:
             return ProcessTerminationStatus.NOT_FOUND
         if error == error_access_denied:
@@ -180,7 +202,7 @@ def _terminate_process_identity_windows(identity: ProcessIdentity) -> ProcessTer
         if abs(create_time_ns - identity.create_time_ns) > _WINDOWS_CREATE_TIME_TOLERANCE_NS:
             return ProcessTerminationStatus.IDENTITY_MISMATCH
         if not kernel32.TerminateProcess(handle, 1):
-            error = ctypes.get_last_error()
+            error = get_last_error()
             if error == error_access_denied:
                 return ProcessTerminationStatus.ACCESS_DENIED
             return ProcessTerminationStatus.UNAVAILABLE
