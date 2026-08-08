@@ -1,0 +1,11 @@
+name: enrichment_task4_enrich
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query_file: ../queries/task4_enrich.sql
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: cdr_stage4
+  mode: replace

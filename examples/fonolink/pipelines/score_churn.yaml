@@ -1,0 +1,39 @@
+name: score_churn
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query: >-
+    SELECT
+      s.id AS subscriber_id,
+      COALESCE(recent.mb, 0) AS recent_data_mb,
+      COALESCE(early.mb, 0) AS early_data_mb,
+      COALESCE(t.ticket_count, 0) AS ticket_count,
+      COALESCE(inv.overdue_count, 0) AS overdue_invoices
+    FROM subscribers s
+    LEFT JOIN (
+      SELECT subscriber_id, SUM(data_mb) AS mb FROM usage_daily
+      WHERE date >= :recent_start GROUP BY subscriber_id
+    ) recent ON recent.subscriber_id = s.id
+    LEFT JOIN (
+      SELECT subscriber_id, SUM(data_mb) AS mb FROM usage_daily
+      WHERE date < :recent_start GROUP BY subscriber_id
+    ) early ON early.subscriber_id = s.id
+    LEFT JOIN (
+      SELECT subscriber_id, COUNT(*) AS ticket_count FROM support_tickets
+      WHERE status != 'resolved' GROUP BY subscriber_id
+    ) t ON t.subscriber_id = s.id
+    LEFT JOIN (
+      SELECT subscriber_id, COUNT(*) AS overdue_count FROM invoices
+      WHERE status = 'overdue' GROUP BY subscriber_id
+    ) inv ON inv.subscriber_id = s.id
+    WHERE s.status = 'active'
+  parameters:
+    recent_start: "2026-07-26"
+transformations:
+  - type: python_job
+    file: ../jobs/score_churn_job.py
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: churn_scores
+  mode: append

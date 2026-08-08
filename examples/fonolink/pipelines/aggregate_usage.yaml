@@ -1,0 +1,19 @@
+name: aggregate_usage
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query: >-
+    SELECT
+      subscriber_id,
+      occurred_at::date AS date,
+      COALESCE(SUM(duration_or_volume) FILTER (WHERE call_type = 'voice'), 0)::int AS voice_seconds,
+      COALESCE(SUM(duration_or_volume) FILTER (WHERE call_type = 'data'), 0) AS data_mb,
+      COALESCE(COUNT(*) FILTER (WHERE call_type = 'sms'), 0)::int AS sms_count
+    FROM cdr_raw
+    GROUP BY subscriber_id, occurred_at::date
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: usage_daily
+  mode: append

@@ -1,0 +1,10 @@
+name: provision_sim
+source:
+  type: csv
+  path: ../data/sim_orders.csv
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: sim_cards
+  mode: append

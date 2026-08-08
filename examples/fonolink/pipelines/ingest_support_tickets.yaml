@@ -1,0 +1,10 @@
+name: ingest_support_tickets
+source:
+  type: csv
+  path: ../data/support_tickets_feed.csv
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: support_tickets
+  mode: append

@@ -1,0 +1,8 @@
+name: bronze_orders
+source:
+  type: csv
+  path: ../data/raw_orders.csv
+transformations: []
+destination:
+  type: csv
+  path: ../bronze/orders.csv

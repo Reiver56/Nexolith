@@ -1,0 +1,254 @@
+"""Full-screen (alternate-buffer) interactive session, via `prompt_toolkit`.
+
+Every command still dispatches through `InteractiveSession.dispatch()` — the
+exact same logic the classic line-based loop uses — so behavior is identical
+between the two; only presentation differs. `/validate` and `/run` progress
+and outcomes go through a `FullScreenOperationPresenter` (status_area.py)
+instead of the classic loop's plain-text `ClassicOperationPresenter` — same
+dispatch, same `PipelineApplication` calls, different presentation only.
+
+Callers must check `RenderContext.plain` before calling `run_full_screen_session`
+(see `nexolith.cli.interactive.run_interactive_session`) — this module always
+attempts a real full-screen session and never checks terminal capability
+itself.
+
+`output_area`/`input_field` both carry a `Lexer` (`highlighting.py`) for real
+blue Discord-like styling -- panel borders/`Label:` prefixes in the log,
+recognized `/command` keywords as they're typed -- without embedding any
+ANSI escape code in either buffer's actual text (which `output_area`, a
+plain `TextArea`, still cannot interpret at all; see NXL-100/NXL-104).
+
+Crash/exit safety: `prompt_toolkit.Application(full_screen=True).run()`
+restores the terminal (raw mode and the alternate screen buffer) in its own
+`finally` blocks regardless of how it exits — normal completion, `.exit()`,
+or an unhandled exception. That guarantee comes from prompt_toolkit itself,
+not from anything in this module.
+"""
+
+from collections.abc import Callable
+from dataclasses import replace
+
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.widgets import TextArea
+
+from nexolith.cli.completion import NexolithCompleter
+from nexolith.cli.highlighting import CommandKeywordLexer, OutputLogLexer
+from nexolith.cli.interactive import GOODBYE, InteractiveSession, parse_command, render_prompt
+from nexolith.cli.nexo_art import BLURPLE, render_nexo_panel
+from nexolith.cli.render_context import RenderContext
+from nexolith.cli.status_area import FullScreenOperationPresenter, StatusAreaState
+
+_PANEL_HEIGHT = 9  # render_nexo_panel()'s fixed footprint: title + 7 art lines + bottom border
+_DIVIDER_COLOR = f"fg:#{BLURPLE[0]:02x}{BLURPLE[1]:02x}{BLURPLE[2]:02x}"
+
+
+def _divider() -> Window:
+    return Window(char="─", height=1, style=_DIVIDER_COLOR)
+
+
+def run_full_screen_session(
+    render_context: RenderContext,
+    *,
+    session: InteractiveSession | None = None,
+    status_state: StatusAreaState | None = None,
+    live_width: Callable[[], int] | None = None,
+) -> None:
+    """Run an `InteractiveSession` inside a full-screen prompt_toolkit layout:
+    the bordered Nexo panel as a static header, a status area for
+    `/validate`/`/run` progress and outcomes, a scrollable output log, and a
+    completing input line — separated by blue Discord-toned divider lines.
+
+    `session` and `status_state` are injectable for tests (e.g. with a fake
+    `PipelineApplication`, and to inspect the status area's final state after
+    a real headless run — the same pattern already used for `session`);
+    default to a real session using `render_context` and a fresh state.
+
+    `live_width` is forwarded to that default session's own `live_width`
+    (see `InteractiveSession.__init__`/`refresh_render_context_width()`) --
+    `None` by default so a `session` built by a test with a fixed
+    `RenderContext` keeps its declared width exactly, unaffected by
+    whatever real terminal size happens to be ambient in the process
+    running the test. `run_interactive_session()`, the only real (not test)
+    caller, passes `detect_width` here so a real terminal resize is
+    actually picked up.
+    """
+    active_session = session or InteractiveSession(
+        render_context=render_context, live_width=live_width
+    )
+
+    output_area = TextArea(
+        read_only=True, scrollbar=True, wrap_lines=True, lexer=OutputLogLexer(render_context)
+    )
+
+    def append_output(text: str) -> None:
+        current = output_area.buffer.document.text
+        new_text = f"{current}\n{text}" if current else text
+        output_area.buffer.set_document(
+            Document(new_text, cursor_position=len(new_text)), bypass_readonly=True
+        )
+
+    active_session.set_output_writer(append_output, ansi_capable=False)
+
+    def clear_output() -> None:
+        output_area.buffer.set_document(Document(""), bypass_readonly=True)
+
+    active_session.set_clear_output_writer(clear_output)
+
+    status_state = status_state or StatusAreaState()
+    status_window = Window(
+        content=FormattedTextControl(status_state.render),
+        height=Dimension(min=0, max=8),
+        wrap_lines=True,
+        dont_extend_height=True,
+    )
+
+    def _presenter_render_context() -> RenderContext:
+        """ansi_capable=False (NXL-104): a /run's outcome is written through
+        `append_output` -- the same ANSI-incapable output log sink `_write`
+        itself uses -- so it needs the same downgrade `_output_render_context()`
+        applies there, not the header/status area's own real-color context.
+
+        Called fresh on every `/run` outcome (not baked into a value once)
+        so its width tracks a real terminal resize -- see
+        `refresh_render_context_width()`.
+        """
+        active_session.refresh_render_context_width()
+        return replace(active_session.render_context, ansi_capable=False)
+
+    active_session.set_presenter(
+        FullScreenOperationPresenter(
+            status_state,
+            invalidate=lambda: application.invalidate(),
+            write=append_output,
+            render_context=_presenter_render_context,
+        )
+    )
+
+    input_field = TextArea(
+        height=1,
+        multiline=False,
+        completer=NexolithCompleter(),
+        complete_while_typing=True,
+        history=InMemoryHistory(),
+        prompt=lambda: render_prompt(active_session.context),
+        lexer=CommandKeywordLexer(render_context),
+    )
+
+    def on_submit(buffer: Buffer) -> bool:
+        text = buffer.text
+        append_output(f"{render_prompt(active_session.context)}{text}")
+        if not active_session.dispatch(parse_command(text)):
+            application.exit()
+        return False  # clear the input line after submit
+
+    input_field.accept_handler = on_submit
+
+    def render_header() -> ANSI:
+        """A callable, not a value baked in once: `status_state.render` above
+        already uses this pattern (prompt_toolkit re-invokes it on every
+        redraw). The header previously didn't, so it kept the panel border
+        sized to whatever width was live at session start even after a real
+        terminal resize -- re-detecting the width here every redraw is what
+        actually fixes that for the one piece of static-looking content in
+        this layout.
+        """
+        active_session.refresh_render_context_width()
+        return ANSI(render_nexo_panel(active_session.render_context))
+
+    header = Window(
+        content=FormattedTextControl(render_header),
+        height=_PANEL_HEIGHT,
+        dont_extend_height=True,
+    )
+
+    body = HSplit(
+        [
+            header,
+            _divider(),
+            status_window,
+            _divider(),
+            output_area,
+            _divider(),
+            input_field,
+        ]
+    )
+    root = FloatContainer(
+        content=body,
+        floats=[
+            Float(
+                xcursor=True,
+                ycursor=True,
+                content=CompletionsMenu(max_height=8, scroll_offset=1),
+            )
+        ],
+    )
+    layout = Layout(root, focused_element=input_field)
+
+    bindings = KeyBindings()
+
+    @bindings.add("c-c")
+    @bindings.add("c-d")
+    def _exit(event: object) -> None:
+        append_output(GOODBYE)
+        application.exit()
+
+    application: Application[None] = Application(
+        layout=layout,
+        key_bindings=bindings,
+        full_screen=True,
+        # Without this, the terminal is never asked to report real
+        # scroll-wheel/trackpad events, so it falls back (a common
+        # alt-screen-buffer convention, for compatibility with programs
+        # without mouse support) to emulating Up/Down arrow key presses for
+        # scroll gestures -- which always land on `input_field` (the
+        # permanently-focused control) and trigger its history navigation
+        # instead of scrolling `output_area`. With real mouse events enabled,
+        # prompt_toolkit routes SCROLL_UP/SCROLL_DOWN by screen position (see
+        # `Window._mouse_handler`), not keyboard focus, so scrolling over the
+        # output log scrolls it directly; keyboard Up/Down history navigation
+        # is unaffected either way.
+        mouse_support=True,
+        # min_redraw_interval: a real, documented prompt_toolkit mechanism
+        # for exactly this class of problem -- its own docstring: "Use this
+        # for applications where invalidate is called a lot. This could
+        # cause a lot of terminal output, which some terminals are not able
+        # to process." Added after a real, live-reported visual-corruption
+        # bug in VS Code's integrated terminal (built on xterm.js) that
+        # could not be reproduced or confirmed via prompt_toolkit's own
+        # internal Screen model in this project's headless tests (it was
+        # provably correct at every step of the exact reported sequence) --
+        # strong, independently-documented evidence points to a known class
+        # of xterm.js GPU-renderer glyph-cache corruption under full-screen
+        # TUI redraw stress (VS Code's own Terminal-Issues wiki confirms
+        # `"terminal.integrated.gpuAcceleration": "off"` as an official
+        # remedy for this general class; a similar corruption class for a
+        # different Python TUI is documented in
+        # https://github.com/anthropics/claude-code/issues/59163, and an
+        # analogous ncurses-specific case was confirmed "upstream" by VS
+        # Code's own maintainers in
+        # https://github.com/microsoft/vscode/issues/61163). This is a
+        # genuine, low-risk, no-functional-downside mitigation for that
+        # documented class of issue -- NOT a confirmed fix for this
+        # specific bug, which could not be reproduced in this environment
+        # to verify empirically. 50ms is imperceptible to a human typing or
+        # reading, while capping how fast this session can ever ask a
+        # renderer to redraw during a burst of events (e.g. a classic
+        # pipeline's per-phase event stream driving the status area's live
+        # timeline).
+        min_redraw_interval=0.05,
+    )
+
+    # The panel header already carries the "Nexo/Nexolith" branding that the
+    # classic splash's first line repeats in text; only the second line (the
+    # actual usage hint) still earns its place in the scrollable log.
+    append_output("Type /help for available commands.")
+    application.run()

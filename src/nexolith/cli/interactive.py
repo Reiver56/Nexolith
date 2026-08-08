@@ -1,44 +1,90 @@
 """Minimal, testable interactive CLI session."""
 
-from dataclasses import dataclass
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
 from nexolith.application import PipelineApplication
 from nexolith.cli.context import SelectedPipeline, SessionContext
+from nexolith.cli.dag_discovery import discover_dag_files
+from nexolith.cli.dag_register_render import render_dag_registration
+from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import error_category
 from nexolith.cli.event_renderer import InteractiveEventRenderer
 from nexolith.cli.interactive_types import InputReader, OutputWriter
+from nexolith.cli.nexo_art import render_nexo_panel
+from nexolith.cli.nexo_kitty import render_nexo_kitty_protocol
+from nexolith.cli.render_context import RenderContext, detect_render_context, detect_width
+from nexolith.cli.runs_render import render_run_detail, render_run_not_found, render_runs_list
+from nexolith.cli.scheduler_render import (
+    SchedulerStatus,
+    render_scheduler_not_running,
+    render_scheduler_status,
+    render_scheduler_stop_uncertain,
+    render_scheduler_stopped,
+    render_windows_stop_caveat,
+)
 from nexolith.config import PipelineConfig
-from nexolith.events import EventSink
+from nexolith.dag import execute_dag, load_dag, register_dag
+from nexolith.events import EventSink, PipelineOperation
 from nexolith.exceptions import ConfigurationError, ExecutionError, NexolithError
 from nexolith.models import ExecutionResult
+from nexolith.scheduler import (
+    default_pidfile_path,
+    is_process_alive,
+    read_pidfile,
+    stop_process,
+)
+from nexolith.state import StateStore
 
 DEFAULT_PROMPT = "nexolith> "
 SPLASH = "Nexo - Nexolith interactive session\nType /help for available commands."
 HELP = (
     "Available commands:\n"
     "  /help  Show available commands.\n"
-    "  /open <path>  Open or replace the current pipeline.\n"
-    "  /open  Show the current pipeline.\n"
-    "  /clear  Clear the current pipeline.\n"
-    "  /validate  Validate the current pipeline.\n"
-    "  /run  Run the current pipeline.\n"
+    "  /open <path>  Open or replace the current pipeline or DAG.\n"
+    "  /open  Show the current pipeline or DAG, or discover DAG files under "
+    "the current directory if none is open.\n"
+    "  /open <number>  Open a DAG from the most recent discovery list.\n"
+    "  /close  Close the current pipeline or DAG.\n"
+    "  /clear  Clear the scrollable output log.\n"
+    "  /validate  Validate the current pipeline or DAG.\n"
+    "  /run  Run the current pipeline or DAG.\n"
+    "  /runs  List recent DAG runs.\n"
+    "  /runs <id>  Show detail for one DAG run.\n"
+    "  /register [path]  Register a DAG for scheduling without running it "
+    "(the currently open DAG if no path is given).\n"
+    "  /scheduler status  Report whether the scheduler daemon is running.\n"
+    "  /scheduler stop  Stop a running scheduler daemon.\n"
     "  /exit  Exit the interactive session.\n"
-    "Operations use the pipeline currently shown in the prompt."
+    "Operations use the pipeline or DAG currently shown in the prompt.\n"
+    "The scheduler itself is started from a separate terminal "
+    "(nexolith scheduler start) -- it runs as its own long-lived process."
 )
 GOODBYE = "Goodbye."
 NO_PIPELINE = "No pipeline is currently open."
+_SCHEDULER_START_HINT = (
+    "Start the scheduler in its own terminal: nexolith scheduler start. "
+    "It runs as a long-lived foreground process, so it can't run inside "
+    "this session without blocking it."
+)
 
 
 class InteractiveCommand(StrEnum):
     EMPTY = "empty"
     HELP = "help"
     OPEN = "open"
+    CLOSE = "close"
     CLEAR = "clear"
     VALIDATE = "validate"
     RUN = "run"
+    RUNS = "runs"
+    REGISTER = "register"
+    SCHEDULER = "scheduler"
     EXIT = "exit"
     UNKNOWN = "unknown"
 
@@ -62,19 +108,58 @@ def parse_command(value: str) -> ParsedCommand:
         parts = command.split(maxsplit=1)
         if parts[0] == "/open" and len(parts) == 2:
             return ParsedCommand(InteractiveCommand.OPEN, parts[1])
+    if command == "/close":
+        return ParsedCommand(InteractiveCommand.CLOSE)
     if command == "/clear":
         return ParsedCommand(InteractiveCommand.CLEAR)
     if command == "/validate":
         return ParsedCommand(InteractiveCommand.VALIDATE)
     if command == "/run":
         return ParsedCommand(InteractiveCommand.RUN)
+    if command == "/runs":
+        return ParsedCommand(InteractiveCommand.RUNS)
+    if command.startswith("/runs"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/runs" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.RUNS, parts[1])
+    if command == "/register":
+        return ParsedCommand(InteractiveCommand.REGISTER)
+    if command.startswith("/register"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/register" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.REGISTER, parts[1])
+    if command == "/scheduler":
+        return ParsedCommand(InteractiveCommand.SCHEDULER)
+    if command.startswith("/scheduler"):
+        parts = command.split(maxsplit=1)
+        if parts[0] == "/scheduler" and len(parts) == 2:
+            return ParsedCommand(InteractiveCommand.SCHEDULER, parts[1])
     if command == "/exit":
         return ParsedCommand(InteractiveCommand.EXIT)
     return ParsedCommand(InteractiveCommand.UNKNOWN, command)
 
 
-def render_splash() -> str:
-    return SPLASH
+def render_splash(render_context: RenderContext | None = None) -> str:
+    """Render the startup splash, which also stands in for the prompt's idle state:
+    it is the only thing shown before the first (and every subsequent, unchanged)
+    prompt in this synchronous, single-shot REPL.
+
+    Tiered: (1) the Kitty graphics protocol at full fidelity, when heuristically
+    detected; (2) a bordered ANSI truecolor panel around the same block art, for
+    any other color-capable terminal; (3) exactly today's plain text, when
+    `render_context` is absent or `plain`. Tier 1 has no synchronous
+    acknowledgement from the terminal, so a build/write failure is the only
+    detectable failure mode; any exception there falls back to tier 2 rather
+    than risk crashing the session.
+    """
+    if render_context is None or render_context.plain:
+        return SPLASH
+    if render_context.use_kitty:
+        try:
+            return f"{render_nexo_kitty_protocol()}\n{SPLASH}"
+        except Exception:
+            pass
+    return f"{render_nexo_panel(render_context)}\n{SPLASH}"
 
 
 def render_help() -> str:
@@ -99,6 +184,24 @@ def render_current_pipeline(pipeline: SelectedPipeline | None) -> str:
     return f"Current pipeline: {pipeline.requested_path}{availability}"
 
 
+def render_discovered_dags(paths: list[Path], cwd: Path) -> str:
+    """NXL-107: a numbered pick-list for `/open`'s discovery mode, mirroring
+    `/runs`'s own list-then-select-by-number convention. Paths are shown
+    relative to `cwd` when possible (shorter, more readable than absolute)
+    -- `discover_dag_files(cwd)` only ever returns paths under `cwd`, so the
+    fallback to the absolute path is defensive, not expected to trigger.
+    """
+    lines = ["Discovered DAGs:"]
+    for index, path in enumerate(paths, start=1):
+        try:
+            display = path.relative_to(cwd)
+        except ValueError:
+            display = path
+        lines.append(f"  {index}  {display}")
+    lines.append("Use /open <number> to open one.")
+    return "\n".join(lines)
+
+
 def _safe_prompt_label(filename: str) -> str:
     safe = "".join(
         character if character.isprintable() and character not in "[]" else "?"
@@ -118,6 +221,50 @@ class InteractiveApplication(Protocol):
     ) -> ExecutionResult: ...
 
 
+class OperationPresenter(Protocol):
+    """How `/validate` and `/run` progress and outcomes get shown. The
+    classic loop and the full-screen session each inject their own;
+    `InteractiveSession`'s dispatch logic is identical either way.
+    """
+
+    def event_sink(self, operation: PipelineOperation) -> EventSink: ...
+    def show_result(self, result: ExecutionResult) -> None: ...
+    def show_validation_result(self, config: PipelineConfig) -> None: ...
+    def show_error(
+        self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
+    ) -> None: ...
+
+
+class ClassicOperationPresenter:
+    """Today's plain-text behavior: each event is written as a line
+    immediately, the final result/error is one more line. Unchanged from
+    before this story's presenter seam existed.
+    """
+
+    def __init__(self, write: OutputWriter) -> None:
+        self._write = write
+
+    def event_sink(self, operation: PipelineOperation) -> EventSink:
+        return InteractiveEventRenderer(self._write)
+
+    def show_result(self, result: ExecutionResult) -> None:
+        self._write(render_execution_result(result))
+
+    def show_validation_result(self, config: PipelineConfig) -> None:
+        # No-op: the event stream already prints "Pipeline valid." (see
+        # event_renderer.render_event's PipelineOperation.VALIDATE branch) --
+        # classic mode's per-event lines are its terminal-state signal, same
+        # as every other event here. Only the full-screen presenter's status
+        # area needs an explicit completion call, since it replaces a live
+        # timeline in place rather than appending lines.
+        pass
+
+    def show_error(
+        self, error: NexolithError, pipeline: SelectedPipeline, operation: PipelineOperation
+    ) -> None:
+        self._write(render_operation_error(error, pipeline))
+
+
 class InteractiveSession:
     """Read and dispatch the intentionally small interactive command set."""
 
@@ -128,53 +275,166 @@ class InteractiveSession:
         output_writer: OutputWriter | None = None,
         context: SessionContext | None = None,
         application: InteractiveApplication | None = None,
+        render_context: RenderContext | None = None,
+        presenter: OperationPresenter | None = None,
+        live_width: Callable[[], int] | None = None,
     ) -> None:
         self._read = input_reader or input
         self._write = output_writer or print
+        # NXL-100: the classic loop's default writer (print) goes straight
+        # to a real terminal stream, which can render whatever ANSI tier
+        # self.render_context says it can. The full-screen session's own
+        # writer (see set_output_writer) targets a plain-text prompt_toolkit
+        # TextArea buffer instead -- that widget has no ANSI interpretation
+        # at all, at any color depth, so anything with embedded escape
+        # codes written there shows up as literal text regardless of tier.
+        # True by default (matches every existing caller's real behavior
+        # today, including every test that never sets this explicitly).
+        self._output_ansi_capable = True
+        # NXL-105: `/clear` now clears the visible scrollable log -- a
+        # concept that only exists for the full-screen session (see
+        # set_clear_output_writer()). The classic loop has no such retained
+        # buffer to clear (it just prints straight to the real terminal, no
+        # different from the one-shot `nexolith run`/`validate` commands),
+        # so it leaves this unset and `_clear_log()` reports that plainly
+        # rather than silently doing nothing.
+        self._clear_output: Callable[[], None] | None = None
+        # NXL-107: the most recent `/open` (no argument, nothing open)
+        # discovery listing, so a follow-up `/open <number>` can resolve
+        # against it. Invalidated by any other `/open` call (explicit path
+        # or a consumed selection) -- see `_open_pipeline()`.
+        self._discovered_dags: list[Path] | None = None
         self.context = context or SessionContext()
         self._application = application or PipelineApplication()
+        self._presenter: OperationPresenter = presenter or ClassicOperationPresenter(self._write)
+        # Detected once per session so future colorized/panel renderers (splash,
+        # timeline, summary, /validate highlighting) share one consistent capability
+        # check instead of re-detecting per render call. See src/nexolith/cli/README.md.
+        self.render_context = render_context or detect_render_context()
+        # None by default (every existing caller, including every test that
+        # constructs a `RenderContext` directly and expects it to stay
+        # exactly as given): `refresh_render_context_width()` becomes a
+        # no-op unless a real live-width source is supplied. Real sessions
+        # (`run_interactive_session()`) pass `detect_width` here so a real
+        # terminal resize is picked up; anything that hands this a fixed
+        # `RenderContext` for a deterministic test keeps it frozen, exactly
+        # like before this existed.
+        self._live_width = live_width
+
+    def set_output_writer(self, writer: OutputWriter, *, ansi_capable: bool = True) -> None:
+        """Redirect where this session's output goes, e.g. to a full-screen
+        session's scrollable log instead of the classic loop's direct writes.
+
+        `ansi_capable=False` (NXL-100) marks a sink that cannot interpret
+        embedded ANSI escape codes at all -- e.g. the full-screen session's
+        plain-text output log -- so `_output_render_context()` forces plain
+        rendering for anything written through it, regardless of what this
+        session's own `render_context` otherwise detected. Defaults to True,
+        matching every caller before this story (a real terminal stream).
+        """
+        self._write = writer
+        self._output_ansi_capable = ansi_capable
+
+    def set_clear_output_writer(self, clear: Callable[[], None]) -> None:
+        """Give `/clear` (NXL-105) a real way to empty the scrollable output
+        log -- only the full-screen session has one; unset by default, in
+        which case `/clear` reports that plainly (see `_clear_log()`).
+        """
+        self._clear_output = clear
+
+    def set_presenter(self, presenter: OperationPresenter) -> None:
+        """Redirect how `/validate`/`/run` progress and outcomes are shown,
+        e.g. to a full-screen session's step timeline and summary panel
+        instead of the classic loop's plain-text lines."""
+        self._presenter = presenter
 
     def run(self) -> None:
         """Run until explicit exit, EOF, or an expected keyboard interruption."""
-        self._write(render_splash())
+        self._write(render_splash(self.render_context))
         while True:
             try:
                 command = parse_command(self._read(render_prompt(self.context)))
             except (EOFError, KeyboardInterrupt):
                 self._write(GOODBYE)
                 return
-
-            if command.kind is InteractiveCommand.EMPTY:
-                continue
-            if command.kind is InteractiveCommand.HELP:
-                self._write(render_help())
-                continue
-            if command.kind is InteractiveCommand.OPEN:
-                self._open_pipeline(command.text)
-                continue
-            if command.kind is InteractiveCommand.CLEAR:
-                self._clear_pipeline()
-                continue
-            if command.kind is InteractiveCommand.VALIDATE:
-                self._validate_pipeline()
-                continue
-            if command.kind is InteractiveCommand.RUN:
-                self._run_pipeline()
-                continue
-            if command.kind is InteractiveCommand.EXIT:
-                self._write(GOODBYE)
+            if not self.dispatch(command):
                 return
-            self._write(render_unknown(command.text))
+
+    def dispatch(self, command: ParsedCommand) -> bool:
+        """Handle one already-parsed command. Returns False when the session
+        should end (explicit `/exit`). Shared by the classic blocking loop
+        (`run`) and the full-screen session so both dispatch identically —
+        only presentation differs between them.
+        """
+        if command.kind is InteractiveCommand.EMPTY:
+            return True
+        if command.kind is InteractiveCommand.HELP:
+            self._write(render_help())
+            return True
+        if command.kind is InteractiveCommand.OPEN:
+            self._open_pipeline(command.text)
+            return True
+        if command.kind is InteractiveCommand.CLOSE:
+            self._clear_pipeline()
+            return True
+        if command.kind is InteractiveCommand.CLEAR:
+            self._clear_log()
+            return True
+        if command.kind is InteractiveCommand.VALIDATE:
+            self._validate_pipeline()
+            return True
+        if command.kind is InteractiveCommand.RUN:
+            self._run_pipeline()
+            return True
+        if command.kind is InteractiveCommand.RUNS:
+            self._show_runs(command.text)
+            return True
+        if command.kind is InteractiveCommand.REGISTER:
+            self._register_dag(command.text)
+            return True
+        if command.kind is InteractiveCommand.SCHEDULER:
+            self._scheduler_command(command.text)
+            return True
+        if command.kind is InteractiveCommand.EXIT:
+            self._write(GOODBYE)
+            return False
+        self._write(render_unknown(command.text))
+        return True
 
     def _open_pipeline(self, value: str) -> None:
+        """`/open` (NXL-107): with no argument, shows the current pipeline/
+        DAG's status exactly as before this story when one is already open
+        -- otherwise (nothing open, previously just a static "No pipeline is
+        currently open." message) discovers DAG files under the current
+        directory instead, since there was nothing useful to show anyway.
+        `/open <number>` opens an entry from the most recent such listing,
+        the same list-then-select convention `/runs`/`/runs <id>` already
+        established; any other `/open <value>` is unchanged, an explicit
+        path, exactly as before this story -- and either way, opening a
+        selection reuses this exact same method body below, not a parallel
+        code path.
+        """
         if not value:
-            self._write(render_current_pipeline(self.context.pipeline))
+            if self.context.pipeline is not None:
+                self._write(render_current_pipeline(self.context.pipeline))
+                return
+            self._discover_dags()
             return
+
+        selected = self._resolve_discovered_selection(value)
+        self._discovered_dags = None
+        if selected is not None:
+            value = str(selected)
 
         requested_path = Path(value)
         try:
             resolved_path = requested_path.resolve()
-            self._application.validate_pipeline(requested_path)
+            if detect_document_kind(requested_path) is DocumentKind.DAG:
+                load_dag(requested_path)
+                kind_label = "DAG"
+            else:
+                self._application.validate_pipeline(requested_path)
+                kind_label = "Pipeline"
         except ConfigurationError as error:
             self._write(f"Could not open pipeline: {error}")
             return
@@ -183,39 +443,332 @@ class InteractiveSession:
             return
 
         self.context.select(requested_path, resolved_path)
-        self._write(f"Pipeline opened: {requested_path}")
+        self._write(f"{kind_label} opened: {requested_path}")
+
+    def _discover_dags(self) -> None:
+        cwd = Path.cwd()
+        discovered = discover_dag_files(cwd)
+        if not discovered:
+            self._discovered_dags = None
+            self._write(f"No DAG files found under {cwd}.")
+            return
+        self._discovered_dags = discovered
+        self._write(render_discovered_dags(discovered, cwd))
+
+    def _resolve_discovered_selection(self, value: str) -> Path | None:
+        if self._discovered_dags is None or not value.isdigit():
+            return None
+        index = int(value)
+        if not (1 <= index <= len(self._discovered_dags)):
+            return None
+        return self._discovered_dags[index - 1]
 
     def _clear_pipeline(self) -> None:
+        """`/close` (NXL-105; the old `/clear` behavior, renamed -- see
+        `_clear_log()` for what `/clear` itself now does) -- unchanged
+        otherwise: still clears the currently-open pipeline/DAG selection,
+        same messages either way.
+        """
         if self.context.clear():
             self._write("Pipeline context cleared.")
         else:
             self._write(NO_PIPELINE)
 
+    def _clear_log(self) -> None:
+        """`/clear` (NXL-105): clears the scrollable output log, the more
+        natural reading of "clear" for a full-screen terminal UI. Only the
+        full-screen session has a retained log buffer to clear at all (see
+        `set_clear_output_writer()`) -- the classic loop just prints
+        straight to the real terminal, same as the one-shot `nexolith run`/
+        `validate` commands, so there is nothing here for it to act on.
+        """
+        if self._clear_output is not None:
+            self._clear_output()
+            return
+        self._write("Nothing to clear -- the classic session has no separate scrollable log.")
+
     def _validate_pipeline(self) -> None:
         pipeline = self._require_pipeline()
         if pipeline is None:
             return
-        renderer = InteractiveEventRenderer(self._write)
+        if detect_document_kind(pipeline.resolved_path) is DocumentKind.DAG:
+            self._validate_dag(pipeline)
+            return
+        sink = self._presenter.event_sink(PipelineOperation.VALIDATE)
         try:
-            self._application.validate_pipeline(pipeline.resolved_path, event_sink=renderer)
+            config = self._application.validate_pipeline(pipeline.resolved_path, event_sink=sink)
         except KeyboardInterrupt:
             self._write("Validation interrupted.")
         except ConfigurationError as error:
-            self._write(_render_operation_error(error, pipeline))
+            self._presenter.show_error(error, pipeline, PipelineOperation.VALIDATE)
+        else:
+            self._presenter.show_validation_result(config)
 
     def _run_pipeline(self) -> None:
         pipeline = self._require_pipeline()
         if pipeline is None:
             return
-        renderer = InteractiveEventRenderer(self._write)
+        if detect_document_kind(pipeline.resolved_path) is DocumentKind.DAG:
+            self._run_dag(pipeline)
+            return
+        sink = self._presenter.event_sink(PipelineOperation.RUN)
         try:
-            result = self._application.run_pipeline(pipeline.resolved_path, event_sink=renderer)
+            result = self._application.run_pipeline(pipeline.resolved_path, event_sink=sink)
         except KeyboardInterrupt:
             self._write("Execution interrupted.")
         except (ConfigurationError, ExecutionError) as error:
-            self._write(_render_operation_error(error, pipeline))
+            self._presenter.show_error(error, pipeline, PipelineOperation.RUN)
         else:
-            self._write(_render_execution_result(result))
+            self._presenter.show_result(result)
+
+    def _validate_dag(self, pipeline: SelectedPipeline) -> None:
+        """DAG validation has no event stream to drive the presenter's step
+        timeline (`load_dag()` is a single synchronous parse+check, not a
+        `PipelineApplication`-style operation) -- written directly to the
+        output log instead, matching the classic CLI's own DAG `validate`
+        branch (a single echoed line, no progress display there either).
+        """
+        try:
+            dag = load_dag(pipeline.resolved_path)
+        except KeyboardInterrupt:
+            self._write("Validation interrupted.")
+            return
+        except ConfigurationError as error:
+            self._write(render_operation_error(error, pipeline))
+            return
+        task_label = "task" if len(dag.tasks) == 1 else "tasks"
+        self._write(f"DAG '{dag.name}' is valid ({len(dag.tasks)} {task_label}).")
+
+    def _run_dag(self, pipeline: SelectedPipeline) -> None:
+        """Reuses `execute_dag()` and `render_run_detail()` exactly as the
+        classic CLI's `run` command does for a DAG file -- same state store,
+        same recorded run, same rendering (bordered panel, severity,
+        partial-success note, retry attempts, width-capped wrapping).
+        """
+        store = StateStore()
+        try:
+            try:
+                run_id = execute_dag(pipeline.resolved_path, store)
+            except KeyboardInterrupt:
+                self._write("Execution interrupted.")
+                return
+            except ConfigurationError as error:
+                self._write(render_operation_error(error, pipeline))
+                return
+            dag_run = store.get_dag_run(run_id)
+            assert dag_run is not None
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        self._write(render_run_detail(dag_run, tasks, self._output_render_context(), attempts))
+
+    def refresh_render_context_width(self) -> None:
+        """Re-detect the real terminal width and fold it into `render_context`
+        in place, so anything rendered *after* a real terminal resize sizes
+        itself against the current width instead of whatever was detected at
+        session start. No-op when this session has no `live_width` source
+        (see `__init__`) -- a fixed `RenderContext` handed in for a
+        deterministic test stays exactly as given.
+
+        `render_context` is otherwise detected exactly once per session (see
+        its own assignment above) -- color/encoding/kitty/truecolor tiers are
+        deliberately stable for a session's whole lifetime so they don't
+        flicker mid-session. Width is the one field that's genuinely wrong to
+        keep frozen: unlike those capability tiers, it routinely changes while
+        a real terminal window stays open, and every panel/border renderer
+        budgets its content directly against it. Real sessions pass
+        `detect_width` -- the same real OS-query `detect_render_context()`
+        itself calls -- so there is exactly one implementation of "what is
+        the terminal width right now," not a second one drifting out of sync
+        with the first.
+
+        This only prevents *future* renders from using a stale width; text
+        already written to the full-screen session's scrollable output log is
+        immutable there (a real prompt_toolkit `Buffer`, not something this
+        method re-flows) and keeps whatever width was live when it was
+        written -- the same way a real terminal's own scrollback behaves.
+        """
+        if self._live_width is None:
+            return
+        self.render_context = replace(self.render_context, width=self._live_width())
+
+    def _output_render_context(self) -> RenderContext:
+        """The render context to use for anything about to go through
+        `self._write()` -- `self.render_context` unchanged when the current
+        output sink can actually render ANSI, or an `ansi_capable=False`
+        copy when it can't (NXL-100: the full-screen session's output log is
+        a plain prompt_toolkit TextArea with zero ANSI interpretation, at
+        any color tier -- unlike the status area/header, which render
+        through prompt_toolkit's own style system and degrade color depth
+        safely on their own, confirmed directly).
+
+        `ansi_capable=False`, not `forced_plain=True` (NXL-104): the log is
+        a real, wide, UTF-8-safe destination -- only raw escape codes are
+        unsafe there, not the rounded Unicode border shape itself, so a
+        capable terminal still gets that shape (just without color) instead
+        of degrading all the way down to `plain`'s ASCII fallback. This is
+        what actually unified DAG and pipeline results into the same visual
+        style in the log: both already rendered through `panel_lines()`
+        (DAG directly, pipeline via `render_execution_panel()`), so both
+        pick up the rounded shape for free once color alone -- not the
+        border too -- is what gets suppressed for this sink.
+
+        `width - 1`, also only for this sink (found diagnosing a real
+        visual-corruption report): the full-screen output log's `TextArea`
+        is constructed with `scrollbar=True` (full_screen.py), which adds a
+        `ScrollbarMargin` -- a real column of the `Window`'s width that
+        `TextArea`'s own `wrap_lines=True` reserves for the scrollbar and
+        never gives to content, confirmed directly by reading
+        `prompt_toolkit.widgets.base.TextArea.__init__` and
+        `prompt_toolkit.layout.margins.ScrollbarMargin`. `panel_lines()`
+        budgets its border/padding against the *full* `render_context.width`
+        with no way to know about that margin, so a panel whose rendered
+        line reaches the full declared width (which its own width-capping
+        logic, NXL-93, deliberately maximizes) overflows the real available
+        column by exactly one -- confirmed empirically: a real headless
+        render with `render_context.width` set to exactly the real
+        terminal's own column count still wrapped every content row's
+        closing border character onto its own line. `self.render_context`'s
+        `ansi_capable` field is left untouched either way -- the status
+        area/header have no scrollbar margin and still use the full real
+        width; its `width` field, however, is refreshed first (see
+        `refresh_render_context_width()`) so this sink's -1 budget is always
+        computed against the real current terminal width, not a stale one.
+        """
+        self.refresh_render_context_width()
+        if self._output_ansi_capable:
+            return self.render_context
+        return replace(
+            self.render_context,
+            ansi_capable=False,
+            width=max(1, self.render_context.width - 1),
+        )
+
+    def _show_runs(self, value: str) -> None:
+        """`/runs` (list) and `/runs <id>` (show) -- reuses `runs_render.py`'s
+        rendering exactly, the same functions `nexolith runs list`/`runs show`
+        call, so severity, the partial-success note, retry attempts, and
+        width-capped wrapping all render identically here.
+        """
+        if not value:
+            store = StateStore()
+            try:
+                runs = store.list_recent_dag_runs(20)
+            finally:
+                store.close()
+            self._write(render_runs_list(runs, self._output_render_context()))
+            return
+
+        try:
+            run_id = int(value)
+        except ValueError:
+            self._write(f"Usage: /runs [id] -- '{value}' is not a valid run id.")
+            return
+
+        store = StateStore()
+        try:
+            run = store.get_dag_run(run_id)
+            if run is None:
+                self._write(render_run_not_found(run_id))
+                return
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        self._write(render_run_detail(run, tasks, self._output_render_context(), attempts))
+
+    def _register_dag(self, value: str) -> None:
+        """`/register [path]` -- registers a DAG for scheduled execution
+        without running it (NXL-103), reusing `nexolith.dag.register_dag()`
+        exactly as the classic CLI's `dag register` command does, so both
+        report an identical outcome via `render_dag_registration()`. Falls
+        back to the currently open pipeline/DAG when no path is given,
+        matching `/validate`/`/run`; unlike the classic command, there is no
+        `--force` here -- updating an already-registered DAG's schedule from
+        an edited file is left to `nexolith dag register <path> --force`,
+        consistent with this session's intentionally small command set.
+        """
+        if value:
+            path = Path(value)
+        else:
+            pipeline = self._require_pipeline()
+            if pipeline is None:
+                return
+            path = pipeline.resolved_path
+
+        store = StateStore()
+        try:
+            try:
+                result = register_dag(path, store)
+            except ConfigurationError as error:
+                self._write(f"Could not register DAG: {error}")
+                return
+        finally:
+            store.close()
+        self._write(render_dag_registration(result))
+
+    def _scheduler_command(self, value: str) -> None:
+        subcommand = value.strip()
+        if not subcommand:
+            self._write("Usage: /scheduler status|stop")
+            return
+        if subcommand == "status":
+            self._scheduler_status()
+            return
+        if subcommand == "stop":
+            self._scheduler_stop()
+            return
+        if subcommand == "start":
+            self._write(_SCHEDULER_START_HINT)
+            return
+        self._write(f"Unknown scheduler command: {subcommand}. Use /scheduler status or stop.")
+
+    def _scheduler_status(self) -> None:
+        pidfile_path = default_pidfile_path()
+        record = read_pidfile(pidfile_path)
+        render_context = self._output_render_context()
+        if record is None or not is_process_alive(record.pid):
+            self._write(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+            return
+        self._write(
+            render_scheduler_status(
+                SchedulerStatus(True, record.pid, record.started_at), render_context
+            )
+        )
+
+    def _scheduler_stop(self) -> None:
+        """Mirrors the classic CLI's `scheduler stop` exactly: a bounded
+        ~2s poll for the target process to actually exit. That's a real,
+        synchronous block on this session's single thread for up to two
+        seconds -- consistent with `/validate`/`/run` already blocking
+        synchronously for however long real pipeline execution takes; not a
+        new category of blocking this session didn't already accept.
+        """
+        pidfile_path = default_pidfile_path()
+        record = read_pidfile(pidfile_path)
+        if record is None:
+            self._write(render_scheduler_not_running())
+            return
+        if not is_process_alive(record.pid):
+            self._write(render_scheduler_not_running())
+            return
+
+        if sys.platform == "win32":
+            self._write(render_windows_stop_caveat())
+        stop_process(record.pid)
+
+        for _ in range(20):  # ~2s budget for the process to actually exit
+            if not is_process_alive(record.pid):
+                break
+            time.sleep(0.1)
+
+        # Do not unlink an observer-owned path: it may now belong to a new
+        # scheduler. Atomic stale recovery belongs to the next start.
+        if is_process_alive(record.pid):
+            self._write(render_scheduler_stop_uncertain(record.pid))
+        else:
+            self._write(render_scheduler_stopped(record.pid))
 
     def _require_pipeline(self) -> SelectedPipeline | None:
         if self.context.pipeline is None:
@@ -223,7 +776,7 @@ class InteractiveSession:
         return self.context.pipeline
 
 
-def _render_operation_error(error: NexolithError, pipeline: SelectedPipeline) -> str:
+def render_operation_error(error: NexolithError, pipeline: SelectedPipeline) -> str:
     category = error_category(error)
     if isinstance(error, ConfigurationError):
         message = str(error).replace(str(pipeline.resolved_path), str(pipeline.requested_path))
@@ -236,7 +789,7 @@ def _render_operation_error(error: NexolithError, pipeline: SelectedPipeline) ->
     return f"Error [{category}]: {message}"
 
 
-def _render_execution_result(result: ExecutionResult) -> str:
+def render_execution_result(result: ExecutionResult) -> str:
     lines = [
         f"Status: {result.status.value}",
         f"Rows read: {result.rows_read}",
@@ -248,5 +801,24 @@ def _render_execution_result(result: ExecutionResult) -> str:
 
 
 def run_interactive_session() -> None:
-    """Launch the default terminal-backed session."""
-    InteractiveSession().run()
+    """Launch the default terminal-backed session: full-screen when the
+    terminal supports it, today's classic line-based loop otherwise.
+
+    `render_context.plain` is the real, deterministic, tested fallback gate
+    (NO_COLOR, non-TTY, narrow width). The broad except below is a narrow
+    defensive backstop only, for the rare case where prompt_toolkit itself
+    cannot acquire a real terminal for full-screen mode despite `is_tty`
+    being true — it only wraps session construction/startup, before any
+    output has been drawn, so falling back at that point is still a clean,
+    single decision rather than an accident mid-session.
+    """
+    render_context = detect_render_context()
+    if not render_context.plain:
+        from nexolith.cli.full_screen import run_full_screen_session
+
+        try:
+            run_full_screen_session(render_context, live_width=detect_width)
+            return
+        except Exception:
+            pass
+    InteractiveSession(render_context=render_context, live_width=detect_width).run()

@@ -1,0 +1,10 @@
+name: silver_orders
+source:
+  type: csv
+  path: ../bronze/orders.csv
+transformations:
+  - type: python_job
+    file: ../jobs/conform_orders.py
+destination:
+  type: csv
+  path: ../silver/orders.csv

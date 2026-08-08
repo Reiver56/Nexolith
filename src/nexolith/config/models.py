@@ -20,12 +20,33 @@ class SqlSourceConfig(ComponentConfig):
     type: Literal["sqlite", "postgresql"]
     connection_url: str
     query: str | None = None
+    # query_file (NXL-81): an alternative to inline `query`, resolved relative
+    # to the pipeline YAML's own directory -- same convention as the DAG
+    # format's `pipeline:` paths. Resolution and existence/readability
+    # checks happen in `nexolith.config.loader.load_pipeline` (mirroring how
+    # DAG pipeline references are resolved in the DAG validator, not the
+    # model itself), which then populates `query` with the file's contents
+    # so every downstream consumer keeps reading the same `query` field
+    # regardless of which one the user wrote.
+    query_file: str | None = None
     table: str | None = None
+    # parameters (NXL-82): named values bound into `query`/`query_file` via
+    # the real SQLAlchemy Core bound-parameter mechanism (`:name` syntax,
+    # `connection.execute(text(query), parameters)`) -- never string
+    # interpolation. Explicit declaration, not SQL-text inspection (see
+    # nexolith.config.loader._resolve_parameters): every name this pipeline
+    # ever binds must appear as a key here. A `None` value means "required,
+    # not yet supplied" -- filled in later by a DAG task's own `parameters:`
+    # override (nexolith.dag.models.DagTaskConfig.parameters), or it is a
+    # load-time ConfigurationError, never a runtime driver error.
+    parameters: dict[str, Scalar] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def require_query_or_table(self) -> "SqlSourceConfig":
-        if not self.query and not self.table:
-            raise ValueError("either 'query' or 'table' is required")
+        if self.query and self.query_file:
+            raise ValueError("'query' and 'query_file' are mutually exclusive; specify only one")
+        if not self.query and not self.query_file and not self.table:
+            raise ValueError("either 'query', 'query_file', or 'table' is required")
         return self
 
 
@@ -39,7 +60,7 @@ class SqlDestinationConfig(ComponentConfig):
     type: Literal["sqlite", "postgresql"]
     connection_url: str
     table: str
-    mode: Literal["append", "replace", "fail"] = "fail"
+    mode: Literal["append", "replace", "fail", "truncate"] = "fail"
 
 
 class SelectConfig(ComponentConfig):
@@ -80,9 +101,30 @@ class FilterConfig(ComponentConfig):
         return self
 
 
+class PythonJobConfig(ComponentConfig):
+    """python_job (NXL-83, ADR-7): a deliberate, scoped exception to the
+    project's prior no-arbitrary-code-execution principle -- Model A only
+    (in-process; receives/returns Nexolith's own in-flight `Rows`). `file`
+    resolves relative to the pipeline YAML's own directory, same convention
+    as `query_file`/DAG `pipeline:` references. `entrypoint` names a
+    function in that file with the documented signature
+    `def <entrypoint>(rows: Rows, context: JobContext) -> Rows`, default
+    `"run"`. Trusted-local-code only, no sandboxing -- see
+    nexolith.jobs.loader for exactly what "dynamic import" does and does
+    not contain.
+    """
+
+    type: Literal["python_job"]
+    file: str
+    entrypoint: str = "run"
+    parameters: dict[str, Scalar] = Field(default_factory=dict)
+
+
 SourceConfig = CsvSourceConfig | SqlSourceConfig
 DestinationConfig = CsvDestinationConfig | SqlDestinationConfig
-TransformationConfig = SelectConfig | RenameConfig | DropNullsConfig | FilterConfig
+TransformationConfig = (
+    SelectConfig | RenameConfig | DropNullsConfig | FilterConfig | PythonJobConfig
+)
 
 
 class PipelineConfig(BaseModel):

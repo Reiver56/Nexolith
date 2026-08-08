@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from nexolith.application import PipelineApplication
-from nexolith.cli import app
+from nexolith.cli import app, interactive
 from nexolith.cli.context import SelectedPipeline, SessionContext
 from nexolith.cli.interactive import (
     DEFAULT_PROMPT,
@@ -20,13 +24,32 @@ from nexolith.cli.interactive import (
     InteractiveSession,
     parse_command,
     render_prompt,
+    render_splash,
 )
+from nexolith.cli.render_context import RenderContext
 from nexolith.config.models import PipelineConfig
 from nexolith.events import EventSink
 from nexolith.exceptions import ConfigurationError, ConnectorError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.scheduler import default_pidfile_path, is_process_alive, read_pidfile, write_pidfile
+from nexolith.types import Scalar
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test in this file gets its own state directory -- never the
+    real user's %LOCALAPPDATA%\\Nexolith -- matching test_scheduler_cli.py's
+    own convention. Needed for this story's /runs and /scheduler commands,
+    which (like their classic-CLI counterparts) open a real StateStore/
+    pidfile at the default location unless overridden.
+    """
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("NEXOLITH_STATE_DIR", str(state_dir))
+    return state_dir
+
+
 type InputStep = str | BaseException | Callable[[], str]
 
 
@@ -93,6 +116,216 @@ def run_session(
     return session, reader, output
 
 
+def test_session_detects_render_context_by_default() -> None:
+    session = InteractiveSession(
+        input_reader=iter(["/exit"]).__next__, output_writer=lambda _: None
+    )
+
+    assert isinstance(session.render_context, RenderContext)
+
+
+def test_session_accepts_injected_render_context() -> None:
+    forced = RenderContext(is_tty=True, color_enabled=True, width=200)
+
+    session = InteractiveSession(
+        input_reader=iter(["/exit"]).__next__,
+        output_writer=lambda _: None,
+        render_context=forced,
+    )
+
+    assert session.render_context is forced
+
+
+def test_render_splash_is_byte_identical_to_current_text_when_no_context() -> None:
+    assert render_splash() == SPLASH
+    assert render_splash(None) == SPLASH
+
+
+def test_render_splash_falls_back_to_plain_text_in_degraded_conditions() -> None:
+    non_tty = RenderContext(is_tty=False, color_enabled=True, width=200)
+    no_color = RenderContext(is_tty=True, color_enabled=False, width=200)
+    narrow = RenderContext(is_tty=True, color_enabled=True, width=40)
+    forced = RenderContext(is_tty=True, color_enabled=True, width=200, forced_plain=True)
+
+    for degraded in (non_tty, no_color, narrow, forced):
+        assert render_splash(degraded) == SPLASH
+
+
+def test_render_splash_shows_bordered_panel_on_a_capable_non_kitty_terminal() -> None:
+    capable = RenderContext(is_tty=True, color_enabled=True, width=200, truecolor=True)
+
+    rendered = render_splash(capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b[38;2;" in rendered
+    assert "\x1b_G" not in rendered
+    assert "╭" in rendered and "╮" in rendered
+    assert "╰" in rendered and "╯" in rendered
+    assert "Nexolith" in rendered
+
+
+def test_render_splash_uses_kitty_protocol_when_detected() -> None:
+    kitty_capable = RenderContext(is_tty=True, color_enabled=True, width=200, kitty_graphics=True)
+
+    rendered = render_splash(kitty_capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b_G" in rendered
+
+
+def test_render_splash_falls_back_to_ansi_tier_when_kitty_rendering_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kitty_capable = RenderContext(
+        is_tty=True, color_enabled=True, width=200, kitty_graphics=True, truecolor=True
+    )
+
+    def broken_kitty_renderer() -> str:
+        raise RuntimeError("simulated tier-1 failure")
+
+    monkeypatch.setattr(interactive, "render_nexo_kitty_protocol", broken_kitty_renderer)
+
+    rendered = render_splash(kitty_capable)
+
+    assert rendered != SPLASH
+    assert rendered.endswith(SPLASH)
+    assert "\x1b_G" not in rendered
+    assert "\x1b[38;2;" in rendered
+
+
+def test_render_splash_never_attempts_kitty_or_ansi_rendering_when_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_be_called() -> str:
+        raise AssertionError("plain mode must not invoke colored rendering")
+
+    monkeypatch.setattr(interactive, "render_nexo_kitty_protocol", must_not_be_called)
+    monkeypatch.setattr(interactive, "render_nexo_panel", must_not_be_called)
+
+    narrow_but_kitty = RenderContext(is_tty=True, color_enabled=True, width=40, kitty_graphics=True)
+
+    assert render_splash(narrow_but_kitty) == SPLASH
+
+
+class _RecordingSession:
+    """Stand-in for InteractiveSession that records .run() without blocking
+    on real IO, so run_interactive_session()'s branch logic is testable in
+    isolation from both the classic loop's and the full-screen session's
+    actual behavior (each is tested separately, in their own test files)."""
+
+    def __init__(self, *, render_context: RenderContext) -> None:
+        self.render_context = render_context
+        self.ran = False
+
+    def run(self) -> None:
+        self.ran = True
+
+
+def _recording_session_factory(
+    recorded: list[_RecordingSession],
+) -> Callable[..., _RecordingSession]:
+    def factory(*, render_context: RenderContext, live_width: object = None) -> _RecordingSession:
+        session = _RecordingSession(render_context=render_context)
+        recorded.append(session)
+        return session
+
+    return factory
+
+
+def test_run_interactive_session_uses_classic_loop_when_plain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deterministic, tested fallback gate: RenderContext.plain routes to
+    the classic loop and never even attempts the full-screen session."""
+    plain_context = RenderContext(is_tty=False, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: plain_context)
+
+    def full_screen_must_not_be_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("full-screen must not be attempted when render_context.plain")
+
+    monkeypatch.setattr(
+        "nexolith.cli.full_screen.run_full_screen_session", full_screen_must_not_be_called
+    )
+    recorded: list[_RecordingSession] = []
+    monkeypatch.setattr(interactive, "InteractiveSession", _recording_session_factory(recorded))
+
+    interactive.run_interactive_session()
+
+    assert len(recorded) == 1
+    assert recorded[0].render_context is plain_context
+    assert recorded[0].ran is True
+
+
+def test_run_interactive_session_attempts_full_screen_when_capable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capable_context = RenderContext(is_tty=True, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: capable_context)
+
+    calls: list[RenderContext] = []
+    monkeypatch.setattr(
+        "nexolith.cli.full_screen.run_full_screen_session",
+        lambda ctx, **kwargs: calls.append(ctx),
+    )
+
+    def classic_must_not_be_called(**kwargs: object) -> None:
+        raise AssertionError("classic loop must not run when full-screen succeeds")
+
+    monkeypatch.setattr(interactive, "InteractiveSession", classic_must_not_be_called)
+
+    interactive.run_interactive_session()
+
+    assert calls == [capable_context]
+
+
+def test_run_interactive_session_falls_back_to_classic_loop_if_full_screen_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive backstop: if prompt_toolkit can't acquire a real terminal
+    for full-screen mode despite is_tty being true, fall back cleanly rather
+    than crash -- this only covers setup-time failure, before any output has
+    been drawn (see run_interactive_session's docstring)."""
+    capable_context = RenderContext(is_tty=True, color_enabled=True, width=200)
+    monkeypatch.setattr(interactive, "detect_render_context", lambda: capable_context)
+
+    def broken_full_screen(ctx: RenderContext, **kwargs: object) -> None:
+        raise RuntimeError("simulated: prompt_toolkit couldn't acquire a real terminal")
+
+    monkeypatch.setattr("nexolith.cli.full_screen.run_full_screen_session", broken_full_screen)
+    recorded: list[_RecordingSession] = []
+    monkeypatch.setattr(interactive, "InteractiveSession", _recording_session_factory(recorded))
+
+    interactive.run_interactive_session()
+
+    assert len(recorded) == 1
+    assert recorded[0].render_context is capable_context
+    assert recorded[0].ran is True
+
+
+def test_session_shows_plain_splash_when_render_context_is_degraded() -> None:
+    # run_session doesn't inject render_context; default detection under pytest
+    # (non-TTY output) must degrade to plain, matching current behavior exactly.
+    _, _, output = run_session(["/exit"])
+
+    assert output[0] == SPLASH
+
+
+def test_session_shows_colored_splash_when_render_context_is_capable() -> None:
+    capable = RenderContext(is_tty=True, color_enabled=True, width=200)
+    reader = ScriptedInput(["/exit"])
+    output: list[str] = []
+    session = InteractiveSession(
+        input_reader=reader, output_writer=output.append, render_context=capable
+    )
+
+    session.run()
+
+    assert output[0] != SPLASH
+    assert output[0].endswith(SPLASH)
+
+
 def test_no_subcommand_starts_interactive_session() -> None:
     result = runner.invoke(app, input="/exit\n")
 
@@ -111,6 +344,7 @@ def test_help_lists_only_available_commands() -> None:
     assert "/help" in result.output
     assert "/open <path>" in result.output
     assert "/open" in result.output
+    assert "/close" in result.output
     assert "/clear" in result.output
     assert "/exit" in result.output
     assert "/run" in result.output
@@ -134,25 +368,155 @@ def test_open_valid_pipeline_and_show_context(tmp_path: Path) -> None:
     ]
 
 
-def test_open_without_context_and_clear_without_context_are_safe() -> None:
-    session, _, output = run_session(["/open", "/clear", "/exit"])
+def test_open_without_context_discovers_and_close_without_context_is_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NXL-107: `/open` with nothing currently open used to just print
+    `NO_PIPELINE` -- there was nothing else to show. It now discovers DAG
+    files under the current directory instead (an empty, real `tmp_path`
+    here, so the deterministic "none found" message is what's expected).
+    `/close` is unaffected -- unchanged NO_PIPELINE-reporting behavior.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    session, _, output = run_session(["/open", "/close", "/exit"])
 
     assert session.context.pipeline is None
-    assert output.count(NO_PIPELINE) == 2
+    assert f"No DAG files found under {tmp_path}" in "\n".join(output)
+    assert output.count(NO_PIPELINE) == 1
 
 
-def test_open_replaces_pipeline_and_clear_removes_context(tmp_path: Path) -> None:
+def test_open_replaces_pipeline_and_close_removes_context(tmp_path: Path) -> None:
+    """NXL-105: `/close` (renamed from `/clear`) still does exactly this --
+    `/clear` itself now clears the scrollable log instead, see
+    test_clear_in_the_classic_loop_reports_no_scrollable_log_to_clear below
+    and full_screen's own coverage in test_full_screen.py.
+    """
     first = tmp_path / "first.yaml"
     second = tmp_path / "second.yaml"
     write_pipeline(first, "first")
     write_pipeline(second, "second")
 
-    session, reader, output = run_session([f"/open {first}", f"/open {second}", "/clear", "/exit"])
+    session, reader, output = run_session([f"/open {first}", f"/open {second}", "/close", "/exit"])
 
     assert session.context.pipeline is None
     assert "Pipeline context cleared." in output
     assert reader.prompts[-2] == "nexolith [second.yaml]> "
     assert reader.prompts[-1] == DEFAULT_PROMPT
+
+
+# -- NXL-107: /open discovery ------------------------------------------------
+
+
+def test_open_with_no_context_lists_discovered_dags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    _, _, output = run_session(["/open", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "Discovered DAGs:" in rendered
+    assert "1" in rendered and "workflows" in rendered and "dag.yaml" in rendered
+    assert "Use /open <number> to open one." in rendered
+
+
+def test_open_by_discovered_number_opens_it_exactly_like_an_explicit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression-style comparison (Step 5): opening via the discovery
+    number must produce the exact same outcome as `/open <path>` always
+    has -- same context state, same "DAG opened:" message -- because
+    `_open_pipeline()` resolves the selection to a path string and then
+    falls straight into its one, unchanged code path.
+    """
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    via_discovery, _, discovery_output = run_session(["/open", "/open 1", "/exit"])
+    via_explicit_path, _, explicit_output = run_session([f"/open {dag_path}", "/exit"])
+
+    discovered_pipeline = via_discovery.context.pipeline
+    explicit_pipeline = via_explicit_path.context.pipeline
+    assert discovered_pipeline is not None
+    assert explicit_pipeline is not None
+    assert discovered_pipeline.resolved_path == dag_path.resolve()
+    assert discovered_pipeline.resolved_path == explicit_pipeline.resolved_path
+    assert any(line.startswith("DAG opened:") for line in discovery_output)
+    assert any(line.startswith("DAG opened:") for line in explicit_output)
+
+
+def test_open_explicit_path_is_unaffected_by_a_pending_discovery_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`/open <path>` (an actual, non-numeric-only path) must never be
+    misread as a discovery selection, even right after a discovery listing
+    -- confirms the numeric-only guard in `_resolve_discovered_selection()`.
+    """
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    other_pipeline = tmp_path / "other.yaml"
+    write_pipeline(other_pipeline, "other")
+    monkeypatch.chdir(tmp_path)
+
+    session, _, output = run_session(["/open", f"/open {other_pipeline}", "/exit"])
+
+    assert session.context.pipeline is not None
+    assert session.context.pipeline.resolved_path == other_pipeline.resolve()
+    assert any(line.startswith("Pipeline opened:") for line in output)
+
+
+def test_open_with_no_dags_found_reports_that_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    _, _, output = run_session(["/open", "/exit"])
+
+    assert f"No DAG files found under {tmp_path}" in "\n".join(output)
+
+
+def test_open_out_of_range_discovery_number_falls_through_to_a_literal_path_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No crash, no silent success -- an out-of-range number after a
+    discovery listing just behaves like any other nonexistent literal
+    path, exactly as `/open 99` always would with no discovery pending."""
+    dag_path = tmp_path / "workflows" / "dag.yaml"
+    pipeline_path = tmp_path / "workflows" / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+    monkeypatch.chdir(tmp_path)
+
+    session, _, output = run_session(["/open", "/open 99", "/exit"])
+
+    assert session.context.pipeline is None
+    assert any(line.startswith("Could not open pipeline:") for line in output)
+
+
+def test_clear_in_the_classic_loop_reports_no_scrollable_log_to_clear() -> None:
+    """NXL-105: `/clear` now means "clear the scrollable log" -- the
+    classic loop has no such buffer (it prints straight to the real
+    terminal, same as the one-shot `nexolith run`/`validate` commands), so
+    it reports that plainly rather than silently doing nothing or
+    (incorrectly, post-rename) clearing the pipeline context.
+    """
+    session, _, output = run_session(["/open", "/clear", "/exit"])
+
+    assert "Nothing to clear -- the classic session has no separate scrollable log." in output
 
 
 @pytest.mark.parametrize("invalid_kind", ["missing", "directory", "invalid"])
@@ -176,7 +540,9 @@ def test_failed_open_preserves_previous_context(tmp_path: Path, invalid_kind: st
 def test_unreadable_pipeline_error_is_recoverable(tmp_path: Path) -> None:
     expected = ConfigurationError("Could not read pipeline file. Check file permissions.")
 
-    def unreadable_loader(_: Path) -> PipelineConfig:
+    def unreadable_loader(
+        _path: Path, _overrides: Mapping[str, Scalar] | None = None
+    ) -> PipelineConfig:
         raise expected
 
     application = PipelineApplication(loader=unreadable_loader)
@@ -266,9 +632,14 @@ def test_command_parser_has_small_explicit_contract() -> None:
     assert parse_command(" /help ").kind is InteractiveCommand.HELP
     assert parse_command("/open").kind is InteractiveCommand.OPEN
     assert parse_command("/open pipeline with spaces.yaml").text == "pipeline with spaces.yaml"
+    assert parse_command("/close").kind is InteractiveCommand.CLOSE
     assert parse_command("/clear").kind is InteractiveCommand.CLEAR
     assert parse_command("/validate").kind is InteractiveCommand.VALIDATE
     assert parse_command("/run").kind is InteractiveCommand.RUN
+    assert parse_command("/runs").kind is InteractiveCommand.RUNS
+    assert parse_command("/runs 42").text == "42"
+    assert parse_command("/scheduler").kind is InteractiveCommand.SCHEDULER
+    assert parse_command("/scheduler status").text == "status"
     assert parse_command("/exit").kind is InteractiveCommand.EXIT
     assert parse_command("validate").kind is InteractiveCommand.UNKNOWN
 
@@ -467,6 +838,427 @@ def test_help_does_not_expose_deferred_v031_or_v050_features() -> None:
     assert "/logs" not in help_text
     assert "completion" not in help_text
     assert "history" not in help_text
+
+
+# -- NXL-99: full-screen/classic-shared session parity (scheduler, runs, DAG) -
+
+
+def write_dag(dag_path: Path, pipeline_path: Path, source: Path, destination: Path) -> None:
+    dag_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_path.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("id,status\n1,ready\n2,done\n", encoding="utf-8")
+    pipeline_path.write_text(
+        f"""
+name: dag_task_pipeline
+source:
+  type: csv
+  path: {source.as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {destination.as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: interactive_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def write_failing_dag(dag_path: Path, pipeline_path: Path) -> None:
+    """A DAG that's structurally valid (so /open succeeds -- load_dag()
+    validates every task's pipeline reference exists) but genuinely fails
+    when actually run: its one task's pipeline points at a source file
+    that doesn't exist."""
+    pipeline_path.write_text(
+        f"""
+name: failing_task_pipeline
+source:
+  type: csv
+  path: {(pipeline_path.parent / "does_not_exist.csv").as_posix()}
+transformations: []
+destination:
+  type: csv
+  path: {(pipeline_path.parent / "unreachable_output.csv").as_posix()}
+""",
+        encoding="utf-8",
+    )
+    dag_path.write_text(
+        f"""
+name: interactive_failing_dag
+tasks:
+  - name: only
+    pipeline: {pipeline_path.name}
+    depends_on: []
+""",
+        encoding="utf-8",
+    )
+
+
+def test_help_lists_the_new_v033_parity_commands() -> None:
+    """NXL-99: /runs and /scheduler must be discoverable via /help, alongside
+    the original five commands (unchanged)."""
+    _, _, output = run_session(["/help", "/exit"])
+
+    help_text = "\n".join(output)
+    assert "/runs" in help_text
+    assert "/runs <id>" in help_text
+    assert "/scheduler status" in help_text
+    assert "/scheduler stop" in help_text
+    # /scheduler start is deliberately not offered as a real interactive
+    # command -- see test_scheduler_start_is_rejected_with_a_helpful_hint.
+    assert "scheduler start" in help_text.lower()  # still mentioned, as a hint
+
+
+def test_open_validate_run_a_dag_end_to_end(tmp_path: Path) -> None:
+    """/open, /validate, /run all extended to recognize a DAG file the same
+    way the classic CLI's validate/run commands do (detect_document_kind()),
+    reusing execute_dag()/render_run_detail() -- not a parallel
+    implementation. Real state recorded, real file written by the DAG's
+    own task.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    session, _, output = run_session([f"/open {dag_path}", "/validate", "/run", "/exit"])
+
+    rendered = "\n".join(output)
+    assert any(line.startswith("DAG opened:") for line in output)
+    assert session.context.pipeline is not None
+    assert session.context.pipeline.resolved_path == dag_path.resolve()
+    assert "DAG 'interactive_dag' is valid (1 task)." in output
+    assert "Status: succeeded" in rendered
+    assert "DAG: interactive_dag" in rendered
+    assert "[OK] only" in rendered
+    assert destination.is_file()
+    assert destination.read_text(encoding="utf-8").strip().splitlines() == [
+        "id,status",
+        "1,ready",
+        "2,done",
+    ]
+
+
+def test_run_a_failing_dag_reports_failure_and_session_stays_usable(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    write_failing_dag(dag_path, pipeline_path)
+
+    session, _, output = run_session([f"/open {dag_path}", "/run", "/help", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "Status: failed" in rendered
+    assert HELP in output  # session still usable after a DAG execution failure
+    assert session.context.pipeline is not None
+
+
+def test_open_invalid_dag_reports_error_via_the_shared_error_renderer(tmp_path: Path) -> None:
+    dag_path = tmp_path / "bad_dag.yaml"
+    dag_path.write_text("name: x\ntasks: []\n", encoding="utf-8")  # tasks must be non-empty
+
+    _, _, output = run_session([f"/open {dag_path}", "/exit"])
+
+    assert any(line.startswith("Could not open pipeline:") for line in output)
+
+
+def test_runs_list_with_no_runs_recorded_yet() -> None:
+    _, _, output = run_session(["/runs", "/exit"])
+
+    assert "No DAG runs recorded yet." in output
+
+
+def test_runs_list_and_show_reuse_real_rendering_after_a_dag_run(tmp_path: Path) -> None:
+    """Confirms /runs (list) and /runs <id> (show) reuse runs_render.py's
+    real rendering functions -- the exact bordered-panel/table output
+    `nexolith runs list`/`runs show` produce -- rather than a parallel
+    implementation for the interactive session.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/open {dag_path}", "/run", "/runs", "/runs 1", "/exit"])
+
+    rendered = "\n".join(output)
+    # /runs (list): the real table header from render_runs_list.
+    assert (
+        "ID" in rendered and "DAG" in rendered and "STATUS" in rendered and "SEVERITY" in rendered
+    )
+    # /runs 1 (show): the real bordered panel from render_run_detail.
+    assert rendered.count("Status: succeeded") >= 1
+    assert "Trigger: manual" in rendered
+    assert "Severity: medium" in rendered
+
+
+def test_runs_show_rejects_a_non_numeric_id() -> None:
+    _, _, output = run_session(["/runs abc", "/exit"])
+
+    assert any("Usage: /runs [id]" in line for line in output)
+
+
+def test_runs_show_reports_not_found_for_a_nonexistent_run() -> None:
+    _, _, output = run_session(["/runs 999", "/exit"])
+
+    assert "No DAG run found with id 999." in output
+
+
+def test_register_with_no_open_pipeline_prompts_to_open_one_first() -> None:
+    _, _, output = run_session(["/register", "/exit"])
+
+    assert "No pipeline is currently open. Use /open <path> first." in output
+
+
+def test_register_creates_a_new_registration_for_the_currently_open_dag(tmp_path: Path) -> None:
+    """NXL-103: `/register` with no path reuses the currently open DAG,
+    matching `/validate`/`/run`, and shares `render_dag_registration()` with
+    the classic CLI's `dag register` command -- same message either way.
+    """
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/open {dag_path}", "/register", "/exit"])
+
+    assert "DAG 'interactive_dag' registered (schedule: none, enabled)." in output
+
+    from nexolith.state import StateStore
+
+    store = StateStore()
+    try:
+        registered = store.get_dag("interactive_dag")
+        assert registered is not None
+        assert registered.enabled is True
+        assert store.list_dag_runs("interactive_dag") == []  # never run
+    finally:
+        store.close()
+
+
+def test_register_with_an_explicit_path_does_not_require_opening_it_first(tmp_path: Path) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/register {dag_path}", "/exit"])
+
+    assert "DAG 'interactive_dag' registered (schedule: none, enabled)." in output
+
+
+def test_register_an_already_registered_dag_hints_at_the_classic_forces_flag(
+    tmp_path: Path,
+) -> None:
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    source = tmp_path / "input.csv"
+    destination = tmp_path / "output.csv"
+    write_dag(dag_path, pipeline_path, source, destination)
+
+    _, _, output = run_session([f"/register {dag_path}", f"/register {dag_path}", "/exit"])
+
+    assert any("already registered" in line and "--force" in line for line in output)
+
+
+def test_register_an_invalid_dag_reports_the_real_validation_error(tmp_path: Path) -> None:
+    dag_path = tmp_path / "bad_dag.yaml"
+    dag_path.write_text("name: x\ntasks: []\n", encoding="utf-8")  # tasks must be non-empty
+
+    _, _, output = run_session([f"/register {dag_path}", "/exit"])
+
+    assert any(line.startswith("Could not register DAG:") for line in output)
+
+
+def test_scheduler_status_reports_not_running_when_no_marker_file_exists() -> None:
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("Scheduler:" in line and "not running" in line for line in output)
+
+
+def test_scheduler_status_reports_running_for_a_real_live_process() -> None:
+    """Not just trusting a marker file's existence -- a real separate
+    process is spawned and its actual PID written to the marker, matching
+    test_scheduler_cli.py's own convention for this exact check."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+
+        _, _, output = run_session(["/scheduler status", "/exit"])
+
+        rendered = "\n".join(output)
+        assert "Scheduler:" in rendered
+        assert "running" in rendered
+        assert str(proc.pid) in rendered
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_scheduler_status_leaves_a_stale_marker() -> None:
+    pidfile_path = default_pidfile_path()
+    write_pidfile(pidfile_path, 999999, "old-start")
+
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("not running" in line for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (999999, "old-start")
+
+
+def test_scheduler_status_preserves_a_concurrent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+
+    def replace_before_reporting_dead(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return False
+
+    monkeypatch.setattr("nexolith.cli.interactive.is_process_alive", replace_before_reporting_dead)
+
+    _, _, output = run_session(["/scheduler status", "/exit"])
+
+    assert any("not running" in line for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
+
+
+def test_scheduler_stop_reports_not_running_when_no_marker_exists() -> None:
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert "Scheduler is not running." in output
+
+
+def test_scheduler_stop_genuinely_terminates_a_real_running_scheduler() -> None:
+    """Real process, real termination -- mirrors
+    test_scheduler_cli.py's test_stop_genuinely_terminates_a_real_running_scheduler
+    exactly, but driven through the interactive session's /scheduler stop
+    instead of calling stop_process()/the classic CLI command directly.
+
+    Does NOT assert the exact "stopped" wording, matching that same
+    test_scheduler_cli.py test's own established convention: `_scheduler_stop()`
+    itself polls `is_process_alive()` for a bounded ~2s (interactive.py)
+    before choosing between "stopped" and the honest "may still be shutting
+    down" wording (NXL-78: best-effort on Windows, never guaranteed), so
+    which exact wording comes out is itself a real race against this
+    machine's own process-teardown timing -- confirmed flaky under real
+    load, where the OS-level `proc.wait(timeout=5)` below still succeeded,
+    well past that ~2s budget. Only the genuinely deterministic guarantees
+    (real termination, original stale pidfile retained) are asserted.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        time.sleep(0.3)
+        write_pidfile(default_pidfile_path(), proc.pid, "2026-01-01T00:00:00+00:00")
+        assert is_process_alive(proc.pid) is True
+
+        _, _, output = run_session(["/scheduler stop", "/exit"])
+
+        proc.wait(timeout=5)
+        assert is_process_alive(proc.pid) is False
+        assert any("stopped" in line.lower() or "shutting down" in line.lower() for line in output)
+        record = read_pidfile(default_pidfile_path())
+        assert record is not None
+        assert record.pid == proc.pid
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_scheduler_stop_leaves_a_stale_marker() -> None:
+    pidfile_path = default_pidfile_path()
+    write_pidfile(pidfile_path, 999999, "old-start")
+
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert "Scheduler is not running." in output
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (999999, "old-start")
+
+
+def test_scheduler_stop_preserves_a_concurrent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pidfile_path = default_pidfile_path()
+    replacement_pid = os.getpid()
+    write_pidfile(pidfile_path, 111111, "old-start")
+    liveness = iter((True, False, False))
+
+    def observed_process_is_alive(pid: int) -> bool:
+        assert pid == 111111
+        return next(liveness)
+
+    def stop_old_process(pid: int) -> bool:
+        assert pid == 111111
+        write_pidfile(pidfile_path, replacement_pid, "new-start")
+        return True
+
+    monkeypatch.setattr("nexolith.cli.interactive.is_process_alive", observed_process_is_alive)
+    monkeypatch.setattr("nexolith.cli.interactive.stop_process", stop_old_process)
+
+    _, _, output = run_session(["/scheduler stop", "/exit"])
+
+    assert any("stopped" in line.lower() for line in output)
+    record = read_pidfile(pidfile_path)
+    assert record is not None
+    assert (record.pid, record.started_at) == (replacement_pid, "new-start")
+    assert is_process_alive(record.pid)
+
+
+def test_scheduler_start_is_rejected_with_a_helpful_hint() -> None:
+    """Deliberate design choice (NXL-99): /scheduler start is not wired to
+    actually run the daemon in-session -- Scheduler.run() blocks forever by
+    design (it's meant to own a dedicated foreground process), and this
+    session has no background thread to run it on instead (a new one would
+    violate the story's own constraint). Confirm it's rejected cleanly with
+    a helpful pointer to the real command, not silently ignored as
+    'unknown', and that the session keeps working afterward.
+    """
+    session, _, output = run_session(["/scheduler start", "/help", "/exit"])
+
+    rendered = "\n".join(output)
+    assert "nexolith scheduler start" in rendered
+    assert "Unknown command" not in rendered
+    assert HELP in output
+    assert session.context.pipeline is None  # nothing hung or crashed
+
+
+def test_scheduler_unknown_subcommand_is_reported_clearly() -> None:
+    _, _, output = run_session(["/scheduler bogus", "/exit"])
+
+    assert any("Unknown scheduler command: bogus" in line for line in output)
+
+
+def test_bare_scheduler_shows_usage() -> None:
+    _, _, output = run_session(["/scheduler", "/exit"])
+
+    assert "Usage: /scheduler status|stop" in output
 
 
 def test_real_run_failure_is_redacted_and_session_remains_usable(tmp_path: Path) -> None:

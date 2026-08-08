@@ -1,0 +1,23 @@
+name: sql_enrichment_chain
+priority: normal
+severity: low
+tasks:
+  - name: task1
+    pipeline: pipelines/task1_stage.yaml
+    depends_on: []
+
+  - name: task2
+    pipeline: pipelines/task2_dedup_and_nulls.yaml
+    depends_on: [task1]
+
+  - name: task3
+    pipeline: pipelines/task3_normalize.yaml
+    depends_on: [task2]
+
+  - name: task4
+    pipeline: pipelines/task4_enrich.yaml
+    depends_on: [task3]
+
+  - name: task5
+    pipeline: pipelines/task5_summarize.yaml
+    depends_on: [task4]

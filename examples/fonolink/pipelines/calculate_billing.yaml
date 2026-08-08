@@ -1,0 +1,30 @@
+name: calculate_billing
+source:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  query: >-
+    SELECT
+      s.id AS subscriber_id,
+      :period AS period,
+      (CASE s.plan
+        WHEN 'basic' THEN 20.00 WHEN 'standard' THEN 40.00
+        WHEN 'premium' THEN 60.00 ELSE 80.00 END
+       + ROUND(COALESCE(SUM(u.data_mb), 0) * 0.01, 2)) AS amount,
+      (CASE s.plan
+        WHEN 'basic' THEN 20.00 WHEN 'standard' THEN 40.00
+        WHEN 'premium' THEN 60.00 ELSE 80.00 END) AS plan_rate_applied
+    FROM subscribers s
+    JOIN usage_daily u ON u.subscriber_id = s.id
+      AND u.date >= :period_start AND u.date <= :period_end
+    WHERE s.status = 'active'
+    GROUP BY s.id, s.plan
+  parameters:
+    period: "2026-08"
+    period_start: "2026-07-19"
+    period_end: "2026-08-01"
+transformations: []
+destination:
+  type: postgresql
+  connection_url: ${FONOLINK_PIPELINE_DATABASE_URL}
+  table: billing_charges
+  mode: append

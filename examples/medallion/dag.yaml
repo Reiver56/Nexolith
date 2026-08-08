@@ -1,0 +1,17 @@
+name: medallion_orders
+tasks:
+  - name: bronze
+    pipeline: pipelines/bronze_orders.yaml
+    depends_on: []
+  - name: silver
+    pipeline: pipelines/silver_orders.yaml
+    depends_on: [bronze]
+  - name: gold
+    script: jobs/revenue_reports.py
+    depends_on: [silver]
+    parameters:
+      # NXL-92: relative to this script's own file (jobs/), resolved via
+      # Path(__file__).parent inside revenue_reports.py itself -- not
+      # relative to wherever `nexolith run` happens to be invoked from.
+      silver_path: ../silver/orders.csv
+      out_dir: ../gold

@@ -1,4 +1,8 @@
 import logging
+import os
+import sys
+import time
+from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 from typing import Annotated
@@ -7,20 +11,53 @@ import typer
 
 from nexolith import __version__
 from nexolith.application import run_pipeline, validate_pipeline
+from nexolith.cli.dag_register_render import render_dag_registration
 from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
 )
+from nexolith.cli.document_kind import DocumentKind, detect_document_kind
 from nexolith.cli.errors import render_error
 from nexolith.cli.interactive import run_interactive_session
+from nexolith.cli.render_context import detect_render_context
+from nexolith.cli.runs_render import render_run_detail, render_run_not_found, render_runs_list
+from nexolith.cli.scheduler_render import (
+    SchedulerStatus,
+    render_scheduler_not_running,
+    render_scheduler_started,
+    render_scheduler_status,
+    render_scheduler_stop_uncertain,
+    render_scheduler_stopped,
+    render_windows_stop_caveat,
+)
+from nexolith.dag import execute_dag, load_dag, register_dag
 from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.models import ExecutionResult
+from nexolith.process_identity import ProcessIdentityUnavailable, ProcessTerminationStatus
+from nexolith.scheduler import (
+    PidFileOwnerStatus,
+    Scheduler,
+    acquire_pidfile,
+    default_pidfile_path,
+    is_process_alive,
+    pidfile_owner_status,
+    read_pidfile,
+    release_pidfile,
+    stop_pidfile_owner,
+)
+from nexolith.state import DagRunStatus, StateStore
 
 app = typer.Typer(
     help="Build data flows that last.",
     invoke_without_command=True,
     no_args_is_help=False,
 )
+scheduler_app = typer.Typer(help="Manage the scheduler daemon.")
+runs_app = typer.Typer(help="Observe DAG run history.")
+dag_app = typer.Typer(help="Manage registered DAGs.")
+app.add_typer(scheduler_app, name="scheduler")
+app.add_typer(runs_app, name="runs")
+app.add_typer(dag_app, name="dag")
 
 
 class ExitCode(IntEnum):
@@ -70,7 +107,16 @@ def diagnostics() -> None:
 
 @app.command()
 def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
-    """Validate a pipeline YAML file without running it."""
+    """Validate a pipeline or DAG YAML file without running it."""
+    if detect_document_kind(path) is DocumentKind.DAG:
+        try:
+            dag = load_dag(path)
+        except ConfigurationError as exc:
+            _show_error(exc)
+            raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+        task_label = "task" if len(dag.tasks) == 1 else "tasks"
+        typer.echo(f"DAG '{dag.name}' is valid ({len(dag.tasks)} {task_label}).")
+        return
     try:
         config = validate_pipeline(path)
     except ConfigurationError as exc:
@@ -81,8 +127,27 @@ def validate(path: Annotated[Path, typer.Argument(exists=False, readable=True)])
 
 @app.command()
 def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> None:
-    """Run a pipeline YAML file."""
+    """Run a pipeline or DAG YAML file."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    if detect_document_kind(path) is DocumentKind.DAG:
+        store = StateStore()
+        try:
+            try:
+                run_id = execute_dag(path, store)
+            except ConfigurationError as exc:
+                _show_error(exc)
+                raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+            dag_run = store.get_dag_run(run_id)
+            if dag_run is None:
+                raise RuntimeError(f"DAG run {run_id} was not recorded")
+            tasks = store.list_task_runs(run_id)
+            attempts = store.list_run_attempts(run_id)
+        finally:
+            store.close()
+        typer.echo(render_run_detail(dag_run, tasks, detect_render_context(), attempts))
+        if dag_run.status is DagRunStatus.FAILED:
+            raise typer.Exit(code=ExitCode.EXECUTION_ERROR)
+        return
     try:
         result = run_pipeline(path)
     except ConfigurationError as exc:
@@ -92,3 +157,207 @@ def run(path: Annotated[Path, typer.Argument(exists=False, readable=True)]) -> N
         _show_error(exc)
         raise typer.Exit(code=ExitCode.EXECUTION_ERROR) from exc
     _show_result(result)
+
+
+@scheduler_app.command("start")
+def scheduler_start() -> None:
+    """Run the scheduler daemon in the foreground until stopped (Ctrl+C)."""
+    pidfile_path = default_pidfile_path()
+    try:
+        claim = acquire_pidfile(pidfile_path, os.getpid(), datetime.now(UTC).isoformat())
+    except ProcessIdentityUnavailable as exc:
+        typer.echo(f"Scheduler start refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not claim.acquired:
+        if claim.existing is None:
+            typer.echo(
+                "Scheduler start already in progress: PID file is corrupt, incomplete, or being "
+                "acquired.",
+                err=True,
+            )
+        else:
+            owner_status = pidfile_owner_status(claim.existing)
+            if owner_status is PidFileOwnerStatus.MATCHING:
+                typer.echo(
+                    f"Scheduler already appears to be running (PID {claim.existing.pid}, "
+                    f"started {claim.existing.started_at}).",
+                    err=True,
+                )
+            else:
+                typer.echo(
+                    "Scheduler start refused: existing PID file ownership cannot be verified "
+                    f"({owner_status.value}).",
+                    err=True,
+                )
+        raise typer.Exit(code=1)
+
+    store: StateStore | None = None
+    try:
+        store = StateStore()
+        scheduler = Scheduler(store)
+        typer.echo(render_scheduler_started(os.getpid()))
+        scheduler.run()
+    finally:
+        release_pidfile(claim)
+        if store is not None:
+            store.close()
+
+
+@scheduler_app.command("stop")
+def scheduler_stop() -> None:
+    """Stop a running scheduler daemon.
+
+    On Windows this forcibly stops the identity verified through one stable
+    process handle. An in-progress DAG run is not waited on. Use Ctrl+C in
+    the scheduler's own terminal for a fully graceful stop.
+    """
+    pidfile_path = default_pidfile_path()
+    record = read_pidfile(pidfile_path)
+    if record is None:
+        if pidfile_path.exists():
+            typer.echo(
+                "Scheduler stop refused: PID file is corrupt or incomplete; ownership cannot "
+                "be verified.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(render_scheduler_not_running())
+        return
+    owner_status = pidfile_owner_status(record)
+    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
+        typer.echo(render_scheduler_not_running())
+        return
+    if owner_status is not PidFileOwnerStatus.MATCHING:
+        typer.echo(
+            "Scheduler stop refused: PID file ownership cannot be verified "
+            f"({owner_status.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if sys.platform == "win32":
+        typer.echo(render_windows_stop_caveat(), err=True)
+    termination = stop_pidfile_owner(record)
+    if termination in {
+        ProcessTerminationStatus.NOT_FOUND,
+        ProcessTerminationStatus.IDENTITY_MISMATCH,
+    }:
+        typer.echo(render_scheduler_not_running())
+        return
+    if termination is not ProcessTerminationStatus.SENT:
+        typer.echo(
+            "Scheduler stop refused: identity-bound termination is not available "
+            f"({termination.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    for _ in range(20):  # ~2s budget for the process to actually exit
+        if not is_process_alive(record.pid):
+            break
+        time.sleep(0.1)
+
+    # Leave marker ownership unchanged: another scheduler may have acquired
+    # the path after this command observed `record`. A later start recovers
+    # the old marker atomically if it is still stale.
+    if is_process_alive(record.pid):
+        typer.echo(render_scheduler_stop_uncertain(record.pid))
+    else:
+        typer.echo(render_scheduler_stopped(record.pid))
+
+
+@scheduler_app.command("status")
+def scheduler_status() -> None:
+    """Report whether the scheduler daemon appears to be running."""
+    pidfile_path = default_pidfile_path()
+    record = read_pidfile(pidfile_path)
+    render_context = detect_render_context()
+    if record is None:
+        if pidfile_path.exists():
+            typer.echo(
+                "Scheduler status unknown: PID file is corrupt or incomplete; ownership cannot "
+                "be verified.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+        return
+    owner_status = pidfile_owner_status(record)
+    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
+        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+        return
+    if owner_status is not PidFileOwnerStatus.MATCHING:
+        typer.echo(
+            "Scheduler status unknown: PID file ownership cannot be verified "
+            f"({owner_status.value}).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        render_scheduler_status(
+            SchedulerStatus(True, record.pid, record.started_at), render_context
+        )
+    )
+
+
+@runs_app.command("list")
+def runs_list(
+    dag: Annotated[str | None, typer.Option(help="Filter to one DAG's runs.")] = None,
+    limit: Annotated[int, typer.Option(help="Maximum number of runs to show.")] = 20,
+) -> None:
+    """List recent DAG runs."""
+    store = StateStore()
+    try:
+        if dag is not None:
+            runs = store.list_dag_runs(dag)[:limit]
+        else:
+            runs = store.list_recent_dag_runs(limit)
+    finally:
+        store.close()
+    typer.echo(render_runs_list(runs, detect_render_context()))
+
+
+@runs_app.command("show")
+def runs_show(run_id: Annotated[int, typer.Argument(help="The DAG run id to show.")]) -> None:
+    """Show full detail for one DAG run, including per-task status and any
+    retry attempts."""
+    store = StateStore()
+    try:
+        run = store.get_dag_run(run_id)
+        if run is None:
+            typer.echo(render_run_not_found(run_id), err=True)
+            raise typer.Exit(code=1)
+        tasks = store.list_task_runs(run_id)
+        attempts = store.list_run_attempts(run_id)
+    finally:
+        store.close()
+    typer.echo(render_run_detail(run, tasks, detect_render_context(), attempts))
+
+
+@dag_app.command("register")
+def dag_register(
+    path: Annotated[Path, typer.Argument(exists=False, readable=True)],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force", help="Update an already-registered DAG's schedule/source path from the file."
+        ),
+    ] = False,
+) -> None:
+    """Register a DAG for scheduled execution without running it.
+
+    Validates the file and creates (or, with --force, updates) its `dags`
+    row from the file's own `schedule:` -- no task is executed. The
+    scheduler daemon picks up a DAG registered this way on its next poll
+    tick exactly as if it had already been run manually once.
+    """
+    store = StateStore()
+    try:
+        try:
+            result = register_dag(path, store, force=force)
+        except ConfigurationError as exc:
+            _show_error(exc)
+            raise typer.Exit(code=ExitCode.CONFIGURATION_ERROR) from exc
+    finally:
+        store.close()
+    typer.echo(render_dag_registration(result))

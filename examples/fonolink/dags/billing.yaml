@@ -1,0 +1,20 @@
+name: fonolink_billing
+priority: critical
+severity: critical
+trigger:
+  on_success_of: [fonolink_ingestion]
+tasks:
+  - name: calculate_billing
+    pipeline: ../pipelines/calculate_billing.yaml
+    depends_on: []
+
+  - name: generate_invoices
+    pipeline: ../pipelines/generate_invoices.yaml
+    depends_on: [calculate_billing]
+
+  - name: reconcile_payments
+    script: ../jobs/reconcile_payments_script.py
+    depends_on: [generate_invoices]
+    parameters:
+      database_url: postgresql://fonolink:fonolink@localhost:5434/fonolink
+      settlements_path: examples/fonolink/data/bank_settlements.csv

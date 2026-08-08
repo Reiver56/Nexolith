@@ -37,8 +37,16 @@ process](RELEASING.md).
 ## Features
 
 - Declarative YAML pipelines with Pydantic validation
-- CSV, SQLite, and PostgreSQL sources and destinations
-- Safe select, rename, drop-null, and declarative filter transformations
+- CSV, SQLite, and PostgreSQL sources and destinations, including parameterized and
+  file-backed (`query_file`) SQL queries
+- Safe select, rename, drop-null, and declarative filter transformations, plus in-process
+  Python (`python_job`) and subprocess script job steps for logic the declarative set can't
+  express (see [Transformations](#transformations))
+- DAG orchestration across multiple pipelines: dependencies, retries, failure-propagation
+  policy, cross-DAG triggers, priority, and severity, with a scheduler daemon and persisted
+  run history (see [CLI](#cli))
+- An interactive CLI session — full-screen with tab-completion on a capable terminal, a
+  plain-text line loop otherwise — alongside scriptable one-shot commands
 - Environment variable substitution using `${VARIABLE_NAME}`
 - Execution status, timing, row counts, and safe error reporting
 - Small registries for adding connectors and transformations
@@ -51,6 +59,12 @@ connector registry for its source and destination, and the transformation regist
 each ordered transformation. Rows use the intentionally small `list[dict]` representation.
 Execution results are plain models that can later be persisted without coupling persistence
 to the runner.
+
+A DAG layer sits above single pipelines: declarative dependency graphs (`nexolith.dag`) are
+executed in order (`nexolith.dag`'s executor), with run/task state persisted to a local
+SQLite store (`nexolith.state`) that a polling scheduler daemon (`nexolith.scheduler`) reads
+to trigger due or cross-DAG-triggered DAGs. See [src/nexolith/cli/README.md](src/nexolith/cli/README.md)
+for how the CLI presentation layer is organized.
 
 ## Requirements and installation
 
@@ -125,20 +139,62 @@ nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
 ```
 
-Running `nexolith` without a subcommand opens the minimal Nexo interactive session. Use `/help` to
-list its currently available commands, `/open <path>` to select or replace a valid pipeline,
-`/validate` and `/run` to operate on it, `/open` to show the current selection, `/clear` to remove
-it, and `/exit` to leave. The selected filename appears in the prompt and the context lasts only
-for the current process. Validation and execution report observable pipeline phases as plain text;
-successful runs finish with the real status, row counts, and duration. Expected failures keep the
-session usable, and `Ctrl+C` returns to the prompt after interrupting the current synchronous
-operation.
+Running `nexolith` without a subcommand opens the Nexo interactive session — full-screen, with a
+colored pixel-art panel header and tab-completion, on a capable terminal; a plain-text line loop
+otherwise (`NO_COLOR`, no real TTY, or a narrow terminal). Use `/help` to list its currently
+available commands, `/open <path>` to select or replace a valid pipeline or DAG file (path
+completion included in full-screen mode; DAG files are recognized the same way `nexolith
+validate`/`run` recognize them), `/validate` and `/run` to operate on whichever is currently open,
+`/open` to show the current selection, `/clear` to remove it, and `/exit` to leave. `/runs` lists
+recent DAG runs and `/runs <id>` shows one in full detail — the same rendering `nexolith runs
+list`/`runs show` produce. `/scheduler status` reports whether the scheduler daemon is running and
+`/scheduler stop` stops one; starting the daemon (`/scheduler start`) is deliberately not offered
+from inside the session, since it runs as its own long-lived foreground process and would block
+the session's event loop — start it from a separate terminal with `nexolith scheduler start`
+instead. The selected filename appears in the prompt and the context lasts only for the current
+process. Validation and execution report observable pipeline phases as plain text; successful runs
+finish with the real status, row counts, and duration. Expected failures keep the session usable,
+and `Ctrl+C` returns to the prompt after interrupting the current synchronous operation.
 
 `diagnostics` prints shareable Nexolith, Python, platform, dependency, and optional-feature
 information without exposing environment variables, usernames, hostnames, filesystem paths, or
 connection details. `validate` parses YAML, resolves environment variables, and validates all
 configuration without reading or writing data. `run` executes the ordered pipeline and prints
 status, duration, row counts, and an error when applicable.
+
+### Known limitations
+
+The full-screen interactive session may occasionally render with visual corruption — overlapping
+or garbled text in the scrollable output log, typically after a task failure followed by further
+interaction. This has been reproduced in both VS Code's integrated terminal and plain
+PowerShell/`conhost`, so it is not specific to one terminal application.
+
+Root cause: believed to be a general class of alt-screen-buffer rendering bug affecting Windows
+terminal emulators broadly under heavy redraw activity, not something Nexolith's code can fully
+control from inside `prompt_toolkit`. See
+[microsoft/terminal#3545](https://github.com/microsoft/terminal/issues/3545),
+[#12329](https://github.com/microsoft/terminal/issues/12329),
+[#13741](https://github.com/microsoft/terminal/issues/13741), and
+[prompt-toolkit#1258](https://github.com/prompt-toolkit/python-prompt-toolkit/issues/1258).
+
+Two real, confirmed contributing factors have already been fixed or mitigated: a stale
+terminal-width bug where panel/border rendering kept using the width detected at session start
+instead of the real width after a terminal resize (fixed), and redraw-burst timing during rapid
+event streams (mitigated via `min_redraw_interval`). Both reduce how often this occurs but do not
+eliminate it — the remaining cause sits outside code this project controls.
+
+The classic, non-full-screen CLI (`validate`, `run`, `scheduler`, `runs`, and friends) is
+completely unaffected in any terminal — this is specific to the full-screen session's alternate
+screen buffer.
+
+If you hit this: try `/clear`, or exit (`/exit`) and restart the full-screen session. If it
+recurs often in your environment, prefer the classic CLI commands for that work instead.
+
+(A secondary, unconfirmed hypothesis worth revisiting later: the blue divider lines separating the
+full-screen layout's regions may visually blend with adjacent log content in some color schemes,
+possibly contributing to perceived severity. This doesn't explain the scattered/duplicated text
+fragments actually observed, which look like genuine buffer/redraw corruption rather than a
+contrast issue, so it's noted as a possible minor factor, not the primary cause.)
 
 ### Error handling and exit codes
 
@@ -177,9 +233,18 @@ without arguments and starts the interactive shell instead.
 
 SQL sources accept either `table` or a read-only `query`. SQL destinations support:
 
-- `append`: insert into an existing table, or create it when absent.
-- `replace`: drop an existing table, recreate it from the incoming columns, then insert.
-- `fail`: stop if the table already exists.
+- `append`: insert into an existing table, or create it when absent. Never clears existing rows.
+- `replace`: drop an existing table, recreate it from the incoming columns, then insert. Destroys
+  any real schema the table had -- foreign keys, primary keys, check constraints included. Only
+  safe for a table Nexolith itself owns outright (e.g. a throwaway staging table); never safe
+  against a real, pre-migrated, constrained schema.
+- `fail`: stop if the table already exists at all -- a pure existence check, not a schema or
+  content check. Unusable against a pre-migrated schema where the table legitimately exists
+  before the first run.
+- `truncate`: clear the table's existing rows in place (via `DELETE FROM`, not the SQL `TRUNCATE`
+  statement -- see `SqlDestination`'s docstring for why), then insert. Schema and constraints are
+  left untouched. The safe alternative to `replace` for a properly-migrated, constrained
+  destination schema.
 
 ## Transformations
 
@@ -189,8 +254,124 @@ SQL sources accept either `table` or a read-only `query`. SQL destinations suppo
 - `filter`: compare a column with `equals`, `not_equals`, `greater_than`,
   `greater_than_or_equal`, `less_than`, `less_than_or_equal`, `contains`, `is_null`, or
   `is_not_null`.
+- `python_job`: run a user-supplied Python function in-process, as part of the pipeline's own
+  data flow. See [Python job steps](#python-job-steps) below.
 
-Filters are interpreted operations. Nexolith never evaluates YAML as Python code.
+Filters, `select`, `rename`, and `drop_nulls` are interpreted operations; Nexolith never
+evaluates YAML as Python code for them.
+
+### Python job steps
+
+> [!WARNING]
+> `python_job` runs your own local Python code with no sandboxing. It is a deliberate,
+> scoped exception to Nexolith's declarative design (see ADR-7), meant only for trusted
+> local code you already control -- never for code from an untrusted source. Prefer the
+> declarative transforms above whenever they can express the same logic.
+
+A `python_job` step references a local `.py` file and a documented entrypoint function:
+
+```yaml
+transformations:
+  - type: python_job
+    file: jobs/enrich_customers.py
+    entrypoint: run          # optional, defaults to "run"
+    parameters:
+      threshold: 10
+```
+
+`file` resolves relative to the pipeline YAML's own directory (same convention as
+`query_file` and DAG `pipeline:` references). The entrypoint must match:
+
+```python
+from nexolith.jobs import JobContext
+from nexolith.types import Rows
+
+
+def run(rows: Rows, context: JobContext) -> Rows:
+    ...
+    return rows
+```
+
+`rows` is exactly the same `list[dict]` shape that flows between every other transform step;
+the entrypoint receives it and must return data in that same shape. `context.parameters` carries
+the step's own static `parameters:` values (same `dict` shape as story 2's SQL parameters).
+There is no access to the pipeline configuration, connectors, or the wider application --
+the contract is intentionally minimal.
+
+Loading a job file is a normal Python import (`importlib.util.spec_from_file_location`), not
+`eval`/`exec` on a string -- but that also means the file's own top-level code (module-level
+statements, imports, decorators) runs exactly as it would for any Python import, both when
+`nexolith validate` confirms the entrypoint exists and again when the step actually executes.
+Keep job files free of expensive or unsafe top-level side effects; put all logic inside the
+entrypoint function.
+
+An exception raised inside a job's entrypoint fails the pipeline cleanly, the same way any
+other transformation error does: the original exception's message is never included in
+Nexolith's own error output (only its type name is), so a job's own logging accidentally
+containing something sensitive is not repeated back through Nexolith's error path.
+
+`python_job` is Model A -- in-process, exchanging Nexolith's own in-flight rows. It is not
+suitable for engines with their own distributed data model (e.g. PySpark); that is Model B,
+below.
+
+### Script job steps (Model B)
+
+> [!WARNING]
+> `script:` runs your own local script, in its own subprocess, with no sandboxing. Same
+> trusted-local-code posture as `python_job` (see ADR-7) -- never for untrusted code.
+
+Model B is a DAG task type, not a pipeline transform step: a self-contained script that
+manages its own I/O entirely (its own reads, its own writes, its own database connections)
+and does not receive or return Nexolith's in-flight rows. It exists for shapes a single
+pipeline can't express -- for example a single source read that fans out into several
+independently-filtered exports -- and for engines with their own execution model (e.g.
+PySpark) that shouldn't run inside Nexolith's own process.
+
+A DAG task references either a pipeline or a script, never both:
+
+```yaml
+name: fan_out_exports
+tasks:
+  - name: export_by_segment
+    script: jobs/fan_out.py
+    entrypoint: run              # optional, defaults to "run"
+    interpreter: .venv-spark/bin/python  # optional, defaults to Nexolith's own interpreter
+    parameters:
+      database: data/customers.db
+      out_dir: build/exports
+    depends_on: []
+```
+
+The script's entrypoint receives a single `context` argument exposing `.parameters` (a plain
+object, not an importable Nexolith type -- the configured interpreter may be a completely
+separate virtual environment with no `nexolith` package installed at all, e.g. a dedicated
+PySpark venv):
+
+```python
+def run(context):
+    database = context.parameters["database"]
+    ...  # the script's own I/O; nothing is returned to Nexolith
+```
+
+Unlike `python_job`, a script step always runs as a subprocess, for two reasons: an engine's
+own session lifecycle and heavy dependencies (PySpark's JVM gateway, for example) should not
+be importable into Nexolith's own long-lived process, and the `interpreter:` field -- letting
+a script use its own venv with dependencies Nexolith itself never needs -- can only work by
+launching a separate process with that interpreter. A clean exit is success; an exception or
+any non-zero exit is a failure, recorded the same way a failed pipeline task is (including
+retries, if configured).
+
+Because a script's own stdout/stderr is arbitrary text a script's author controls, Nexolith
+cannot inspect or redact it the way it can a caught Python exception's type. Captured output
+is logged for real debugging, but -- unlike every other Nexolith error message -- that log
+line is **not** guaranteed free of anything sensitive a misbehaving script prints; the safe,
+generic failure message recorded in DAG run state (`nexolith runs show`) never includes it.
+
+Only the script's own file is validated ahead of time (`nexolith validate` confirms it
+exists); unlike `python_job`, the entrypoint itself is not checked in advance, since doing so
+would mean importing the script into Nexolith's own interpreter -- exactly the coupling
+subprocess isolation exists to avoid. A missing or misnamed entrypoint surfaces as a real,
+clean execution failure instead.
 
 ## Environment variables
 
@@ -274,18 +455,24 @@ and connection pooling configuration remain outside the current MVP.
 
 ## Roadmap
 
-Available in `0.1.0`:
+Available:
 
 - [x] YAML validation and environment substitution
-- [x] CSV, SQLite, and PostgreSQL connectors
-- [x] Core transformations, CLI, and in-memory execution results
+- [x] CSV, SQLite, and PostgreSQL connectors, including parameterized and file-backed queries
+- [x] Core transformations, an interactive and scriptable CLI, and in-memory execution results
+- [x] In-process Python and subprocess script job steps
+- [x] DAG orchestration, configurable retries and failure-propagation policy, cross-DAG
+      triggers, and priority/severity classification
+- [x] A scheduler daemon and persisted execution history
+
+See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
 Planned, not implemented:
 
 - [ ] REST API, MySQL, and additional connectors
-- [ ] Custom transformation plugins and configurable retries
-- [ ] Persisted execution history and scheduling
-- [ ] Parallel execution and data-quality checks
+- [ ] A custom transformation plugin system
+- [ ] Parallel task execution within a DAG (currently sequential)
+- [ ] Data-quality checks
 - [ ] Lineage, metrics, observability, and a web dashboard
 
 ## Contributing, security, and license

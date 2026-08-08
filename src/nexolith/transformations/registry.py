@@ -3,6 +3,7 @@ from collections.abc import Callable
 from nexolith.config.models import (
     DropNullsConfig,
     FilterConfig,
+    PythonJobConfig,
     RenameConfig,
     SelectConfig,
     TransformationConfig,
@@ -10,6 +11,7 @@ from nexolith.config.models import (
 from nexolith.exceptions import TransformationError
 from nexolith.transformations.base import Transformation
 from nexolith.transformations.builtin import DropNulls, Filter, Rename, Select
+from nexolith.transformations.python_job import PythonJob
 
 TransformationFactory = Callable[[TransformationConfig], Transformation]
 
@@ -47,8 +49,13 @@ def default_transformation_registry() -> TransformationRegistry:
         assert isinstance(config, FilterConfig)
         return Filter(config.column, config.operator, config.value)
 
+    def python_job(config: TransformationConfig) -> Transformation:
+        assert isinstance(config, PythonJobConfig)
+        return PythonJob(config.file, config.entrypoint, config.parameters)
+
     registry.register("select", select)
     registry.register("rename", rename)
     registry.register("drop_nulls", drop_nulls)
     registry.register("filter", filter_rows)
+    registry.register("python_job", python_job)
     return registry

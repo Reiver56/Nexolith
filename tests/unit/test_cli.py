@@ -96,3 +96,32 @@ def test_version_does_not_start_interactive_session() -> None:
     """--version is eager and exits before the interactive session could start."""
     result = runner.invoke(app, ["--version"])
     assert "Nexo - Nexolith interactive session" not in result.stdout
+
+
+def test_classic_commands_never_import_prompt_toolkit(
+    tmp_path: Path, pipeline_document: str
+) -> None:
+    """prompt_toolkit is a real runtime dependency (for the full-screen
+    interactive session), but classic commands must not pay for it: the
+    import must stay deferred to run_interactive_session's own body."""
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(pipeline_document, encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from typer.testing import CliRunner\n"
+            "from nexolith.cli.app import app\n"
+            f"result = CliRunner().invoke(app, ['validate', {str(path)!r}])\n"
+            "assert result.exit_code == 0, result.output\n"
+            "assert not any(name.startswith('prompt_toolkit') for name in sys.modules), (\n"
+            "    'prompt_toolkit was imported for a classic, non-interactive command'\n"
+            ")\n",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

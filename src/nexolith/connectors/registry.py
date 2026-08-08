@@ -50,7 +50,7 @@ def default_connector_registry() -> ConnectorRegistry:
 
     def sql_source(config: SourceConfig) -> SourceConnector:
         assert isinstance(config, SqlSourceConfig)
-        return SqlSource(config.connection_url, config.query, config.table)
+        return SqlSource(config.connection_url, config.query, config.table, config.parameters)
 
     def csv_destination(config: DestinationConfig) -> DestinationConnector:
         assert isinstance(config, CsvDestinationConfig)
