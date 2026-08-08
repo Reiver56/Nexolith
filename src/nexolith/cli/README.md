@@ -55,6 +55,13 @@ and print the same detail view available through `nexolith runs show`.
 Presentation belongs here. The classic `validate` and `run` commands are thin adapters over the
 shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
 
+`nexolith api start` is a foreground adapter over `nexolith.api.server`. It defaults to
+`127.0.0.1:8765`, supports explicit `--host` and `--port` options, and imports FastAPI/Uvicorn only
+after the command is invoked. Other CLI commands therefore work without the `api` extra. Expected
+missing-extra and bind failures are concise stderr diagnostics with exit code `1`; a non-loopback
+bind also warns that NXL-111 has no authentication. The command never starts a daemon, scheduler,
+browser, or background thread.
+
 `diagnostics` prints deterministic, issue-friendly environment information. It reports Nexolith,
 Python, platform, dependency, and optional-feature versions without inspecting environment
 variables or reporting usernames, hostnames, filesystem paths, or connection details.

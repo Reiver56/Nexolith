@@ -8,7 +8,7 @@ Fork and clone the repository, then install Python 3.12, 3.13, or 3.14, uv, and 
 dependencies:
 
 ```bash
-uv sync --extra dev
+uv sync --extra api --extra dev
 ```
 
 Create a focused branch from an up-to-date `main`:
@@ -31,6 +31,11 @@ uv run pytest
 Code should be typed, small, readable, and separated by responsibility. Prefer explicit
 domain errors, avoid global mutable state, never execute pipeline content as code, and add
 tests for changed behavior. Ruff is the source of truth for formatting and lint rules.
+
+The OpenAPI document is a typed compatibility contract for generated clients. Every route must
+declare stable operation IDs, tags, response and error models, and typed parameters. Do not commit
+a generated schema snapshot or frontend interfaces that duplicate it. Backward-incompatible
+schema changes must be intentional, called out in the pull request, and explicitly reviewed.
 
 ## Issues and proposals
 

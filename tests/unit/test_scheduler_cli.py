@@ -31,6 +31,8 @@ from nexolith.scheduler import (
     PidFileClaim,
     PidFileOwnerStatus,
     PidFileRecord,
+    SchedulerQueryState,
+    SchedulerStatusSnapshot,
     acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
@@ -271,12 +273,12 @@ def test_status_does_not_delete_a_concurrently_replaced_marker(
     replacement_pid = os.getpid()
     write_identity_pidfile(pidfile_path, 111111, "old-start", 1)
 
-    def replace_before_reporting_dead(record: object) -> PidFileOwnerStatus:
+    def replace_before_reporting_dead() -> SchedulerStatusSnapshot:
         write_pidfile(pidfile_path, replacement_pid, "new-start")
-        return PidFileOwnerStatus.DEAD
+        return SchedulerStatusSnapshot(SchedulerQueryState.NOT_RUNNING)
 
     monkeypatch.setattr(
-        sys.modules["nexolith.cli.app"], "pidfile_owner_status", replace_before_reporting_dead
+        sys.modules["nexolith.cli.app"], "query_scheduler_status", replace_before_reporting_dead
     )
 
     result = runner.invoke(app, ["scheduler", "status"])

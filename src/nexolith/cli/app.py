@@ -10,6 +10,11 @@ from typing import Annotated
 import typer
 
 from nexolith import __version__
+from nexolith.api.server import (
+    ApiDependenciesUnavailable,
+    ApiServerStartupError,
+    run_api_server,
+)
 from nexolith.application import run_pipeline, validate_pipeline
 from nexolith.cli.dag_register_render import render_dag_registration
 from nexolith.cli.diagnostics import (
@@ -37,10 +42,12 @@ from nexolith.process_identity import ProcessIdentityUnavailable, ProcessTermina
 from nexolith.scheduler import (
     PidFileOwnerStatus,
     Scheduler,
+    SchedulerQueryState,
     acquire_pidfile,
     default_pidfile_path,
     is_process_alive,
     pidfile_owner_status,
+    query_scheduler_status,
     read_pidfile,
     release_pidfile,
     stop_pidfile_owner,
@@ -55,9 +62,11 @@ app = typer.Typer(
 scheduler_app = typer.Typer(help="Manage the scheduler daemon.")
 runs_app = typer.Typer(help="Observe DAG run history.")
 dag_app = typer.Typer(help="Manage registered DAGs.")
+api_app = typer.Typer(help="Run the read-only monitoring API.")
 app.add_typer(scheduler_app, name="scheduler")
 app.add_typer(runs_app, name="runs")
 app.add_typer(dag_app, name="dag")
+app.add_typer(api_app, name="api")
 
 
 class ExitCode(IntEnum):
@@ -269,35 +278,55 @@ def scheduler_stop() -> None:
 @scheduler_app.command("status")
 def scheduler_status() -> None:
     """Report whether the scheduler daemon appears to be running."""
-    pidfile_path = default_pidfile_path()
-    record = read_pidfile(pidfile_path)
+    status = query_scheduler_status()
     render_context = detect_render_context()
-    if record is None:
-        if pidfile_path.exists():
+    if status.state is SchedulerQueryState.UNKNOWN:
+        if status.reason == "corrupt":
             typer.echo(
                 "Scheduler status unknown: PID file is corrupt or incomplete; ownership cannot "
                 "be verified.",
                 err=True,
             )
             raise typer.Exit(code=1)
-        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
-        return
-    owner_status = pidfile_owner_status(record)
-    if owner_status in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
-        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
-        return
-    if owner_status is not PidFileOwnerStatus.MATCHING:
-        typer.echo(
-            "Scheduler status unknown: PID file ownership cannot be verified "
-            f"({owner_status.value}).",
-            err=True,
-        )
+        else:
+            typer.echo(
+                "Scheduler status unknown: PID file ownership cannot be verified "
+                f"({status.reason}).",
+                err=True,
+            )
         raise typer.Exit(code=1)
+    if status.state is SchedulerQueryState.NOT_RUNNING:
+        typer.echo(render_scheduler_status(SchedulerStatus(False, None, None), render_context))
+        return
     typer.echo(
         render_scheduler_status(
-            SchedulerStatus(True, record.pid, record.started_at), render_context
+            SchedulerStatus(True, status.pid, status.started_at), render_context
         )
     )
+
+
+@api_app.command("start")
+def api_start(
+    host: Annotated[
+        str,
+        typer.Option(help="Address to bind. Non-loopback addresses require a trusted network."),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="TCP port for the foreground API server."),
+    ] = 8765,
+) -> None:
+    """Run the read-only monitoring API in the foreground."""
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        typer.echo(
+            "Warning: NXL-111 has no authentication; bind only within a trusted environment.",
+            err=True,
+        )
+    try:
+        run_api_server(host, port)
+    except (ApiDependenciesUnavailable, ApiServerStartupError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @runs_app.command("list")

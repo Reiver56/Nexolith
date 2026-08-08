@@ -28,6 +28,7 @@ process](RELEASING.md).
 [![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
 [![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.x-D71F00?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
 [![Typer](https://img.shields.io/badge/Typer-CLI-009688)](https://typer.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-API-009688)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-supported-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![pytest](https://img.shields.io/badge/pytest-tested-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org/)
@@ -51,6 +52,7 @@ process](RELEASING.md).
 - Execution status, timing, row counts, and safe error reporting
 - Small registries for adding connectors and transformations
 - A Typer CLI with non-zero exit codes on failure
+- An optional, versioned read-only monitoring API for DAG, run, and scheduler state
 
 ## Architecture
 
@@ -65,6 +67,10 @@ executed in order (`nexolith.dag`'s executor), with run/task state persisted to 
 SQLite store (`nexolith.state`) that a polling scheduler daemon (`nexolith.scheduler`) reads
 to trigger due or cross-DAG-triggered DAGs. See [src/nexolith/cli/README.md](src/nexolith/cli/README.md)
 for how the CLI presentation layer is organized.
+
+The optional HTTP adapter (`nexolith.api`) composes explicit response models from those existing
+read layers. It opens one state store per request and does not make the domain, executor,
+scheduler, or state packages depend on FastAPI.
 
 ## Requirements and installation
 
@@ -88,6 +94,14 @@ Install PostgreSQL support when needed:
 
 ```bash
 uv sync --extra dev --extra postgres
+```
+
+Install the v0.3.4 read-only monitoring API when needed:
+
+```bash
+pip install "nexolith[api]"
+# Source checkout:
+uv sync --extra api --extra dev
 ```
 
 ## Quick start
@@ -137,6 +151,7 @@ nexolith --version
 nexolith diagnostics
 nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
+nexolith api start
 ```
 
 Running `nexolith` without a subcommand opens the Nexo interactive session — full-screen, with a
@@ -161,6 +176,27 @@ information without exposing environment variables, usernames, hostnames, filesy
 connection details. `validate` parses YAML, resolves environment variables, and validates all
 configuration without reading or writing data. `run` executes the ordered pipeline and prints
 status, duration, row counts, and an error when applicable.
+
+### Read-only monitoring API (v0.3.4)
+
+Start the foreground server on its local-only default (`127.0.0.1:8765`):
+
+```bash
+nexolith api start
+nexolith api start --host 127.0.0.1 --port 9000
+```
+
+The API exposes `GET /api/v1`, `/api/v1/dags`, `/api/v1/dags/{dag_name}`, `/api/v1/runs`,
+`/api/v1/runs/{run_id}`, and `/api/v1/scheduler`. Interactive documentation is available at
+`/docs`, and the typed contract at `/openapi.json`. NXL-111 has no authentication or authorization:
+keep it on localhost or an otherwise trusted network. Binding another address is an explicit
+operator choice and prints a warning.
+
+This contract is strictly read-only: it cannot register or run DAGs, alter schedules, start or
+stop the scheduler, edit configuration, or delete state. NXL-112 mutation endpoints and the
+NXL-113–NXL-115 React UI remain out of scope. See
+[the API package documentation](src/nexolith/api/README.md) for lifecycle, error, security, and
+OpenAPI compatibility guarantees.
 
 ### Known limitations
 
@@ -388,7 +424,7 @@ not automatically load `.env` files.
 ## Development
 
 ```bash
-uv sync --extra dev
+uv sync --extra api --extra dev
 uv run ruff format .
 uv run ruff check .
 uv run mypy src
@@ -464,12 +500,13 @@ Available:
 - [x] DAG orchestration, configurable retries and failure-propagation policy, cross-DAG
       triggers, and priority/severity classification
 - [x] A scheduler daemon and persisted execution history
+- [x] A read-only monitoring REST API
 
 See [CHANGELOG.md](CHANGELOG.md) for exactly which release each landed in.
 
 Planned, not implemented:
 
-- [ ] REST API, MySQL, and additional connectors
+- [ ] Authenticated mutation APIs, MySQL, and additional connectors
 - [ ] A custom transformation plugin system
 - [ ] Parallel task execution within a DAG (currently sequential)
 - [ ] Data-quality checks
