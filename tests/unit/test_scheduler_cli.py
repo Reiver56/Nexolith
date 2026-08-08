@@ -28,6 +28,7 @@ from nexolith.process_identity import (
     ProcessTerminationStatus,
 )
 from nexolith.scheduler import (
+    PidFileClaim,
     PidFileOwnerStatus,
     PidFileRecord,
     acquire_pidfile,
@@ -35,7 +36,7 @@ from nexolith.scheduler import (
     is_process_alive,
     pidfile_owner_status,
     read_pidfile,
-    remove_pidfile_if_owned,
+    release_pidfile,
     stop_process,
     write_pidfile,
 )
@@ -319,6 +320,47 @@ def test_start_writes_and_clean_exit_removes_the_marker_file(
     assert result.exit_code == 0
     assert seen_during_run["pid_matches_self"] is True
     assert not pidfile_path.exists()  # removed after run() returned
+    followup = acquire_pidfile(pidfile_path, os.getpid(), "followup")
+    assert followup.acquired
+    assert release_pidfile(followup)
+
+
+def test_start_releases_lease_after_scheduler_exception(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nexolith.scheduler.daemon import Scheduler
+
+    def fail(self: Scheduler, **kwargs: object) -> None:
+        raise RuntimeError("scheduler failed")
+
+    monkeypatch.setattr(Scheduler, "run", fail)
+
+    failed = runner.invoke(app, ["scheduler", "start"])
+
+    assert failed.exit_code == 1
+    assert not default_pidfile_path().exists()
+    followup = acquire_pidfile(default_pidfile_path(), os.getpid(), "followup")
+    assert followup.acquired
+    assert release_pidfile(followup)
+
+
+def test_start_releases_lease_after_initialization_failure(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_module = sys.modules["nexolith.cli.app"]
+
+    def fail_initialization() -> StateStore:
+        raise RuntimeError("state initialization failed")
+
+    monkeypatch.setattr(app_module, "StateStore", fail_initialization)
+
+    failed = runner.invoke(app, ["scheduler", "start"])
+
+    assert failed.exit_code == 1
+    assert not default_pidfile_path().exists()
+    followup = acquire_pidfile(default_pidfile_path(), os.getpid(), "followup")
+    assert followup.acquired
+    assert release_pidfile(followup)
 
 
 def test_start_clean_exit_preserves_a_replacement_claim(
@@ -475,8 +517,103 @@ def test_clean_exit_does_not_remove_a_replacement_claim(tmp_path: Path) -> None:
         replacement.owner_create_time_ns or 0,
     )
 
-    assert remove_pidfile_if_owned(pidfile_path, claim.owned) is False
+    assert release_pidfile(claim) is False
     assert read_pidfile(pidfile_path) == replacement
+
+
+def test_release_serializes_a_competing_replacement_claim(
+    isolated_state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import nexolith.scheduler.pidfile as pidfile_module
+
+    pidfile_path = default_pidfile_path()
+    replacement_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+
+    def owner_provider(pid: int) -> ProcessIdentityLookup:
+        return ProcessIdentityLookup.found(ProcessIdentity(pid, 10))
+
+    old_claim = acquire_pidfile(pidfile_path, 1001, "old", identity_provider=owner_provider)
+    assert old_claim.acquired
+    assert old_claim.owned is not None
+
+    replacement_create_time_ns = round(
+        psutil.Process(replacement_process.pid).create_time() * 1_000_000_000
+    )
+
+    def competitor_provider(pid: int) -> ProcessIdentityLookup:
+        if pid == replacement_process.pid:
+            return ProcessIdentityLookup.found(ProcessIdentity(pid, replacement_create_time_ns))
+        return ProcessIdentityLookup.not_found()
+
+    real_read_pidfile = pidfile_module.read_pidfile
+    competing_attempts: list[PidFileClaim] = []
+    replacement_claim: PidFileClaim | None = None
+    triggered = False
+
+    def attempt_replacement_after_release_read(path: Path) -> PidFileRecord | None:
+        nonlocal triggered
+        observed = real_read_pidfile(path)
+        if not triggered:
+            triggered = True
+            competing_attempts.append(
+                acquire_pidfile(
+                    pidfile_path,
+                    replacement_process.pid,
+                    "replacement",
+                    identity_provider=competitor_provider,
+                )
+            )
+        return observed
+
+    monkeypatch.setattr(pidfile_module, "read_pidfile", attempt_replacement_after_release_read)
+    try:
+        assert release_pidfile(old_claim)
+
+        assert len(competing_attempts) == 1
+        assert competing_attempts[0].acquired is False
+
+        monkeypatch.setattr(pidfile_module, "read_pidfile", real_read_pidfile)
+        replacement_claim = acquire_pidfile(
+            pidfile_path,
+            replacement_process.pid,
+            "replacement",
+            identity_provider=competitor_provider,
+        )
+        assert replacement_claim.acquired
+        assert read_pidfile(pidfile_path) == replacement_claim.owned
+
+        status = runner.invoke(app, ["scheduler", "status"])
+        assert status.exit_code == 0
+        assert "running" in status.output
+        assert str(replacement_process.pid) in status.output
+
+        duplicate = runner.invoke(app, ["scheduler", "start"])
+        assert duplicate.exit_code == 1
+        assert "already" in duplicate.output.lower()
+        assert read_pidfile(pidfile_path) == replacement_claim.owned
+
+        stopped = runner.invoke(app, ["scheduler", "stop"])
+        replacement_process.wait(timeout=5)
+        assert stopped.exit_code == 0
+        assert "stopped" in stopped.output.lower()
+        assert read_pidfile(pidfile_path) == replacement_claim.owned
+        assert release_pidfile(replacement_claim)
+        assert not pidfile_path.exists()
+    finally:
+        if old_claim.lease is not None and old_claim.lease.is_held:
+            release_pidfile(old_claim)
+        if (
+            replacement_claim is not None
+            and replacement_claim.lease is not None
+            and replacement_claim.lease.is_held
+        ):
+            release_pidfile(replacement_claim)
+        if replacement_process.poll() is None:
+            replacement_process.kill()
+        replacement_process.wait(timeout=5)
 
 
 def test_two_real_processes_cannot_both_acquire_the_scheduler_pidfile(tmp_path: Path) -> None:

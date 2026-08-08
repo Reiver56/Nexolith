@@ -2,6 +2,7 @@ from nexolith.scheduler.daemon import Scheduler
 from nexolith.scheduler.interval import parse_interval
 from nexolith.scheduler.pidfile import (
     PidFileClaim,
+    PidFileLease,
     PidFileOwnerStatus,
     PidFileRecord,
     acquire_pidfile,
@@ -9,8 +10,7 @@ from nexolith.scheduler.pidfile import (
     is_process_alive,
     pidfile_owner_status,
     read_pidfile,
-    remove_pidfile,
-    remove_pidfile_if_owned,
+    release_pidfile,
     stop_pidfile_owner,
     stop_process,
     write_pidfile,
@@ -18,6 +18,7 @@ from nexolith.scheduler.pidfile import (
 
 __all__ = [
     "PidFileClaim",
+    "PidFileLease",
     "PidFileOwnerStatus",
     "PidFileRecord",
     "Scheduler",
@@ -27,8 +28,7 @@ __all__ = [
     "parse_interval",
     "pidfile_owner_status",
     "read_pidfile",
-    "remove_pidfile",
-    "remove_pidfile_if_owned",
+    "release_pidfile",
     "stop_pidfile_owner",
     "stop_process",
     "write_pidfile",

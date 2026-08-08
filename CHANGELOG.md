@@ -115,9 +115,10 @@ what shipped, not when it's cut.
   dead or identity-mismatched owners are interrupted, while legacy or unverifiable identities stay
   running with a diagnostic warning to avoid duplicate side effects (NXL-120).
 - Fixed concurrent `scheduler start` commands both passing a read-before-write PID check and
-  launching duplicate schedulers. PID ownership now uses atomic exclusive creation; stale markers
-  are removed under a serialized cleanup claim before one bounded retry, while `status` and `stop`
-  never unlink a marker that may have been concurrently reacquired (NXL-117).
+  launching duplicate schedulers. PID ownership now combines atomic exclusive marker creation with
+  a crash-released operating-system lease held across the scheduler lifetime; acquisition, stale
+  recovery, and owner cleanup share that lease, so an exiting scheduler cannot erase a replacement
+  claim while `status` and `stop` remain read-only observers (NXL-117, NXL-121).
 - Fixed scheduler PID reuse making `status` trust, and `stop` terminate, an unrelated process.
   Scheduler markers now persist PID plus process creation time; startup safely recovers dead or
   identity-mismatched markers, while legacy and unverifiable markers fail closed. Remote stop uses

@@ -4,6 +4,10 @@ A PID is reusable and is therefore never sufficient proof of ownership.
 New markers persist the scheduler process creation time. Legacy, corrupt, or
 unverifiable markers fail closed: observers never signal or unlink them, and
 startup only recovers markers proven dead or owned by a different process.
+Acquisition and release also share a persistent companion file locked by the
+operating system for the scheduler's full lifetime. The lock is released on
+normal shutdown or automatically by the OS after a crash, and the companion
+file itself is intentionally harmless when left on disk.
 
 Remote stop is identity-bound too. Windows verifies creation time and calls
 ``TerminateProcess`` through one stable process handle; Linux opens a pidfd
@@ -12,7 +16,8 @@ equivalent primitive refuse remote termination rather than falling back to a
 PID-only signal.
 """
 
-import contextlib
+import errno
+import importlib
 import json
 import os
 import subprocess
@@ -20,7 +25,7 @@ import sys
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import IO, Protocol, Self, cast
 
 from nexolith.process_identity import (
     ProcessIdentity,
@@ -34,6 +39,21 @@ from nexolith.process_identity import (
 from nexolith.state.paths import default_state_dir
 
 _PIDFILE_NAME = "scheduler.pid"
+
+
+class _WindowsLockModule(Protocol):
+    LK_NBLCK: int
+    LK_UNLCK: int
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None: ...
+
+
+class _PosixLockModule(Protocol):
+    LOCK_EX: int
+    LOCK_NB: int
+    LOCK_UN: int
+
+    def flock(self, fd: int, operation: int) -> None: ...
 
 
 class _PidFilePid(int):
@@ -60,11 +80,34 @@ class PidFileRecord:
         return ProcessIdentity(pid=int(self.pid), create_time_ns=self.owner_create_time_ns)
 
 
+@dataclass(slots=True)
+class PidFileLease:
+    """OS-backed exclusive ownership held for one scheduler's full lifetime."""
+
+    pidfile_path: Path
+    _stream: IO[bytes]
+    _released: bool = False
+
+    @property
+    def is_held(self) -> bool:
+        return not self._released
+
+    def release(self) -> None:
+        if self._released:
+            return
+        try:
+            _unlock_coordination_file(self._stream)
+        finally:
+            self._released = True
+            self._stream.close()
+
+
 @dataclass(frozen=True, slots=True)
 class PidFileClaim:
     acquired: bool
     existing: PidFileRecord | None = None
     owned: PidFileRecord | None = None
+    lease: PidFileLease | None = None
 
 
 class PidFileOwnerStatus(StrEnum):
@@ -150,21 +193,79 @@ def read_pidfile(path: Path) -> PidFileRecord | None:
         return None
 
 
-def remove_pidfile(path: Path) -> None:
-    with contextlib.suppress(FileNotFoundError):
-        path.unlink()
+def _windows_lock_module() -> _WindowsLockModule:
+    return cast(_WindowsLockModule, importlib.import_module("msvcrt"))
 
 
-def remove_pidfile_if_owned(path: Path, owned: PidFileRecord) -> bool:
-    """Remove only the exact marker created by this scheduler invocation."""
-    current = read_pidfile(path)
-    if current != owned:
+def _posix_lock_module() -> _PosixLockModule:
+    return cast(_PosixLockModule, importlib.import_module("fcntl"))
+
+
+def _try_lock_coordination_file(stream: IO[bytes]) -> bool:
+    stream.seek(0)
+    try:
+        if sys.platform == "win32":
+            windows_lock = _windows_lock_module()
+            windows_lock.locking(stream.fileno(), windows_lock.LK_NBLCK, 1)
+        else:
+            posix_lock = _posix_lock_module()
+            posix_lock.flock(stream.fileno(), posix_lock.LOCK_EX | posix_lock.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+            return False
+        raise
+    return True
+
+
+def _unlock_coordination_file(stream: IO[bytes]) -> None:
+    stream.seek(0)
+    if sys.platform == "win32":
+        windows_lock = _windows_lock_module()
+        windows_lock.locking(stream.fileno(), windows_lock.LK_UNLCK, 1)
+    else:
+        posix_lock = _posix_lock_module()
+        posix_lock.flock(stream.fileno(), posix_lock.LOCK_UN)
+
+
+def _acquire_pidfile_lease(path: Path) -> PidFileLease | None:
+    """Try to lock the persistent companion file without waiting.
+
+    The file stays on disk and contains one inert byte. The operating system
+    releases its lock automatically if the scheduler crashes.
+    """
+    lock_path = path.with_name(f"{path.name}.lock")
+    stream = lock_path.open("a+b")
+    try:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        if not _try_lock_coordination_file(stream):
+            stream.close()
+            return None
+    except BaseException:
+        stream.close()
+        raise
+    return PidFileLease(pidfile_path=path, _stream=stream)
+
+
+def release_pidfile(claim: PidFileClaim) -> bool:
+    """Remove this claim while its full-lifetime ownership lease is held."""
+    lease = claim.lease
+    owned = claim.owned
+    if not claim.acquired or lease is None or owned is None or not lease.is_held:
         return False
     try:
-        path.unlink()
-    except FileNotFoundError:
-        return False
-    return True
+        current = read_pidfile(lease.pidfile_path)
+        if current != owned:
+            return False
+        try:
+            lease.pidfile_path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+    finally:
+        lease.release()
 
 
 def pidfile_owner_status(
@@ -230,7 +331,7 @@ def acquire_pidfile(
     *,
     identity_provider: ProcessIdentityProvider = lookup_process_identity,
 ) -> PidFileClaim:
-    """Atomically claim ownership, recovering only proven-stale markers."""
+    """Claim the lifetime lease, then atomically create the owner marker."""
     path.parent.mkdir(parents=True, exist_ok=True)
     owner_lookup = identity_provider(pid)
     if owner_lookup.status is not ProcessIdentityLookupStatus.FOUND:
@@ -242,6 +343,10 @@ def acquire_pidfile(
         raise ProcessIdentityUnavailable("Scheduler process identity returned the wrong PID")
     owned = PidFileRecord(pid, started_at, owner_lookup.identity.create_time_ns)
     payload = _payload(owned)
+    lease = _acquire_pidfile_lease(path)
+    if lease is None:
+        return PidFileClaim(acquired=False, existing=read_pidfile(path))
+    keep_lease = False
 
     def exclusive_create() -> bool:
         try:
@@ -251,36 +356,28 @@ def acquire_pidfile(
             return False
         return True
 
-    if exclusive_create():
-        return PidFileClaim(acquired=True, owned=owned)
-
-    existing = read_pidfile(path)
-    if existing is None:
-        return PidFileClaim(acquired=False)
-    status = pidfile_owner_status(existing, identity_provider=identity_provider)
-    if status not in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
-        return PidFileClaim(acquired=False, existing=existing)
-
-    tombstone = path.with_name(f"{path.name}.stale")
     try:
-        with tombstone.open("x", encoding="utf-8") as stream:
-            stream.write(payload)
-    except FileExistsError:
-        return PidFileClaim(acquired=False, existing=read_pidfile(path))
+        if exclusive_create():
+            keep_lease = True
+            return PidFileClaim(acquired=True, owned=owned, lease=lease)
 
-    try:
         existing = read_pidfile(path)
         if existing is None:
             return PidFileClaim(acquired=False)
         status = pidfile_owner_status(existing, identity_provider=identity_provider)
         if status not in {PidFileOwnerStatus.DEAD, PidFileOwnerStatus.REUSED}:
             return PidFileClaim(acquired=False, existing=existing)
-        remove_pidfile(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return PidFileClaim(acquired=False)
         if exclusive_create():
-            return PidFileClaim(acquired=True, owned=owned)
+            keep_lease = True
+            return PidFileClaim(acquired=True, owned=owned, lease=lease)
         return PidFileClaim(acquired=False, existing=read_pidfile(path))
     finally:
-        remove_pidfile(tombstone)
+        if not keep_lease:
+            lease.release()
 
 
 def stop_process(pid: int) -> bool:

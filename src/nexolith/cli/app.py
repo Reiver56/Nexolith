@@ -42,7 +42,7 @@ from nexolith.scheduler import (
     is_process_alive,
     pidfile_owner_status,
     read_pidfile,
-    remove_pidfile_if_owned,
+    release_pidfile,
     stop_pidfile_owner,
 )
 from nexolith.state import DagRunStatus, StateStore
@@ -171,7 +171,8 @@ def scheduler_start() -> None:
     if not claim.acquired:
         if claim.existing is None:
             typer.echo(
-                "Scheduler start refused: PID file is corrupt, incomplete, or being acquired.",
+                "Scheduler start already in progress: PID file is corrupt, incomplete, or being "
+                "acquired.",
                 err=True,
             )
         else:
@@ -197,8 +198,7 @@ def scheduler_start() -> None:
         typer.echo(render_scheduler_started(os.getpid()))
         scheduler.run()
     finally:
-        assert claim.owned is not None
-        remove_pidfile_if_owned(pidfile_path, claim.owned)
+        release_pidfile(claim)
         if store is not None:
             store.close()
 
