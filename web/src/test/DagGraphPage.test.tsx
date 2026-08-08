@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { App } from "../App";
@@ -230,4 +230,70 @@ test("shows an explicit empty source state", async () => {
 
   expect(await screen.findByText("The source file is empty.")).toBeInTheDocument();
   expect(document.querySelector(".task-source pre")).toBeNull();
+});
+
+test("refreshes open task details when graph polling returns new data", async () => {
+  let graphRequests = 0;
+  let detailRequests = 0;
+  const updatedGraph: DagGraph = {
+    ...dagGraph,
+    tasks: dagGraph.tasks.map((task) =>
+      task.name === "extract" ? { ...task, status: "running" } : task,
+    ),
+  };
+  installApiMock({
+    "/api/v1/dags/billing-close/graph": () => {
+      graphRequests += 1;
+      return { body: graphRequests === 1 ? dagGraph : updatedGraph };
+    },
+    "/api/v1/task-details?dag_name=billing-close&task_name=extract": () => {
+      detailRequests += 1;
+      return {
+        body: {
+          dag_name: "billing-close",
+          task_name: "extract",
+          kind: "pipeline",
+          depends_on: [],
+          latest_status: detailRequests === 1 ? "succeeded" : "running",
+          retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
+          source_language: "yaml",
+          source: detailRequests === 1 ? "first revision" : "second revision",
+          source_size_bytes: 15,
+        },
+      };
+    },
+  });
+  const user = userEvent.setup();
+  renderAt();
+  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
+  expect(await screen.findByText("first revision")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /^Refresh$/ }));
+
+  expect(await screen.findByText("second revision")).toBeInTheDocument();
+  expect(detailRequests).toBe(2);
+});
+
+test("closes open task details when refreshed graph data removes the task", async () => {
+  let graphRequests = 0;
+  const withoutExtract: DagGraph = {
+    ...dagGraph,
+    tasks: dagGraph.tasks.filter((task) => task.name !== "extract"),
+  };
+  installApiMock({
+    "/api/v1/dags/billing-close/graph": () => {
+      graphRequests += 1;
+      return { body: graphRequests === 1 ? dagGraph : withoutExtract };
+    },
+  });
+  const user = userEvent.setup();
+  renderAt();
+  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
+  expect(await screen.findByRole("button", { name: "Close details for extract" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: /^Refresh$/ }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "Close details for extract" })).not.toBeInTheDocument();
+  });
 });

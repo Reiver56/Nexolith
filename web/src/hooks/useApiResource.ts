@@ -15,6 +15,7 @@ function isAbortError(error: unknown): boolean {
 export function useApiResource<Data>(
   load: (signal: AbortSignal) => Promise<Data>,
   fallbackMessage: string,
+  refreshToken = 0,
 ): { resource: AsyncResource<Data>; reload: () => void } {
   const [revision, setRevision] = useState(0);
   const [resource, setResource] = useState<AsyncResource<Data>>({ status: "loading" });
@@ -47,7 +48,7 @@ export function useApiResource<Data>(
       active = false;
       controller.abort();
     };
-  }, [fallbackMessage, load, revision]);
+  }, [fallbackMessage, load, refreshToken, revision]);
 
   const reload = useCallback(() => {
     setResource({ status: "loading" });

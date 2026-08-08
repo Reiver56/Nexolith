@@ -29,10 +29,12 @@ function errorMessage(code: ApiErrorCode | undefined, fallback: string): string 
 export function TaskDetailsPanel({
   dagName,
   taskName,
+  refreshToken,
   onClose,
 }: {
   dagName: string;
   taskName: string;
+  refreshToken: number;
   onClose: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -40,7 +42,11 @@ export function TaskDetailsPanel({
     (signal: AbortSignal) => getDagTaskSource(dagName, taskName, signal),
     [dagName, taskName],
   );
-  const { resource, reload } = useApiResource(load, "Unable to load task details.");
+  const { resource, reload } = useApiResource(
+    load,
+    "Unable to load task details.",
+    refreshToken,
+  );
 
   useEffect(() => {
     closeRef.current?.focus();

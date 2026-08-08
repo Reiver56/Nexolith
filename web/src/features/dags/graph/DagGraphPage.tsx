@@ -162,32 +162,26 @@ function AccessibleSummary({
   );
 }
 
-function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
+function LoadedGraph({
+  graph,
+  graphRevision,
+  selectedTaskName,
+  onTaskSelect,
+  onTaskClose,
+  refresh,
+  refreshing,
+  refreshError,
+}: {
   graph: DagGraph;
+  graphRevision: number;
+  selectedTaskName: string | null;
+  onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
+  onTaskClose: () => void;
   refresh: () => void;
   refreshing: boolean;
   refreshError?: string;
 }) {
   const built = useMemo(() => buildSafely(graph), [graph]);
-  const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
-  const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
-  const selectTask = useCallback((taskName: string, trigger: HTMLButtonElement) => {
-    restoreFocusRef.current = trigger;
-    setSelectedTaskName(taskName);
-  }, []);
-  const closeTask = useCallback(() => {
-    const selectedName = selectedTaskName;
-    setSelectedTaskName(null);
-    const trigger = restoreFocusRef.current;
-    if (trigger?.isConnected) {
-      trigger.focus();
-      return;
-    }
-    const fallback = [...document.querySelectorAll<HTMLButtonElement>("[data-task-name]")].find(
-      (candidate) => candidate.dataset.taskName === selectedName,
-    );
-    fallback?.focus();
-  }, [selectedTaskName]);
   return (
     <>
       <nav className="breadcrumbs" aria-label="Breadcrumb">
@@ -221,14 +215,15 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
             <DagGraphCanvas
               model={built.model}
               selectedTaskName={selectedTaskName}
-              onTaskSelect={selectTask}
+              onTaskSelect={onTaskSelect}
             />
             {selectedTaskName === null ? null : (
               <TaskDetailsPanel
                 key={selectedTaskName}
                 dagName={graph.name}
                 taskName={selectedTaskName}
-                onClose={closeTask}
+                refreshToken={graphRevision}
+                onClose={onTaskClose}
               />
             )}
           </div>
@@ -236,7 +231,7 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
             graph={graph}
             model={built.model}
             selectedTaskName={selectedTaskName}
-            onTaskSelect={selectTask}
+            onTaskSelect={onTaskSelect}
           />
         </>
       )}
@@ -245,7 +240,35 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
 }
 
 export function DagGraphPage({ dagName }: { dagName: string }) {
-  const load = useCallback((signal: AbortSignal) => getDagGraph(dagName, signal), [dagName]);
+  const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
+  const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
+  const selectTask = useCallback((taskName: string, trigger: HTMLButtonElement) => {
+    restoreFocusRef.current = trigger;
+    setSelectedTaskName(taskName);
+  }, []);
+  const closeTask = useCallback(() => {
+    const selectedName = selectedTaskName;
+    setSelectedTaskName(null);
+    const trigger = restoreFocusRef.current;
+    if (trigger?.isConnected) {
+      trigger.focus();
+      return;
+    }
+    const fallback = [...document.querySelectorAll<HTMLButtonElement>("[data-task-name]")].find(
+      (candidate) => candidate.dataset.taskName === selectedName,
+    );
+    fallback?.focus();
+  }, [selectedTaskName]);
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      const graph = await getDagGraph(dagName, signal);
+      setSelectedTaskName((current) =>
+        current === null || graph.tasks.some((task) => task.name === current) ? current : null,
+      );
+      return graph;
+    },
+    [dagName],
+  );
   const { resource, refresh } = usePollingResource(load, "Unable to reach this DAG graph.");
 
   if (resource.status === "loading") {
@@ -260,6 +283,10 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
   return (
     <LoadedGraph
       graph={resource.data}
+      graphRevision={resource.revision}
+      selectedTaskName={selectedTaskName}
+      onTaskSelect={selectTask}
+      onTaskClose={closeTask}
       refresh={refresh}
       refreshing={resource.refreshing}
       {...(resource.refreshError === undefined ? {} : { refreshError: resource.refreshError })}
