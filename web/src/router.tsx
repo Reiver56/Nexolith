@@ -42,7 +42,11 @@ export function parseRoute(pathname: string): Route {
   }
   const runMatch = /^\/runs\/([^/]+)$/.exec(normalized);
   if (runMatch?.[1] !== undefined) {
-    return { page: "run", runId: decodeURIComponent(runMatch[1]) };
+    try {
+      return { page: "run", runId: decodeURIComponent(runMatch[1]) };
+    } catch {
+      return { page: "not-found" };
+    }
   }
   return { page: "not-found" };
 }

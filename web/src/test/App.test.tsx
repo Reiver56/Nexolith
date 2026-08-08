@@ -68,7 +68,11 @@ test("redirects the overview and provides a useful unknown-route view", async ()
   expect(window.location.pathname).toBe("/dags");
   overview.unmount();
 
-  renderAt("/does-not-exist");
+  const unknown = renderAt("/does-not-exist");
   const main = screen.getByRole("main");
   expect(within(main).getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  unknown.unmount();
+
+  renderAt("/runs/%");
+  expect(screen.getByRole("heading", { name: "Page not found" })).toBeInTheDocument();
 });
