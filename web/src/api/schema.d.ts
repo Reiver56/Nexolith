@@ -224,6 +224,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/task-details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get registered task source details
+         * @description Returns a bounded UTF-8 source definition for a task in an already registered DAG. Available only when the API server is bound to loopback; no filesystem path is accepted or returned.
+         */
+        get: operations["get_dag_task_source"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -232,7 +252,7 @@ export interface components {
          * ApiErrorCode
          * @enum {string}
          */
-        ApiErrorCode: "dag_not_found" | "run_not_found" | "dag_source_missing" | "dag_configuration_invalid" | "origin_not_allowed" | "unsupported_media_type" | "method_not_allowed" | "host_not_allowed" | "resource_not_found" | "scheduler_already_running" | "scheduler_control_unavailable" | "request_validation_error" | "state_unavailable" | "scheduler_identity_unavailable" | "internal_error";
+        ApiErrorCode: "dag_not_found" | "task_not_found" | "run_not_found" | "dag_source_missing" | "dag_configuration_invalid" | "task_source_unavailable" | "task_source_too_large" | "task_source_binary" | "task_source_invalid_encoding" | "source_access_not_allowed" | "origin_not_allowed" | "unsupported_media_type" | "method_not_allowed" | "host_not_allowed" | "resource_not_found" | "scheduler_already_running" | "scheduler_control_unavailable" | "request_validation_error" | "state_unavailable" | "scheduler_identity_unavailable" | "internal_error";
         /** ApiErrorDetail */
         ApiErrorDetail: {
             code: components["schemas"]["ApiErrorCode"];
@@ -324,6 +344,11 @@ export interface components {
         DagGraphTaskResponse: {
             /** Depends On */
             depends_on: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "pipeline" | "script";
             /** Name */
             name: string;
             status: components["schemas"]["TaskRunStatus"] | null;
@@ -397,6 +422,31 @@ export interface components {
             retry_backoff_multiplier: number;
             /** Retry Delay Seconds */
             retry_delay_seconds: number;
+        };
+        /** DagTaskSourceResponse */
+        DagTaskSourceResponse: {
+            /** Dag Name */
+            dag_name: string;
+            /** Depends On */
+            depends_on: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "pipeline" | "script";
+            latest_status: components["schemas"]["TaskRunStatus"] | null;
+            retry: components["schemas"]["TaskRetryResponse"];
+            /** Source */
+            source: string;
+            /**
+             * Source Language
+             * @enum {string}
+             */
+            source_language: "yaml" | "python";
+            /** Source Size Bytes */
+            source_size_bytes: number;
+            /** Task Name */
+            task_name: string;
         };
         /** DagTriggerResponse */
         DagTriggerResponse: {
@@ -526,6 +576,15 @@ export interface components {
          * @enum {string}
          */
         TaskAttemptStatus: "running" | "succeeded" | "failed";
+        /** TaskRetryResponse */
+        TaskRetryResponse: {
+            /** Retries */
+            retries: number;
+            /** Retry Backoff Multiplier */
+            retry_backoff_multiplier: number;
+            /** Retry Delay Seconds */
+            retry_delay_seconds: number;
+        };
         /** TaskRunResponse */
         TaskRunResponse: {
             /** Attempts */
@@ -1371,6 +1430,112 @@ export interface operations {
                 };
             };
             /** @description JSON request body required. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Invalid request. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Internal service error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description State or scheduler identity unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_dag_task_source: {
+        parameters: {
+            query: {
+                /** @description Registered DAG name. */
+                dag_name: string;
+                /** @description Task name in the registered DAG. */
+                task_name: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DagTaskSourceResponse"];
+                };
+            };
+            /** @description Host is not allowed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Source access is not allowed. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description DAG or task not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description DAG or task source unavailable. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Task source exceeds 256 KiB. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Task source is not UTF-8 text. */
             415: {
                 headers: {
                     [name: string]: unknown;

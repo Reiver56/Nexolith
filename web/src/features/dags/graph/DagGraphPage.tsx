@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { getDagGraph } from "../../../api/client";
 import type { DagGraph } from "../../../api/types";
@@ -10,6 +10,9 @@ import { AppLink } from "../../../router";
 import { formatTimestamp } from "../../../utils/format";
 import { TriggerDagControl } from "../DagActions";
 import { DagGraphCanvas } from "./DagGraphCanvas";
+import { TaskDetailsPanel } from "./TaskDetailsPanel";
+import { TaskKindIcon } from "./TaskKindIcon";
+import { taskKindLabel } from "./taskKinds";
 import { buildDagFlow } from "./layout";
 import type { DagFlowModel } from "./layout";
 
@@ -95,7 +98,17 @@ function GraphLegend() {
   );
 }
 
-function AccessibleSummary({ graph, model }: { graph: DagGraph; model: DagFlowModel }) {
+function AccessibleSummary({
+  graph,
+  model,
+  selectedTaskName,
+  onTaskSelect,
+}: {
+  graph: DagGraph;
+  model: DagFlowModel;
+  selectedTaskName: string | null;
+  onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
+}) {
   return (
     <section className="graph-summary" aria-labelledby="graph-summary-title">
       <div className="section-heading">
@@ -115,7 +128,23 @@ function AccessibleSummary({ graph, model }: { graph: DagGraph; model: DagFlowMo
       <ul className="graph-summary__tasks">
         {model.dependencySummary.map((task) => (
           <li key={task.name}>
-            <div><strong>{task.name}</strong><span>{task.statusLabel}</span></div>
+            <div>
+              <button
+                className="graph-summary__task-button"
+                type="button"
+                data-task-name={task.name}
+                onClick={(event) => {
+                  onTaskSelect(task.name, event.currentTarget);
+                }}
+                aria-pressed={selectedTaskName === task.name}
+                aria-label={`Open details for ${task.name}, ${taskKindLabel(task.kind)}, ${task.statusLabel}`}
+              >
+                <TaskKindIcon kind={task.kind} />
+                <strong>{task.name}</strong>
+                <span>{taskKindLabel(task.kind)}</span>
+              </button>
+              <span>{task.statusLabel}</span>
+            </div>
             <p>{task.dependsOn.length === 0 ? "No dependencies" : `Depends on ${task.dependsOn.join(", ")}`}</p>
           </li>
         ))}
@@ -140,6 +169,25 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
   refreshError?: string;
 }) {
   const built = useMemo(() => buildSafely(graph), [graph]);
+  const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
+  const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
+  const selectTask = useCallback((taskName: string, trigger: HTMLButtonElement) => {
+    restoreFocusRef.current = trigger;
+    setSelectedTaskName(taskName);
+  }, []);
+  const closeTask = useCallback(() => {
+    const selectedName = selectedTaskName;
+    setSelectedTaskName(null);
+    const trigger = restoreFocusRef.current;
+    if (trigger?.isConnected) {
+      trigger.focus();
+      return;
+    }
+    const fallback = [...document.querySelectorAll<HTMLButtonElement>("[data-task-name]")].find(
+      (candidate) => candidate.dataset.taskName === selectedName,
+    );
+    fallback?.focus();
+  }, [selectedTaskName]);
   return (
     <>
       <nav className="breadcrumbs" aria-label="Breadcrumb">
@@ -169,8 +217,27 @@ function LoadedGraph({ graph, refresh, refreshing, refreshError }: {
       ) : (
         <>
           <GraphLegend />
-          <DagGraphCanvas model={built.model} />
-          <AccessibleSummary graph={graph} model={built.model} />
+          <div className="graph-workspace" data-panel-open={selectedTaskName !== null || undefined}>
+            <DagGraphCanvas
+              model={built.model}
+              selectedTaskName={selectedTaskName}
+              onTaskSelect={selectTask}
+            />
+            {selectedTaskName === null ? null : (
+              <TaskDetailsPanel
+                key={selectedTaskName}
+                dagName={graph.name}
+                taskName={selectedTaskName}
+                onClose={closeTask}
+              />
+            )}
+          </div>
+          <AccessibleSummary
+            graph={graph}
+            model={built.model}
+            selectedTaskName={selectedTaskName}
+            onTaskSelect={selectTask}
+          />
         </>
       )}
     </>

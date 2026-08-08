@@ -19,6 +19,7 @@ from nexolith.api.models import (
     DagSourceStatus,
     DagSummaryResponse,
     DagTaskResponse,
+    DagTaskSourceResponse,
     DagTriggerResponse,
     FailurePolicy,
     RunDetailResponse,
@@ -26,6 +27,7 @@ from nexolith.api.models import (
     SchedulerStatusResponse,
     Severity,
     TaskAttemptResponse,
+    TaskRetryResponse,
     TaskRunResponse,
 )
 from nexolith.application.actions import (
@@ -41,6 +43,7 @@ from nexolith.scheduler import SchedulerQueryState, SchedulerStatusSnapshot
 from nexolith.state import DagRecord, DagRunRecord, StateStore
 
 SchedulerStatusQuery = Callable[[], SchedulerStatusSnapshot]
+TASK_SOURCE_SIZE_LIMIT_BYTES = 256 * 1024
 
 
 class ApiQueryError(RuntimeError):
@@ -102,6 +105,7 @@ class ApiQueryService:
             tasks=[
                 DagGraphTaskResponse(
                     name=task.name,
+                    kind="script" if task.script is not None else "pipeline",
                     depends_on=list(task.depends_on),
                     status=statuses.get(task.name),
                 )
@@ -122,6 +126,51 @@ class ApiQueryService:
                 for task in task_history
                 if task.task_name not in current_names
             ],
+        )
+
+    def get_task_source(self, dag_name: str, task_name: str) -> DagTaskSourceResponse:
+        record = self._store.get_dag(dag_name)
+        if record is None:
+            raise ApiQueryError(ApiErrorCode.DAG_NOT_FOUND, 404, "DAG not found.")
+        config = self._required_dag_config(record)
+        task = next((candidate for candidate in config.tasks if candidate.name == task_name), None)
+        if task is None:
+            raise ApiQueryError(ApiErrorCode.TASK_NOT_FOUND, 404, "Task not found.")
+
+        dag_path = Path(record.source_path)
+        reference = task.script if task.script is not None else task.pipeline
+        assert reference is not None
+        source_path = Path(reference)
+        if not source_path.is_absolute():
+            source_path = dag_path.parent / source_path
+        source, source_size = _read_task_source(source_path)
+
+        latest = self._store.latest_dag_run(dag_name)
+        latest_status = None
+        if latest is not None:
+            latest_status = next(
+                (
+                    persisted.status
+                    for persisted in self._store.list_task_runs(latest.id)
+                    if persisted.task_name == task_name
+                ),
+                None,
+            )
+        is_script = task.script is not None
+        return DagTaskSourceResponse(
+            dag_name=record.name,
+            task_name=task.name,
+            kind="script" if is_script else "pipeline",
+            depends_on=list(task.depends_on),
+            latest_status=latest_status,
+            retry=TaskRetryResponse(
+                retries=task.retries,
+                retry_delay_seconds=task.retry_delay_seconds,
+                retry_backoff_multiplier=task.retry_backoff_multiplier,
+            ),
+            source_language="python" if is_script else "yaml",
+            source=source,
+            source_size_bytes=source_size,
         )
 
     def list_runs(self, limit: int) -> list[RunSummaryResponse]:
@@ -307,3 +356,35 @@ def _optional_timestamp(value: str | None) -> datetime | None:
 
 def _safe_error(value: str | None, summary: str) -> str | None:
     return summary if value else None
+
+
+def _read_task_source(path: Path) -> tuple[str, int]:
+    try:
+        with path.open("rb") as source_file:
+            content = source_file.read(TASK_SOURCE_SIZE_LIMIT_BYTES + 1)
+    except OSError as exc:
+        raise ApiQueryError(
+            ApiErrorCode.TASK_SOURCE_UNAVAILABLE,
+            409,
+            "The task source is unavailable.",
+        ) from exc
+    if len(content) > TASK_SOURCE_SIZE_LIMIT_BYTES:
+        raise ApiQueryError(
+            ApiErrorCode.TASK_SOURCE_TOO_LARGE,
+            413,
+            "The task source exceeds the 256 KiB display limit.",
+        )
+    if b"\x00" in content:
+        raise ApiQueryError(
+            ApiErrorCode.TASK_SOURCE_BINARY,
+            415,
+            "The task source is not plain text.",
+        )
+    try:
+        return content.decode("utf-8"), len(content)
+    except UnicodeDecodeError as exc:
+        raise ApiQueryError(
+            ApiErrorCode.TASK_SOURCE_INVALID_ENCODING,
+            415,
+            "The task source is not valid UTF-8.",
+        ) from exc

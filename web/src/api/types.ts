@@ -9,6 +9,7 @@ export type DagGraph = components["schemas"]["DagGraphResponse"];
 export type DagGraphTask = components["schemas"]["DagGraphTaskResponse"];
 export type DagGraphRun = components["schemas"]["DagGraphRunResponse"];
 export type DagGraphHistoricalTask = components["schemas"]["DagGraphHistoricalTaskResponse"];
+export type DagTaskSource = components["schemas"]["DagTaskSourceResponse"];
 export type RunSummary = components["schemas"]["RunSummaryResponse"];
 export type RunList = components["schemas"]["RunListResponse"];
 export type RunDetail = components["schemas"]["RunDetailResponse"];

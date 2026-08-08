@@ -1,6 +1,7 @@
 """Optional-dependency boundary for running the monitoring API."""
 
 import importlib
+import ipaddress
 from collections.abc import Callable
 from typing import Protocol, cast
 
@@ -44,7 +45,10 @@ def run_api_server(
             allowed_hosts = tuple(
                 dict.fromkeys(("127.0.0.1", "localhost", "::1", host, *trusted_hosts))
             )
-            application = create_app(allowed_hosts=allowed_hosts)
+            application = create_app(
+                allowed_hosts=allowed_hosts,
+                task_source_access=_is_loopback_bind(host),
+            )
     except ModuleNotFoundError as exc:
         if exc.name in {"fastapi", "uvicorn"}:
             raise ApiDependenciesUnavailable(
@@ -64,3 +68,12 @@ def run_api_server(
         raise ApiServerStartupError(
             f"API server could not start on {host}:{port}. The address may already be in use."
         ) from exc
+
+
+def _is_loopback_bind(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

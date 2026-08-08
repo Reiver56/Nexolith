@@ -69,7 +69,7 @@ const taskStatuses: TaskRunStatus[] = [
 test.each(taskStatuses)("preserves the persisted %s status as text and node data", (status) => {
   const graph: DagGraph = {
     ...dagGraph,
-    tasks: [{ name: "only", depends_on: [], status }],
+    tasks: [{ name: "only", kind: "script", depends_on: [], status }],
   };
   const node = buildDagFlow(graph).nodes.find((candidate) => candidate.id === "task:only");
   expect(node?.data).toMatchObject({ status, statusLabel: statusLabel(status) });
@@ -77,10 +77,10 @@ test.each(taskStatuses)("preserves the persisted %s status as text and node data
 });
 
 const invalidGraphs: { graph: DagGraph; expected: string }[] = [
-  { graph: { ...dagGraph, tasks: [{ name: "a", depends_on: ["missing"], status: null }] }, expected: "invalid dependency" },
-  { graph: { ...dagGraph, tasks: [{ name: "a", depends_on: ["a"], status: null }] }, expected: "invalid dependency" },
-  { graph: { ...dagGraph, tasks: [{ name: "a", depends_on: ["b"], status: null }, { name: "b", depends_on: ["a"], status: null }] }, expected: "dependency cycle" },
-  { graph: { ...dagGraph, tasks: [{ name: "a", depends_on: [], status: null }, { name: "a", depends_on: [], status: null }] }, expected: "duplicate task" },
+  { graph: { ...dagGraph, tasks: [{ name: "a", kind: "pipeline", depends_on: ["missing"], status: null }] }, expected: "invalid dependency" },
+  { graph: { ...dagGraph, tasks: [{ name: "a", kind: "pipeline", depends_on: ["a"], status: null }] }, expected: "invalid dependency" },
+  { graph: { ...dagGraph, tasks: [{ name: "a", kind: "pipeline", depends_on: ["b"], status: null }, { name: "b", kind: "script", depends_on: ["a"], status: null }] }, expected: "dependency cycle" },
+  { graph: { ...dagGraph, tasks: [{ name: "a", kind: "pipeline", depends_on: [], status: null }, { name: "a", kind: "script", depends_on: [], status: null }] }, expected: "duplicate task" },
 ];
 
 test.each(invalidGraphs)("rejects unsafe or ambiguous DAG structures", ({ graph, expected }) => {

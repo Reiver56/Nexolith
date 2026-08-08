@@ -73,8 +73,8 @@ test("contains layout failures and API failures behind safe messages", async () 
   const cyclic: DagGraph = {
     ...dagGraph,
     tasks: [
-      { name: "first", depends_on: ["second"], status: null },
-      { name: "second", depends_on: ["first"], status: null },
+      { name: "first", kind: "script", depends_on: ["second"], status: null },
+      { name: "second", kind: "pipeline", depends_on: ["first"], status: null },
     ],
   };
   installApiMock({ "/api/v1/dags/cyclic/graph": { body: cyclic } });
@@ -97,4 +97,137 @@ test("shows graph freshness without obscuring the last good data", async () => {
   renderAt();
   expect(await screen.findByTestId("dag-graph-canvas")).toBeInTheDocument();
   expect(screen.getByText(/refreshes every 5 seconds/)).toBeInTheDocument();
+});
+
+test("shows truthful task icons without labelling ambiguous pipelines as SQL", async () => {
+  installApiMock();
+  renderAt();
+
+  expect((await screen.findAllByRole("img", { name: "Pipeline task" })).length).toBeGreaterThan(0);
+  expect(screen.getByRole("img", { name: "Python script task" })).toBeInTheDocument();
+  expect(screen.getAllByText("Pipeline").length).toBeGreaterThan(0);
+  expect(screen.queryByText(/SQL task/i)).not.toBeInTheDocument();
+});
+
+test("opens, switches, and closes task details with keyboard focus restoration", async () => {
+  installApiMock();
+  const user = userEvent.setup();
+  renderAt();
+
+  const extract = await screen.findByRole("button", { name: /Open details for extract/i });
+  await user.click(extract);
+  const closeExtract = await screen.findByRole("button", { name: "Close details for extract" });
+  expect(closeExtract).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Pipeline definition" })).toBeInTheDocument();
+  expect(screen.getByText("name: extract-orders", { exact: false })).toBeInTheDocument();
+
+  await user.click(closeExtract);
+  expect(screen.queryByRole("heading", { name: "Pipeline definition" })).not.toBeInTheDocument();
+  expect(extract).toHaveFocus();
+  await user.click(extract);
+  await screen.findByRole("button", { name: "Close details for extract" });
+
+  const enrich = screen.getByRole("button", { name: /Open details for enrich/i });
+  await user.click(enrich);
+  expect(await screen.findByRole("button", { name: "Close details for enrich" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Python source" })).toBeInTheDocument();
+  expect(screen.getByText("def run(context):", { exact: false })).toBeInTheDocument();
+
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("heading", { name: "Python source" })).not.toBeInTheDocument();
+  expect(enrich).toHaveFocus();
+});
+
+test("renders source-like HTML as text and contains long lines in the code area", async () => {
+  const unsafeSource = '<img src=x onerror="window.pwned=true">' + "x".repeat(600);
+  installApiMock({
+    "/api/v1/task-details?dag_name=billing-close&task_name=extract": {
+      body: {
+        dag_name: "billing-close",
+        task_name: "extract",
+        kind: "pipeline",
+        depends_on: [],
+        latest_status: null,
+        retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
+        source_language: "yaml",
+        source: unsafeSource,
+        source_size_bytes: unsafeSource.length,
+      },
+    },
+  });
+  const user = userEvent.setup();
+  renderAt();
+  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
+
+  const code = await screen.findByText(unsafeSource);
+  expect(code.tagName).toBe("CODE");
+  expect(screen.queryAllByRole("img").length).toBeGreaterThan(0);
+  expect(document.querySelector(".task-source img")).toBeNull();
+  expect(code.closest("pre")).toHaveAttribute("data-language", "yaml");
+});
+
+test("shows typed loading and error states and ignores stale task responses", async () => {
+  let resolveExtract: ((value: { body: unknown }) => void) | undefined;
+  installApiMock({
+    "/api/v1/task-details?dag_name=billing-close&task_name=extract": () =>
+      new Promise((resolve) => {
+        resolveExtract = resolve;
+      }),
+    "/api/v1/task-details?dag_name=billing-close&task_name=enrich": {
+      status: 415,
+      body: {
+        detail: {
+          code: "task_source_invalid_encoding",
+          message: "The task source is not valid UTF-8.",
+        },
+      },
+    },
+  });
+  const user = userEvent.setup();
+  renderAt();
+  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
+  expect(screen.getByRole("status")).toHaveTextContent("Loading task details");
+
+  await user.click(screen.getByRole("button", { name: /Open details for enrich/i }));
+  expect(await screen.findByText("This source cannot be displayed as UTF-8 text.")).toBeInTheDocument();
+
+  resolveExtract?.({
+    body: {
+      dag_name: "billing-close",
+      task_name: "extract",
+      kind: "pipeline",
+      depends_on: [],
+      latest_status: null,
+      retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
+      source_language: "yaml",
+      source: "stale-source-must-not-render",
+      source_size_bytes: 28,
+    },
+  });
+  await Promise.resolve();
+  expect(screen.queryByText("stale-source-must-not-render")).not.toBeInTheDocument();
+});
+
+test("shows an explicit empty source state", async () => {
+  installApiMock({
+    "/api/v1/task-details?dag_name=billing-close&task_name=extract": {
+      body: {
+        dag_name: "billing-close",
+        task_name: "extract",
+        kind: "pipeline",
+        depends_on: [],
+        latest_status: null,
+        retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
+        source_language: "yaml",
+        source: "",
+        source_size_bytes: 0,
+      },
+    },
+  });
+  const user = userEvent.setup();
+  renderAt();
+  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
+
+  expect(await screen.findByText("The source file is empty.")).toBeInTheDocument();
+  expect(document.querySelector(".task-source pre")).toBeNull();
 });

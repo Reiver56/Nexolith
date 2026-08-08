@@ -21,12 +21,15 @@ export function useApiResource<Data>(
 
   useEffect(() => {
     const controller = new AbortController();
+    let active = true;
     void load(controller.signal).then(
       (data) => {
-        setResource({ status: "success", data });
+        if (active) {
+          setResource({ status: "success", data });
+        }
       },
       (error: unknown) => {
-        if (isAbortError(error)) {
+        if (!active || isAbortError(error)) {
           return;
         }
         if (error instanceof ApiClientError) {
@@ -41,6 +44,7 @@ export function useApiResource<Data>(
       },
     );
     return () => {
+      active = false;
       controller.abort();
     };
   }, [fallbackMessage, load, revision]);

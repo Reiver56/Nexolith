@@ -29,6 +29,7 @@ def test_openapi_export_is_deterministic_local_and_complete() -> None:
     schema: dict[str, Any] = json.loads(first)
     assert schema["paths"]["/api/v1/dags"]["get"]["operationId"] == "list_dags"
     assert schema["paths"]["/api/v1/dags/{dag_name}/graph"]["get"]["operationId"] == "get_dag_graph"
+    assert schema["paths"]["/api/v1/task-details"]["get"]["operationId"] == "get_dag_task_source"
     assert schema["paths"]["/api/v1/runs/{run_id}"]["get"]["operationId"] == "get_run"
     assert b"C:\\\\Users" not in first
     assert b"/home/" not in first

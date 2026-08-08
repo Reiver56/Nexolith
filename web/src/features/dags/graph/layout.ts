@@ -7,6 +7,7 @@ export type GraphNodeStatus = TaskRunStatus | "no-history" | "unknown";
 
 export type TaskNodeData = {
   kind: "task";
+  taskKind: DagGraph["tasks"][number]["kind"];
   name: string;
   status: GraphNodeStatus;
   statusLabel: string;
@@ -27,7 +28,12 @@ export type DagFlowEdge = Edge<{ relation: "dependency" | "cross-dag" }>;
 export interface DagFlowModel {
   nodes: DagFlowNode[];
   edges: DagFlowEdge[];
-  dependencySummary: { name: string; dependsOn: string[]; statusLabel: string }[];
+  dependencySummary: {
+    name: string;
+    kind: DagGraph["tasks"][number]["kind"];
+    dependsOn: string[];
+    statusLabel: string;
+  }[];
   upstreamDags: string[];
 }
 
@@ -129,6 +135,7 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
         },
         data: {
           kind: "task",
+          taskKind: task.kind,
           name,
           status,
           statusLabel: statusLabel(status),
@@ -139,8 +146,8 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
         draggable: false,
         connectable: false,
         selectable: true,
-        focusable: true,
-        ariaLabel: `${name}, ${statusLabel(status)}, ${String(new Set(task.depends_on).size)} dependencies`,
+        focusable: false,
+        ariaLabel: `${name}, ${task.kind === "script" ? "Python script" : "pipeline"}, ${statusLabel(status)}, ${String(new Set(task.depends_on).size)} dependencies`,
         className: `graph-task graph-task--${status}`,
       });
     });
@@ -231,6 +238,7 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
       .sort((left, right) => compareText(left.name, right.name))
       .map((task) => ({
         name: task.name,
+        kind: task.kind,
         dependsOn: [...new Set(task.depends_on)].sort(compareText),
         statusLabel: statusLabel(statusFor(graph, task.status)),
       })),
