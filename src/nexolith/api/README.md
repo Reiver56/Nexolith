@@ -14,6 +14,7 @@ contract.
 | `GET` | `/api/v1/dags` | Registered DAG summaries | `list_dags` |
 | `GET` | `/api/v1/dags/{dag_name}` | Current registered DAG structure | `get_dag` |
 | `GET` | `/api/v1/dags/{dag_name}/graph` | Current dependencies and latest task statuses | `get_dag_graph` |
+| `GET` | `/api/v1/task-details?dag_name=…&task_name=…` | Bounded source for one registered task | `get_dag_task_source` |
 | `POST` | `/api/v1/dags/registrations` | Register or explicitly refresh a DAG | `register_dag` |
 | `POST` | `/api/v1/dags/{dag_name}/runs` | Execute a registered DAG synchronously | `trigger_dag_run` |
 | `GET` | `/api/v1/runs` | Bounded recent run history | `list_runs` |
@@ -72,6 +73,17 @@ mutation. The development server uses same-origin relative paths and proxies `/a
 backend instead of adding wildcard CORS. Its loopback-only proxy rewrites the upstream Host/Origin
 pair together so the API still sees one trusted origin.
 
+Task source is more sensitive than operational metadata. The source-details endpoint is enabled
+only when the API itself is bound to a loopback address; non-loopback and wildcard binds reject it,
+even when trusted hosts are configured. The client supplies only a DAG name and task name. The
+server resolves the current registered DAG, finds that exact task, and reads its declared script or
+pipeline definition in the request worker thread. It never accepts or returns a filesystem path.
+Files must be UTF-8 text without NUL bytes and no larger than 256 KiB; unreadable, binary,
+invalidly encoded, and oversized sources produce fixed typed errors. Source text is returned
+verbatim, not logged or persisted, and is not described as secret-redacted: registered local code
+can itself contain sensitive values, so this endpoint remains suitable only for a trusted local
+operator.
+
 Responses omit raw persisted exceptions, connection details, environment values, process
 arguments, source paths, owner creation timestamps, usernames, and home directories. Errors use
 fixed typed summaries without tracebacks or internal exception text.
@@ -82,3 +94,5 @@ run for that DAG. A status is `null` when no trustworthy persisted task status e
 task rows absent from the current definition remain visible in `unmapped_task_history` instead of
 being presented as current graph nodes. Cross-DAG triggers remain DAG-level relationships. The
 response includes no task parameters, scripts, source paths, or persisted error text.
+The task `kind` is the only additional graph field used for recognizable script/pipeline icons;
+source content stays out of the polling response and is fetched only after task selection.

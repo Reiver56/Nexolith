@@ -19,6 +19,7 @@ from nexolith.api.app import create_app
 from nexolith.api.server import (
     ApiDependenciesUnavailable,
     ApiServerStartupError,
+    _is_loopback_bind,
     run_api_server,
 )
 from nexolith.cli.app import app as cli_app
@@ -87,6 +88,7 @@ def _client(
         create_app(
             store_factory=_store_factory(database_path),
             scheduler_status_query=scheduler_query,
+            task_source_access=True,
         ),
         base_url=_BASE_URL,
     )
@@ -126,6 +128,7 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1/dags", "get"): "list_dags",
         ("/api/v1/dags/registrations", "post"): "register_dag",
         ("/api/v1/dags/{dag_name}/graph", "get"): "get_dag_graph",
+        ("/api/v1/task-details", "get"): "get_dag_task_source",
         ("/api/v1/dags/{dag_name}", "get"): "get_dag",
         ("/api/v1/dags/{dag_name}/runs", "post"): "trigger_dag_run",
         ("/api/v1/runs", "get"): "list_runs",
@@ -139,6 +142,7 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1/dags", "get"): ("200", "DagListResponse"),
         ("/api/v1/dags/registrations", "post"): ("200", "DagRegistrationResponse"),
         ("/api/v1/dags/{dag_name}/graph", "get"): ("200", "DagGraphResponse"),
+        ("/api/v1/task-details", "get"): ("200", "DagTaskSourceResponse"),
         ("/api/v1/dags/{dag_name}", "get"): ("200", "DagDetailResponse"),
         ("/api/v1/dags/{dag_name}/runs", "post"): ("201", "DagRunActionResponse"),
         ("/api/v1/runs", "get"): ("200", "RunListResponse"),
@@ -225,6 +229,13 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert "/home/" not in component_text
     assert "/users/" not in component_text
 
+    source_parameters = schema["paths"]["/api/v1/task-details"]["get"]["parameters"]
+    assert [(parameter["name"], parameter["in"]) for parameter in source_parameters] == [
+        ("dag_name", "query"),
+        ("task_name", "query"),
+    ]
+    assert "source_path" not in json.dumps(source_parameters)
+
 
 def test_openapi_is_deterministic_for_equivalent_configuration(tmp_path: Path) -> None:
     first = create_app(store_factory=_store_factory(tmp_path / "first.db")).openapi()
@@ -296,8 +307,8 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
         "name": "orders",
         "trigger": {"on_success_of": ["ingest"]},
         "tasks": [
-            {"name": "extract", "depends_on": [], "status": None},
-            {"name": "publish", "depends_on": ["extract"], "status": None},
+            {"name": "extract", "kind": "pipeline", "depends_on": [], "status": None},
+            {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": None},
         ],
         "latest_run": None,
         "unmapped_task_history": [],
@@ -320,8 +331,8 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     assert graph.status_code == 200
     payload = graph.json()
     assert payload["tasks"] == [
-        {"name": "extract", "depends_on": [], "status": "succeeded"},
-        {"name": "publish", "depends_on": ["extract"], "status": "running"},
+        {"name": "extract", "kind": "pipeline", "depends_on": [], "status": "succeeded"},
+        {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": "running"},
     ]
     assert payload["latest_run"]["id"] == run_id
     assert payload["latest_run"]["status"] == "interrupted"
@@ -351,6 +362,182 @@ def test_dag_graph_route_round_trips_encoded_names(tmp_path: Path, dag_name: str
     assert response.status_code == 200
     assert response.json()["name"] == dag_name
     assert response.json()["tasks"][0]["name"] == "extract"
+
+
+def _task_source_state(
+    tmp_path: Path,
+    *,
+    dag_name: str = "source-details",
+    task_name: str = "python/task%東京",
+) -> tuple[Path, Path, Path]:
+    database_path = tmp_path / "state.db"
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    script_path = tmp_path / "job.py"
+    pipeline_path.write_text(
+        "name: safe-pipeline\nsource:\n  type: csv\n  path: input.csv\n"
+        "destination:\n  type: csv\n  path: output.csv\n",
+        encoding="utf-8",
+    )
+    script_path.write_text("def run(context):\n    return None\n", encoding="utf-8")
+    dag_path.write_text(
+        "\n".join(
+            [
+                f"name: {json.dumps(dag_name, ensure_ascii=False)}",
+                "tasks:",
+                '  - name: "pipeline/task%東京"',
+                "    pipeline: pipeline.yaml",
+                "    retries: 2",
+                "    retry_delay_seconds: 1.5",
+                f"  - name: {json.dumps(task_name, ensure_ascii=False)}",
+                "    script: job.py",
+                '    depends_on: ["pipeline/task%東京"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = StateStore(database_path, process_identity=lambda: _IDENTITY)
+    store.register_dag(dag_name, dag_path, None)
+    run_id = store.start_dag_run(
+        dag_name,
+        ["pipeline/task%東京", task_name],
+        trigger_reason="manual",
+    )
+    store.start_task_run(run_id, task_name)
+    store.close()
+    return database_path, pipeline_path, script_path
+
+
+def test_task_source_details_for_script_and_pipeline(tmp_path: Path) -> None:
+    database_path, pipeline_path, script_path = _task_source_state(tmp_path)
+    client = _client(database_path)
+
+    script = client.get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "python/task%東京"},
+    )
+    assert script.status_code == 200
+    assert script.json() == {
+        "dag_name": "source-details",
+        "task_name": "python/task%東京",
+        "kind": "script",
+        "depends_on": ["pipeline/task%東京"],
+        "latest_status": "running",
+        "retry": {
+            "retries": 0,
+            "retry_delay_seconds": 0.0,
+            "retry_backoff_multiplier": 1.0,
+        },
+        "source_language": "python",
+        "source": script_path.read_bytes().decode("utf-8"),
+        "source_size_bytes": len(script_path.read_bytes()),
+    }
+    assert str(script_path) not in script.text
+
+    pipeline = client.get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "pipeline/task%東京"},
+    )
+    assert pipeline.status_code == 200
+    assert pipeline.json()["kind"] == "pipeline"
+    assert pipeline.json()["source_language"] == "yaml"
+    assert pipeline.json()["source"] == pipeline_path.read_bytes().decode("utf-8")
+    assert pipeline.json()["retry"]["retries"] == 2
+    assert pipeline.json()["latest_status"] == "pending"
+    assert str(pipeline_path) not in pipeline.text
+
+
+def test_task_source_missing_names_and_arbitrary_paths_are_safe(tmp_path: Path) -> None:
+    database_path, _, _ = _task_source_state(tmp_path)
+    client = _client(database_path)
+
+    missing_dag = client.get(
+        "/api/v1/task-details", params={"dag_name": "missing", "task_name": "task"}
+    )
+    missing_task = client.get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "../../private.txt"},
+    )
+
+    assert missing_dag.status_code == 404
+    assert missing_dag.json()["detail"]["code"] == "dag_not_found"
+    assert missing_task.status_code == 404
+    assert missing_task.json() == {
+        "detail": {"code": "task_not_found", "message": "Task not found."}
+    }
+    assert "private.txt" not in missing_task.text
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_status", "expected_code"),
+    [
+        (b"\xff\xfe", 415, "task_source_invalid_encoding"),
+        (b"safe\x00binary", 415, "task_source_binary"),
+        (b"x" * (256 * 1024 + 1), 413, "task_source_too_large"),
+    ],
+    ids=["invalid-utf8", "binary", "oversized"],
+)
+def test_task_source_rejects_invalid_content_safely(
+    tmp_path: Path,
+    content: bytes,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    database_path, _, script_path = _task_source_state(tmp_path)
+    script_path.write_bytes(content)
+
+    response = _client(database_path).get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "python/task%東京"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["code"] == expected_code
+    assert str(script_path) not in response.text
+
+
+def test_task_source_rejects_unreadable_files_without_exception_leakage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _, script_path = _task_source_state(tmp_path)
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path == script_path:
+            raise PermissionError(_SECRET)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    response = _client(database_path).get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "python/task%東京"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "task_source_unavailable"
+    assert _SECRET not in response.text
+    assert str(script_path) not in response.text
+
+
+def test_task_source_is_disabled_for_non_loopback_server_configuration(tmp_path: Path) -> None:
+    database_path, _, _ = _task_source_state(tmp_path)
+    client = TestClient(
+        create_app(
+            store_factory=_store_factory(database_path),
+            task_source_access=False,
+            allowed_hosts=("example.test",),
+        ),
+        base_url="http://example.test",
+    )
+
+    response = client.get(
+        "/api/v1/task-details",
+        params={"dag_name": "source-details", "task_name": "python/task%東京"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "source_access_not_allowed"
 
 
 def test_missing_invalid_and_unknown_dags_return_safe_errors(
@@ -597,6 +784,54 @@ async def test_slow_state_read_does_not_stall_event_loop(tmp_path: Path) -> None
     assert elapsed < 0.5
 
 
+@pytest.mark.anyio
+async def test_task_source_filesystem_read_does_not_stall_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _, _ = _task_source_state(tmp_path)
+    release = threading.Event()
+    from nexolith.api import service as api_service
+
+    original_read = api_service._read_task_source
+
+    def slow_read(path: Path) -> tuple[str, int]:
+        release.wait(timeout=2)
+        return original_read(path)
+
+    monkeypatch.setattr(api_service, "_read_task_source", slow_read)
+    application = create_app(
+        store_factory=_store_factory(database_path),
+        task_source_access=True,
+    )
+    transport = ASGITransport(app=application)
+    timer = threading.Timer(1, release.set)
+    timer.start()
+    try:
+        async with AsyncClient(transport=transport, base_url=_BASE_URL) as client:
+            started_at = time.perf_counter()
+            source_request = asyncio.create_task(
+                client.get(
+                    "/api/v1/task-details",
+                    params={
+                        "dag_name": "source-details",
+                        "task_name": "python/task%東京",
+                    },
+                )
+            )
+            await asyncio.sleep(0.05)
+            metadata = await client.get("/api/v1")
+            elapsed = time.perf_counter() - started_at
+            release.set()
+            source_response = await source_request
+    finally:
+        release.set()
+        timer.cancel()
+
+    assert metadata.status_code == 200
+    assert source_response.status_code == 200
+    assert elapsed < 0.5
+
+
 def test_unavailable_state_returns_typed_safe_error() -> None:
     def unavailable() -> StateStore:
         raise sqlite3.OperationalError(_SECRET)
@@ -694,3 +929,13 @@ def test_api_server_redacts_bind_error() -> None:
 def test_api_server_wildcard_bind_requires_explicit_trusted_host() -> None:
     with pytest.raises(ApiServerStartupError, match="explicit trusted host"):
         run_api_server("0.0.0.0", 8765, runner=lambda _app, **_kwargs: None)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.1.2.3", "::1", "localhost"])
+def test_task_source_access_recognizes_loopback_binds(host: str) -> None:
+    assert _is_loopback_bind(host) is True
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", "nexolith.internal"])
+def test_task_source_access_rejects_non_loopback_binds(host: str) -> None:
+    assert _is_loopback_bind(host) is False

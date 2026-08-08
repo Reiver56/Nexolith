@@ -24,6 +24,7 @@ from nexolith.api.models import (
     DagRegistrationResponse,
     DagRegistrationStatus,
     DagRunActionResponse,
+    DagTaskSourceResponse,
     ErrorResponse,
     RegisterDagRequest,
     RunDetailResponse,
@@ -113,6 +114,7 @@ def create_app(
     scheduler_start_action: SchedulerStartAction = start_scheduler_process,
     scheduler_stop_action: SchedulerStopAction = stop_scheduler_process,
     allowed_hosts: tuple[str, ...] = _DEFAULT_ALLOWED_HOSTS,
+    task_source_access: bool = False,
 ) -> FastAPI:
     """Create an API without opening state or inspecting process ownership."""
     app = FastAPI(
@@ -262,6 +264,38 @@ def create_app(
         dag_name: str = Path(min_length=1, description="Registered DAG name."),
     ) -> DagGraphResponse:
         return await execute_query(lambda service: service.get_dag_graph(dag_name))
+
+    @app.get(
+        "/api/v1/task-details",
+        response_model=DagTaskSourceResponse,
+        responses={
+            **_COMMON_ERRORS,
+            403: {"model": ErrorResponse, "description": "Source access is not allowed."},
+            404: {"model": ErrorResponse, "description": "DAG or task not found."},
+            409: {"model": ErrorResponse, "description": "DAG or task source unavailable."},
+            413: {"model": ErrorResponse, "description": "Task source exceeds 256 KiB."},
+            415: {"model": ErrorResponse, "description": "Task source is not UTF-8 text."},
+        },
+        tags=["dags"],
+        operation_id="get_dag_task_source",
+        summary="Get registered task source details",
+        description=(
+            "Returns a bounded UTF-8 source definition for a task in an already registered DAG. "
+            "Available only when the API server is bound to loopback; no filesystem path is "
+            "accepted or returned."
+        ),
+    )
+    async def get_dag_task_source(
+        dag_name: str = Query(min_length=1, description="Registered DAG name."),
+        task_name: str = Query(min_length=1, description="Task name in the registered DAG."),
+    ) -> DagTaskSourceResponse:
+        if not task_source_access:
+            raise ApiQueryError(
+                ApiErrorCode.SOURCE_ACCESS_NOT_ALLOWED,
+                403,
+                "Task source access requires a loopback-only API server.",
+            )
+        return await execute_query(lambda service: service.get_task_source(dag_name, task_name))
 
     @app.post(
         "/api/v1/dags/registrations",

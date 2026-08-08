@@ -9,6 +9,7 @@ export type PollingResource<Data> =
   | {
       status: "success";
       data: Data;
+      revision: number;
       refreshing: boolean;
       refreshError?: string;
     };
@@ -41,6 +42,7 @@ export function usePollingResource<Data>(
     let timer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | undefined;
     let latestData: Data | undefined;
+    let revision = 0;
 
     const clearTimer = (): void => {
       if (timer !== undefined) {
@@ -66,7 +68,7 @@ export function usePollingResource<Data>(
       inFlight = true;
       controller = new AbortController();
       if (background && latestData !== undefined) {
-        setResource({ status: "success", data: latestData, refreshing: true });
+        setResource({ status: "success", data: latestData, revision, refreshing: true });
       }
       void load(controller.signal)
         .then(
@@ -75,7 +77,8 @@ export function usePollingResource<Data>(
               return;
             }
             latestData = data;
-            setResource({ status: "success", data, refreshing: false });
+            revision += 1;
+            setResource({ status: "success", data, revision, refreshing: false });
           },
           (error: unknown) => {
             if (disposed || isAbortError(error)) {
@@ -86,6 +89,7 @@ export function usePollingResource<Data>(
               setResource({
                 status: "success",
                 data: latestData,
+                revision,
                 refreshing: false,
                 refreshError: failure.message,
               });

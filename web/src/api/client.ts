@@ -7,6 +7,7 @@ import type {
   DagList,
   DagRegistration,
   DagRunAction,
+  DagTaskSource,
   RegisterDagRequest,
   RunDetail,
   RunList,
@@ -24,6 +25,7 @@ export const API_ENDPOINTS = [
   "/api/v1/dags",
   "/api/v1/dags/{dag_name}",
   "/api/v1/dags/{dag_name}/graph",
+  "/api/v1/task-details",
   "/api/v1/runs",
   "/api/v1/runs/{run_id}",
   "/api/v1/scheduler",
@@ -177,6 +179,7 @@ function isDagGraph(value: unknown): value is DagGraph {
     const candidate = task as Record<string, unknown>;
     return (
       typeof candidate.name === "string" &&
+      (candidate.kind === "pipeline" || candidate.kind === "script") &&
       isStringArray(candidate.depends_on) &&
       (candidate.status === null ||
         (typeof candidate.status === "string" && TASK_STATUSES.has(candidate.status)))
@@ -229,6 +232,15 @@ export async function getDagGraph(
     throw new ApiClientError("Nexolith returned malformed graph data.", 502);
   }
   return payload;
+}
+
+export function getDagTaskSource(
+  dagName: string,
+  taskName: string,
+  signal?: AbortSignal,
+): Promise<DagTaskSource> {
+  const parameters = new URLSearchParams({ dag_name: dagName, task_name: taskName });
+  return getJson<DagTaskSource>(`${API_BASE}/task-details?${parameters.toString()}`, signal);
 }
 
 export function listRuns(limit = 50, signal?: AbortSignal): Promise<RunList> {

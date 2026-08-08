@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -9,6 +11,12 @@ function renderAt(path: string): ReturnType<typeof render> {
   window.history.replaceState(null, "", path);
   return render(<App />);
 }
+
+test("declares the repository-owned Nexolith favicon", () => {
+  const html = readFileSync("index.html", "utf-8");
+  expect(html).toContain('rel="icon"');
+  expect(html).toContain('href="/nexo-icon.png"');
+});
 
 test("renders the application shell and keyboard-accessible navigation", async () => {
   installApiMock();

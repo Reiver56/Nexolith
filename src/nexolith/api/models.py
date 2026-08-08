@@ -18,9 +18,15 @@ class ApiModel(BaseModel):
 
 class ApiErrorCode(StrEnum):
     DAG_NOT_FOUND = "dag_not_found"
+    TASK_NOT_FOUND = "task_not_found"
     RUN_NOT_FOUND = "run_not_found"
     DAG_SOURCE_MISSING = "dag_source_missing"
     DAG_CONFIGURATION_INVALID = "dag_configuration_invalid"
+    TASK_SOURCE_UNAVAILABLE = "task_source_unavailable"
+    TASK_SOURCE_TOO_LARGE = "task_source_too_large"
+    TASK_SOURCE_BINARY = "task_source_binary"
+    TASK_SOURCE_INVALID_ENCODING = "task_source_invalid_encoding"
+    SOURCE_ACCESS_NOT_ALLOWED = "source_access_not_allowed"
     ORIGIN_NOT_ALLOWED = "origin_not_allowed"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
     METHOD_NOT_ALLOWED = "method_not_allowed"
@@ -131,8 +137,27 @@ class DagDetailResponse(DagSummaryResponse):
 
 class DagGraphTaskResponse(ApiModel):
     name: str
+    kind: Literal["pipeline", "script"]
     depends_on: list[str]
     status: TaskRunStatus | None
+
+
+class TaskRetryResponse(ApiModel):
+    retries: int = Field(ge=0)
+    retry_delay_seconds: float = Field(ge=0)
+    retry_backoff_multiplier: float = Field(ge=1)
+
+
+class DagTaskSourceResponse(ApiModel):
+    dag_name: str
+    task_name: str
+    kind: Literal["pipeline", "script"]
+    depends_on: list[str]
+    latest_status: TaskRunStatus | None
+    retry: TaskRetryResponse
+    source_language: Literal["yaml", "python"]
+    source: str
+    source_size_bytes: int = Field(ge=0)
 
 
 class DagGraphHistoricalTaskResponse(ApiModel):

@@ -15,18 +15,22 @@ function isAbortError(error: unknown): boolean {
 export function useApiResource<Data>(
   load: (signal: AbortSignal) => Promise<Data>,
   fallbackMessage: string,
+  refreshToken = 0,
 ): { resource: AsyncResource<Data>; reload: () => void } {
   const [revision, setRevision] = useState(0);
   const [resource, setResource] = useState<AsyncResource<Data>>({ status: "loading" });
 
   useEffect(() => {
     const controller = new AbortController();
+    let active = true;
     void load(controller.signal).then(
       (data) => {
-        setResource({ status: "success", data });
+        if (active) {
+          setResource({ status: "success", data });
+        }
       },
       (error: unknown) => {
-        if (isAbortError(error)) {
+        if (!active || isAbortError(error)) {
           return;
         }
         if (error instanceof ApiClientError) {
@@ -41,9 +45,10 @@ export function useApiResource<Data>(
       },
     );
     return () => {
+      active = false;
       controller.abort();
     };
-  }, [fallbackMessage, load, revision]);
+  }, [fallbackMessage, load, refreshToken, revision]);
 
   const reload = useCallback(() => {
     setResource({ status: "loading" });

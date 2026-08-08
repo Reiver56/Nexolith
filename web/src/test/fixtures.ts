@@ -53,9 +53,9 @@ export const dagGraph: DagGraph = {
   name: "billing-close",
   trigger: { on_success_of: ["warehouse-refresh", "inventory sync"] },
   tasks: [
-    { name: "extract", depends_on: [], status: "succeeded" },
-    { name: "enrich", depends_on: ["extract"], status: "running" },
-    { name: "publish", depends_on: ["extract", "enrich"], status: "blocked" },
+    { name: "extract", kind: "pipeline", depends_on: [], status: "succeeded" },
+    { name: "enrich", kind: "script", depends_on: ["extract"], status: "running" },
+    { name: "publish", kind: "pipeline", depends_on: ["extract", "enrich"], status: "blocked" },
   ],
   latest_run: {
     id: 12,

@@ -7,7 +7,7 @@ stable views:
 |---|---|
 | `/` | Redirect to `/dags` |
 | `/dags` | Registered DAG state, schedule, priority, severity, and trigger summary |
-| `/dags/:dagName/graph` | Interactive task dependencies and latest persisted task status |
+| `/dags/:dagName/graph` | Interactive dependencies, statuses, and on-demand source details |
 | `/runs` | Bounded newest-first run history |
 | `/runs/:runId` | Run, task, and retry-attempt history |
 | `/scheduler` | Live scheduler status with explicit start and stop controls |
@@ -41,6 +41,18 @@ dependencies always come from the current DAG definition; statuses come only fro
 persisted run. Historical tasks no longer present in the definition are disclosed below the graph,
 not drawn as current nodes. Cross-DAG `on_success_of` relationships remain distinct DAG-level
 nodes and dashed edges. Equivalent inputs produce the same layered layout.
+
+Script and pipeline nodes use repository-owned, colour-independent SVG symbols with accessible
+labels. Pipelines remain neutrally labelled because a pipeline definition may combine CSV, SQL,
+transformations, and Python jobs. Selecting a task opens a read-only desktop side panel or mobile
+sheet. The panel fetches only that registered task through `GET /api/v1/task-details`, aborts and
+ignores stale selections, restores focus when closed, and renders source as escaped plain text in
+an internally scrolling code region. Escape closes it. Source is discarded when the panel closes
+and never joins graph polling data.
+
+The API enables source details only on a loopback bind. Returned source is not secret-redacted and
+must be treated as trusted-local content. The UI never requests a path, displays backend path
+metadata, executes source-like HTML, edits source, or adds run/save controls to the panel.
 
 Polling starts only after the preceding request settles, pauses and aborts while the document is
 hidden, and preserves the last good graph if a background refresh fails. Automatic refresh never
@@ -115,3 +127,6 @@ The production output is temporary verification material under `web/dist/`; it i
 packaged in the Python wheel, published, or deployed by this story. The source distribution keeps
 the versioned `web/` sources so a source checkout remains reproducible, while excluding
 `node_modules`, build output, coverage, caches, and temporary OpenAPI exports.
+The existing `assets/nexo-icon.png` bytes are copied into Vite's public directory and emitted as
+the application favicon; no repository asset directory is exposed wholesale. The production
+build verifies the icon is emitted as a standalone public asset.
