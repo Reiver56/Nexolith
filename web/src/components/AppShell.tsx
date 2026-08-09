@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import type { ReactNode } from "react";
 
+import nexoMonitorIcon from "../assets/nexo-monitor-icon.png";
 import { getApiInfo, getSchedulerStatus } from "../api/client";
 import { BACKEND_STATE_CHANGED_EVENT } from "../api/events";
 import { useApiResource } from "../hooks/useApiResource";
@@ -30,10 +31,14 @@ async function loadSystemSnapshot(signal: AbortSignal): Promise<SystemSnapshot> 
 
 function ProductMark() {
   return (
-    <svg className="product-mark" aria-hidden="true" viewBox="0 0 32 32">
-      <path d="M16 3.5 27 9.8v12.4L16 28.5 5 22.2V9.8L16 3.5Z" />
-      <path d="m5.5 10 10.5 6 10.5-6M16 16v12" />
-    </svg>
+    <img
+      className="product-mark"
+      src={nexoMonitorIcon}
+      alt=""
+      aria-hidden="true"
+      width="32"
+      height="32"
+    />
   );
 }
 

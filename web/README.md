@@ -129,4 +129,6 @@ the versioned `web/` sources so a source checkout remains reproducible, while ex
 `node_modules`, build output, coverage, caches, and temporary OpenAPI exports.
 The existing `assets/nexo-icon.png` bytes are copied into Vite's public directory and emitted as
 the application favicon; no repository asset directory is exposed wholesale. The production
-build verifies the icon is emitted as a standalone public asset.
+build verifies the icon is emitted as a standalone public asset. Navigation uses a separate
+96-pixel, transparent, optimized copy derived from the same artwork; Vite fingerprints that asset
+without changing the existing favicon behavior.

@@ -18,6 +18,24 @@ test("declares the repository-owned Nexolith favicon", () => {
   expect(html).toContain('href="/nexo-icon.png"');
 });
 
+test("uses decorative Nexolith artwork for the product mark", () => {
+  installApiMock();
+  renderAt("/dags");
+
+  const productLink = screen.getByRole("link", { name: "Nexolith monitoring home" });
+  expect(within(productLink).getByText("Nexolith")).toBeInTheDocument();
+  expect(within(productLink).getByText("Monitor")).toBeInTheDocument();
+
+  const productMark = productLink.querySelector<HTMLImageElement>("img.product-mark");
+  expect(productMark).not.toBeNull();
+  expect(productMark).toHaveAttribute("alt", "");
+  expect(productMark).toHaveAttribute("aria-hidden", "true");
+  expect(productMark).toHaveAttribute("width", "32");
+  expect(productMark).toHaveAttribute("height", "32");
+  expect(productMark?.src).toContain("nexo-monitor-icon.png");
+  expect(productLink.querySelector("svg.product-mark")).not.toBeInTheDocument();
+});
+
 test("renders the application shell and keyboard-accessible navigation", async () => {
   installApiMock();
   const user = userEvent.setup();

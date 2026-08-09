@@ -122,12 +122,13 @@ h4 {
 }
 
 .product-mark {
+  display: block;
   width: 2rem;
   height: 2rem;
-  fill: color-mix(in srgb, var(--accent-500) 10%, transparent);
-  stroke: var(--accent-500);
-  stroke-width: 1.7;
-  stroke-linejoin: round;
+  flex: 0 0 auto;
+  object-fit: contain;
+  filter: drop-shadow(0 0 0.06rem rgba(23, 25, 30, 0.48))
+    drop-shadow(0 0.18rem 0.3rem rgba(23, 25, 30, 0.1));
 }
 
 .product span {
