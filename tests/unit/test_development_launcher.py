@@ -9,6 +9,7 @@ from pathlib import Path
 
 import psutil
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from nexolith.cli.development import (
@@ -116,6 +117,7 @@ def test_source_checkout_discovery_reports_missing_frontend(tmp_path: Path) -> N
 
 def test_environment_validation_uses_windows_npm_and_declared_versions(tmp_path: Path) -> None:
     _module, checkout = make_checkout(tmp_path)
+    (checkout.web / "node_modules" / ".bin" / "vite.cmd").write_text("", encoding="utf-8")
     requested: list[str] = []
 
     def find(name: str) -> str:
@@ -513,8 +515,9 @@ def test_cli_dev_exposes_documented_options() -> None:
     result = CliRunner().invoke(cli_app.app, ["dev", "--help"])
 
     assert result.exit_code == 0
+    help_text = unstyle(result.stdout)
     for option in ("--api-host", "--api-port", "--web-host", "--web-port", "--open"):
-        assert option in result.stdout
+        assert option in help_text
 
 
 def test_real_owned_process_tree_is_terminated(tmp_path: Path) -> None:
