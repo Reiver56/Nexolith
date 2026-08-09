@@ -1,10 +1,11 @@
 import importlib
+import ipaddress
 import os
 import socket
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import psutil
@@ -16,6 +17,7 @@ from nexolith.cli.development import (
     DevelopmentLauncherError,
     DevelopmentOptions,
     SourceCheckout,
+    _bind_targets_overlap,
     _default_probe,
     _port_is_available,
     _terminate_owned_process,
@@ -459,14 +461,132 @@ def test_real_port_check_detects_listener_and_allows_reuse_after_close() -> None
     assert _port_is_available("127.0.0.1", port)
 
 
-def test_launcher_rejects_non_loopback_and_duplicate_ports(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "224.0.0.1", "ff02::1"])
+def test_launcher_rejects_unspecified_and_multicast_hosts(tmp_path: Path, host: str) -> None:
     module, _checkout = make_checkout(tmp_path)
     with pytest.raises(DevelopmentLauncherError, match="specific unicast"):
-        run_development_servers(DevelopmentOptions(api_host="0.0.0.0"), module_file=module)
+        run_development_servers(DevelopmentOptions(api_host=host), module_file=module)
+
+
+def test_launcher_rejects_identical_bind_targets(tmp_path: Path) -> None:
+    module, _checkout = make_checkout(tmp_path)
     with pytest.raises(DevelopmentLauncherError, match="same address and port"):
         run_development_servers(
             DevelopmentOptions(api_port=8765, web_port=8765), module_file=module
         )
+
+
+@pytest.mark.parametrize(
+    ("first_host", "second_host"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("::1", "0:0:0:0:0:0:0:1"),
+        ("127.0.0.1", "::ffff:127.0.0.1"),
+    ],
+)
+def test_bind_targets_overlap_for_identical_or_canonical_equivalent_addresses(
+    first_host: str, second_host: str
+) -> None:
+    assert _bind_targets_overlap(first_host, 8765, second_host, 8765)
+
+
+@pytest.mark.parametrize("resolved_host", ["127.0.0.1", "::1"])
+def test_bind_targets_overlap_for_localhost_alias(resolved_host: str) -> None:
+    localhost_addresses = frozenset(
+        (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
+    )
+
+    assert _bind_targets_overlap(
+        "localhost",
+        8765,
+        resolved_host,
+        8765,
+        localhost_resolver=lambda: localhost_addresses,
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_host", "second_host"),
+    [("127.0.0.1", "127.0.0.2"), ("127.0.0.1", "::1")],
+)
+def test_distinct_specific_bind_targets_can_share_a_port(first_host: str, second_host: str) -> None:
+    assert not _bind_targets_overlap(first_host, 8765, second_host, 8765)
+
+
+def test_different_ports_do_not_resolve_or_overlap() -> None:
+    def unexpected_resolver() -> frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+        raise AssertionError("resolver must not be called")
+
+    assert not _bind_targets_overlap(
+        "localhost",
+        8765,
+        "127.0.0.1",
+        5173,
+        localhost_resolver=unexpected_resolver,
+    )
+
+
+@pytest.mark.parametrize(
+    "resolver",
+    [
+        lambda: frozenset(),
+        lambda: frozenset((ipaddress.ip_address("192.0.2.1"),)),
+        lambda: (_ for _ in ()).throw(OSError("sentinel-private-detail")),
+    ],
+)
+def test_localhost_resolution_failure_has_safe_diagnostic(
+    resolver: Callable[[], frozenset[ipaddress.IPv4Address | ipaddress.IPv6Address]],
+) -> None:
+    with pytest.raises(DevelopmentLauncherError, match="localhost") as caught:
+        _bind_targets_overlap(
+            "localhost",
+            8765,
+            "127.0.0.1",
+            8765,
+            localhost_resolver=resolver,
+        )
+
+    assert "sentinel-private-detail" not in str(caught.value)
+
+
+def test_launcher_allows_distinct_specific_addresses_to_share_a_port(tmp_path: Path) -> None:
+    module, _checkout = make_checkout(tmp_path)
+    launches = iter((FakeProcess(1001), FakeProcess(1002)))
+    checked_targets: list[tuple[str, int]] = []
+
+    result = run_development_servers(
+        DevelopmentOptions(
+            api_host="127.0.0.1",
+            api_port=8765,
+            web_host="127.0.0.2",
+            web_port=8765,
+        ),
+        module_file=module,
+        platform=os.sys.platform,
+        executable_finder=lambda name: name,
+        version_reader=lambda command, _cwd: "24.11.0" if command[0].endswith("node") else "11.0.0",
+        process_factory=lambda _command, _cwd, _environment: next(launches),
+        port_available=lambda host, port: checked_targets.append((host, port)) or True,
+        probe=lambda _url: True,
+        sleep=lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
+        reporter=lambda _message, _error: None,
+        process_terminator=lambda _process, _descendants: None,
+    )
+
+    assert result == 130
+    assert checked_targets == [("127.0.0.1", 8765), ("127.0.0.2", 8765)]
+
+
+def test_real_second_ipv4_loopback_can_share_a_port_when_supported() -> None:
+    with socket.socket() as first, socket.socket() as second:
+        first.bind(("127.0.0.1", 0))
+        port = int(first.getsockname()[1])
+        try:
+            second.bind(("127.0.0.2", port))
+        except OSError as exc:
+            pytest.skip(f"second IPv4 loopback address unavailable: {exc}")
+
+        assert not _bind_targets_overlap("127.0.0.1", port, "127.0.0.2", port)
 
 
 def test_explicit_non_loopback_host_warns_and_is_used(tmp_path: Path) -> None:
@@ -508,6 +628,28 @@ def test_cli_dev_expected_failure_has_no_traceback(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 1
     assert result.stdout == ""
     assert "Development startup failed: safe message" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_dev_bind_collision_has_no_traceback() -> None:
+    result = CliRunner().invoke(
+        cli_app.app,
+        [
+            "dev",
+            "--api-host",
+            "127.0.0.1",
+            "--api-port",
+            "8765",
+            "--web-host",
+            "127.0.0.1",
+            "--web-port",
+            "8765",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "cannot use the same address and port" in result.stderr
     assert "Traceback" not in result.stderr
 
 

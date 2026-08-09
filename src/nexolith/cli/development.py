@@ -62,6 +62,8 @@ UrlProbe = Callable[[str], bool]
 BrowserOpener = Callable[[str], bool]
 Reporter = Callable[[str, bool], None]
 ProcessTerminator = Callable[[ChildProcess, bool], None]
+BindAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
+LocalhostResolver = Callable[[], frozenset[BindAddress]]
 
 _VERSION_PATTERN = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$")
 _COMPARATOR_PATTERN = re.compile(r"^(>=|<=|>|<|=)?(\d+(?:\.\d+){0,2})$")
@@ -188,16 +190,76 @@ def _safe_executable_finder(name: str) -> str | None:
     return None
 
 
+def _canonical_ip_address(host: str) -> BindAddress:
+    address = ipaddress.ip_address(host)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    return address
+
+
 def _validate_host(host: str, label: str) -> bool:
     if host.casefold() == "localhost":
         return True
     try:
-        address = ipaddress.ip_address(host)
+        address = _canonical_ip_address(host)
     except ValueError as exc:
         raise DevelopmentLauncherError(f"{label} host must be an IP address or localhost.") from exc
     if address.is_unspecified or address.is_multicast:
         raise DevelopmentLauncherError(f"{label} host must be a specific unicast address.")
     return address.is_loopback
+
+
+def _resolve_localhost_addresses() -> frozenset[BindAddress]:
+    try:
+        records = socket.getaddrinfo("localhost", 0, type=socket.SOCK_STREAM)
+        addresses = frozenset(_canonical_ip_address(str(record[4][0])) for record in records)
+    except (OSError, ValueError) as exc:
+        raise DevelopmentLauncherError(
+            "localhost bind addresses could not be resolved safely."
+        ) from exc
+    if not addresses or any(not address.is_loopback for address in addresses):
+        raise DevelopmentLauncherError(
+            "localhost did not resolve exclusively to loopback addresses."
+        )
+    return addresses
+
+
+def _effective_bind_addresses(
+    host: str, localhost_resolver: LocalhostResolver
+) -> frozenset[BindAddress]:
+    if host.casefold() != "localhost":
+        return frozenset((_canonical_ip_address(host),))
+    try:
+        addresses = frozenset(
+            _canonical_ip_address(str(address)) for address in localhost_resolver()
+        )
+    except (OSError, ValueError) as exc:
+        raise DevelopmentLauncherError(
+            "localhost bind addresses could not be resolved safely."
+        ) from exc
+    if not addresses or any(not address.is_loopback for address in addresses):
+        raise DevelopmentLauncherError(
+            "localhost did not resolve exclusively to loopback addresses."
+        )
+    return addresses
+
+
+def _bind_targets_overlap(
+    first_host: str,
+    first_port: int,
+    second_host: str,
+    second_port: int,
+    *,
+    localhost_resolver: LocalhostResolver = _resolve_localhost_addresses,
+) -> bool:
+    """Return whether two validated targets can claim the same effective socket address."""
+    if first_port != second_port:
+        return False
+    if first_host.casefold() == second_host.casefold():
+        return True
+    first_addresses = _effective_bind_addresses(first_host, localhost_resolver)
+    second_addresses = _effective_bind_addresses(second_host, localhost_resolver)
+    return not first_addresses.isdisjoint(second_addresses)
 
 
 def _port_is_available(host: str, port: int) -> bool:
@@ -379,6 +441,7 @@ def run_development_servers(
     sleep: Callable[[float], None] = time.sleep,
     reporter: Reporter = _report,
     process_terminator: ProcessTerminator = _terminate_owned_process,
+    localhost_resolver: LocalhostResolver = _resolve_localhost_addresses,
 ) -> int:
     """Start, verify, and supervise the two source-checkout development servers."""
     checkout = find_source_checkout(module_file)
@@ -389,7 +452,13 @@ def run_development_servers(
             "Warning: a non-loopback development bind exposes an unauthenticated local service.",
             True,
         )
-    if options.api_port == options.web_port:
+    if _bind_targets_overlap(
+        options.api_host,
+        options.api_port,
+        options.web_host,
+        options.web_port,
+        localhost_resolver=localhost_resolver,
+    ):
         raise DevelopmentLauncherError("API and web servers cannot use the same address and port.")
     for label, host, port in (
         ("API", options.api_host, options.api_port),
