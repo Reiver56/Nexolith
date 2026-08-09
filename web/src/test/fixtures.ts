@@ -52,6 +52,7 @@ export const dags: DagList = [
 export const dagGraph: DagGraph = {
   name: "billing-close",
   enabled: true,
+  schedule: "5m",
   trigger: { on_success_of: ["warehouse-refresh", "inventory sync"] },
   tasks: [
     { name: "extract", kind: "pipeline", depends_on: [], status: "succeeded" },

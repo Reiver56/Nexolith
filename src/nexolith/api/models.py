@@ -185,6 +185,7 @@ class DagGraphRunResponse(ApiModel):
 class DagGraphResponse(ApiModel):
     name: str
     enabled: bool
+    schedule: str | None
     trigger: DagTriggerResponse | None
     tasks: list[DagGraphTaskResponse]
     latest_run: DagGraphRunResponse | None

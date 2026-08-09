@@ -312,6 +312,7 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     assert no_history.json() == {
         "name": "orders",
         "enabled": True,
+        "schedule": "1h",
         "trigger": {"on_success_of": ["ingest"]},
         "tasks": [
             {"name": "extract", "kind": "pipeline", "depends_on": [], "status": None},
@@ -338,6 +339,7 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     assert graph.status_code == 200
     payload = graph.json()
     assert payload["enabled"] is True
+    assert payload["schedule"] == "1h"
     assert payload["tasks"] == [
         {"name": "extract", "kind": "pipeline", "depends_on": [], "status": "succeeded"},
         {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": "running"},

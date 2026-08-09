@@ -103,6 +103,7 @@ class ApiQueryService:
         return DagGraphResponse(
             name=record.name,
             enabled=record.enabled,
+            schedule=record.schedule,
             trigger=trigger,
             tasks=[
                 DagGraphTaskResponse(

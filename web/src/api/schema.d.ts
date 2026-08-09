@@ -363,6 +363,8 @@ export interface components {
             latest_run: components["schemas"]["DagGraphRunResponse"] | null;
             /** Name */
             name: string;
+            /** Schedule */
+            schedule: string | null;
             /** Tasks */
             tasks: components["schemas"]["DagGraphTaskResponse"][];
             trigger: components["schemas"]["DagTriggerResponse"] | null;

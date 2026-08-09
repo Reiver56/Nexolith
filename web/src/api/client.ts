@@ -166,7 +166,12 @@ function isDagGraph(value: unknown): value is DagGraph {
     return false;
   }
   const graph = value as Record<string, unknown>;
-  if (typeof graph.name !== "string" || !Array.isArray(graph.tasks)) {
+  if (
+    typeof graph.name !== "string" ||
+    typeof graph.enabled !== "boolean" ||
+    (graph.schedule !== null && typeof graph.schedule !== "string") ||
+    !Array.isArray(graph.tasks)
+  ) {
     return false;
   }
   if (

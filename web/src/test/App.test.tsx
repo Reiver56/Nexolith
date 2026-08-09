@@ -110,6 +110,8 @@ test.each(["percent%name", "slash/name", "space name", "caffè-東京", "query?#
       [`/api/v1/dags/${encodeURIComponent(name)}/graph`]: {
         body: {
           name,
+          enabled: true,
+          schedule: null,
           trigger: null,
           tasks: [],
           latest_run: null,

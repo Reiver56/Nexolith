@@ -121,6 +121,30 @@ test("shows persisted live run progress and schedule state", async () => {
   expect(screen.getByRole("button", { name: "Resume schedule" })).toBeInTheDocument();
 });
 
+test("labels event-driven DAGs honestly and omits interval schedule controls", async () => {
+  installApiMock({
+    "/api/v1/dags/event-only/graph": {
+      body: { ...dagGraph, name: "event-only", schedule: null },
+    },
+  });
+  renderAt("event-only");
+
+  expect(await screen.findByText("Event-driven")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /^(Pause|Resume) schedule$/i }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Trigger run" })).toBeInTheDocument();
+});
+
+test("rejects graph data with missing schedule state", async () => {
+  const withoutSchedule: Record<string, unknown> = { ...dagGraph };
+  delete withoutSchedule.schedule;
+  installApiMock({ "/api/v1/dags/malformed/graph": { body: withoutSchedule } });
+  renderAt("malformed");
+
+  expect(await screen.findByText("Nexolith returned malformed graph data.")).toBeInTheDocument();
+});
+
 test("shows truthful task icons without labelling ambiguous pipelines as SQL", async () => {
   installApiMock();
   renderAt();

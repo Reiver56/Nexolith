@@ -64,10 +64,14 @@ function RunContext({ graph }: { graph: DagGraph }) {
     <section className="graph-run-context" aria-label="Live DAG status">
       <div>
         <span className="graph-context__label">Schedule</span>
-        <StatusBadge
-          value={graph.enabled ? "running-enabled" : "disabled"}
-          label={graph.enabled ? "Scheduled" : "Paused"}
-        />
+        {graph.schedule === null ? (
+          <strong>Event-driven</strong>
+        ) : (
+          <StatusBadge
+            value={graph.enabled ? "running-enabled" : "disabled"}
+            label={graph.enabled ? "Scheduled" : "Paused"}
+          />
+        )}
       </div>
       {run === null ? (
         <div>
@@ -222,7 +226,9 @@ function LoadedGraph({
         action={
           <div className="button-group">
             <RefreshButton onClick={refresh} />
-            <ScheduleControl dagName={graph.name} enabled={graph.enabled} onChanged={refresh} />
+            {graph.schedule === null ? null : (
+              <ScheduleControl dagName={graph.name} enabled={graph.enabled} onChanged={refresh} />
+            )}
             <TriggerDagControl dagName={graph.name} />
           </div>
         }
