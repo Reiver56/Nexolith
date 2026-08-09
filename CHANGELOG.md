@@ -38,6 +38,12 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   submission, never retry automatically, refresh authoritative state after success, preserve
   encoded DAG names, and keep protected backend details out of rendered feedback.
 
+#### Fixed
+
+- Allowed the API and frontend development servers to share a numeric port when they bind to
+  genuinely distinct specific addresses, while still rejecting equivalent and `localhost`-aliased
+  bind targets.
+
 ### v0.3.1 — CLI Aesthetics
 
 #### Added
