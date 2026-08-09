@@ -37,16 +37,14 @@ export function ConfirmationDialog({
     if (!open) {
       return;
     }
+    document.body.classList.add("dialog-open");
     openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     cancelRef.current?.focus();
     return () => {
+      document.body.classList.remove("dialog-open");
       openerRef.current?.focus();
     };
   }, [open]);
-
-  if (!open) {
-    return null;
-  }
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
     if (event.key === "Escape" && !busy) {
@@ -79,7 +77,12 @@ export function ConfirmationDialog({
   }
 
   return (
-    <div className="dialog-backdrop">
+    <div
+      className="dialog-backdrop"
+      data-state={open ? "open" : "closed"}
+      aria-hidden={open ? undefined : true}
+      inert={open ? undefined : true}
+    >
       <div
         ref={dialogRef}
         className="confirmation-dialog"
@@ -115,6 +118,8 @@ export function ConfirmationDialog({
             className="button button--danger"
             type="button"
             disabled={busy}
+            aria-busy={busy}
+            data-pending={busy || undefined}
             onClick={onConfirm}
           >
             {busy ? "Working…" : confirmLabel}

@@ -108,6 +108,9 @@ export function AppShell({ children, pathname }: { children: ReactNode; pathname
             <button
               className="icon-button"
               type="button"
+              disabled={resource.status === "loading"}
+              aria-busy={resource.status === "loading"}
+              data-pending={resource.status === "loading" || undefined}
               onClick={reload}
               aria-label="Refresh API and scheduler status"
               title="Refresh status"

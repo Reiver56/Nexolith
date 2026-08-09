@@ -30,9 +30,13 @@ test("registers a DAG only after confirmation and refreshes the registry", async
   const opener = screen.getByRole("button", { name: "Register DAG" });
   await user.click(opener);
   const cancelled = screen.getByRole("alertdialog", { name: "Register this DAG?" });
+  expect(document.body).toHaveClass("dialog-open");
   expect(within(cancelled).getByRole("button", { name: "Cancel" })).toHaveFocus();
   await user.keyboard("{Escape}");
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(document.body).not.toHaveClass("dialog-open");
+  });
   expect(opener).toHaveFocus();
   expect(requestCount(requests, "POST", "/api/v1/dags/registrations")).toBe(0);
 
@@ -206,8 +210,11 @@ test("prevents duplicate submissions and traps keyboard focus", async () => {
   expect(input).toHaveFocus();
   await user.type(input, "orders.yaml");
   await user.click(confirm);
-  expect(within(dialog).getByRole("button", { name: "Working…" })).toBeDisabled();
-  await user.click(within(dialog).getByRole("button", { name: "Working…" }));
+  const pendingButton = within(dialog).getByRole("button", { name: "Working…" });
+  expect(pendingButton).toBeDisabled();
+  expect(pendingButton).toHaveAttribute("aria-busy", "true");
+  expect(pendingButton).toHaveAttribute("data-pending", "true");
+  await user.click(pendingButton);
   expect(submissions).toBe(1);
   expect(requestCount(requests, "POST", "/api/v1/dags/registrations")).toBe(1);
 

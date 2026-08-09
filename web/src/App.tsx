@@ -7,6 +7,17 @@ import { RunDetailRoute } from "./features/runs/RunDetailPage";
 import { RunListPage } from "./features/runs/RunListPage";
 import { SchedulerPage } from "./features/scheduler/SchedulerPage";
 import { AppLink, navigate, useRoute } from "./router";
+import type { Route } from "./router";
+
+function routeMotionKey(route: Route): string {
+  if (route.page === "dag-graph") {
+    return `${route.page}:${route.dagName}`;
+  }
+  if (route.page === "run") {
+    return `${route.page}:${route.runId}`;
+  }
+  return route.page;
+}
 
 function UnknownRoute() {
   return (
@@ -32,14 +43,14 @@ export function App() {
 
   return (
     <AppShell pathname={pathname}>
-      {route.page === "dags" ? <DagListPage /> : null}
-      {route.page === "dag-graph" ? (
-        <DagGraphPage key={route.dagName} dagName={route.dagName} />
-      ) : null}
-      {route.page === "runs" ? <RunListPage /> : null}
-      {route.page === "run" ? <RunDetailRoute key={route.runId} rawRunId={route.runId} /> : null}
-      {route.page === "scheduler" ? <SchedulerPage /> : null}
-      {route.page === "not-found" ? <UnknownRoute /> : null}
+      <div className="route-view" data-route={route.page} key={routeMotionKey(route)}>
+        {route.page === "dags" ? <DagListPage /> : null}
+        {route.page === "dag-graph" ? <DagGraphPage dagName={route.dagName} /> : null}
+        {route.page === "runs" ? <RunListPage /> : null}
+        {route.page === "run" ? <RunDetailRoute rawRunId={route.runId} /> : null}
+        {route.page === "scheduler" ? <SchedulerPage /> : null}
+        {route.page === "not-found" ? <UnknownRoute /> : null}
+      </div>
     </AppShell>
   );
 }

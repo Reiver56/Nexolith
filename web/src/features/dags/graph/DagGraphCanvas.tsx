@@ -23,6 +23,7 @@ import type {
   ExternalDagFlowNode,
   TaskFlowNode,
 } from "./layout";
+import { prefersReducedMotion } from "../../../utils/motion";
 import { TaskKindIcon } from "./TaskKindIcon";
 import { taskKindLabel } from "./taskKinds";
 
@@ -149,7 +150,7 @@ function ControlledGraph({
     setNodes(model.nodes);
     setEdges(model.edges);
     window.requestAnimationFrame(() => {
-      void fitView({ duration: 220, padding: 0.18 });
+      void fitView({ duration: prefersReducedMotion() ? 0 : 180, padding: 0.18 });
     });
   };
 
@@ -177,6 +178,7 @@ function ControlledGraph({
         zoomOnDoubleClick
         zoomOnScroll={false}
         onlyRenderVisibleElements
+        attributionPosition="bottom-left"
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1.15} />
         <Controls showInteractive={false} position="bottom-right" />

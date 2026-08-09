@@ -35,7 +35,7 @@ export function DagListPage() {
         description="Registered workflows, their scheduling posture, and operational importance."
         action={
           <div className="button-group">
-            <RefreshButton onClick={reload} />
+            <RefreshButton onClick={reload} busy={resource.status === "loading"} />
             <RegisterDagControl onRegistered={reload} />
           </div>
         }

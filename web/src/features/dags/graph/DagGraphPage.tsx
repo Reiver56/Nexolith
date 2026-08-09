@@ -196,8 +196,10 @@ function LoadedGraph({
   graph,
   graphRevision,
   selectedTaskName,
+  panelTaskName,
   onTaskSelect,
   onTaskClose,
+  onTaskExited,
   refresh,
   refreshing,
   refreshError,
@@ -205,8 +207,10 @@ function LoadedGraph({
   graph: DagGraph;
   graphRevision: number;
   selectedTaskName: string | null;
+  panelTaskName: string | null;
   onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
   onTaskClose: () => void;
+  onTaskExited: () => void;
   refresh: () => void;
   refreshing: boolean;
   refreshError?: string;
@@ -225,7 +229,7 @@ function LoadedGraph({
         description="Current task structure with statuses from the latest persisted run. Pan, zoom, or use the text summary below."
         action={
           <div className="button-group">
-            <RefreshButton onClick={refresh} />
+            <RefreshButton onClick={refresh} busy={refreshing} />
             {graph.schedule === null ? null : (
               <ScheduleControl dagName={graph.name} enabled={graph.enabled} onChanged={refresh} />
             )}
@@ -233,7 +237,11 @@ function LoadedGraph({
           </div>
         }
       />
-      <p className="graph-refresh-state" aria-live="polite">
+      <p
+        className="graph-refresh-state"
+        data-state={refreshing ? "refreshing" : refreshError === undefined ? "idle" : "stale"}
+        aria-live="polite"
+      >
         {refreshing
           ? "Refreshing live DAG data…"
           : refreshError ??
@@ -249,19 +257,20 @@ function LoadedGraph({
       ) : (
         <>
           <GraphLegend />
-          <div className="graph-workspace" data-panel-open={selectedTaskName !== null || undefined}>
+          <div className="graph-workspace" data-panel-open={panelTaskName !== null || undefined}>
             <DagGraphCanvas
               model={built.model}
               selectedTaskName={selectedTaskName}
               onTaskSelect={onTaskSelect}
             />
-            {selectedTaskName === null ? null : (
+            {panelTaskName === null ? null : (
               <TaskDetailsPanel
-                key={selectedTaskName}
                 dagName={graph.name}
-                taskName={selectedTaskName}
+                taskName={panelTaskName}
                 refreshToken={graphRevision}
+                open={selectedTaskName !== null}
                 onClose={onTaskClose}
+                onExited={onTaskExited}
               />
             )}
           </div>
@@ -279,9 +288,11 @@ function LoadedGraph({
 
 export function DagGraphPage({ dagName }: { dagName: string }) {
   const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
+  const [panelTaskName, setPanelTaskName] = useState<string | null>(null);
   const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
   const selectTask = useCallback((taskName: string, trigger: HTMLButtonElement) => {
     restoreFocusRef.current = trigger;
+    setPanelTaskName(taskName);
     setSelectedTaskName(taskName);
   }, []);
   const closeTask = useCallback(() => {
@@ -297,6 +308,9 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
     );
     fallback?.focus();
   }, [selectedTaskName]);
+  const finishTaskClose = useCallback(() => {
+    setPanelTaskName(null);
+  }, []);
   const load = useCallback(
     async (signal: AbortSignal) => {
       const graph = await getDagGraph(dagName, signal);
@@ -327,8 +341,10 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
       graph={resource.data}
       graphRevision={resource.revision}
       selectedTaskName={selectedTaskName}
+      panelTaskName={panelTaskName}
       onTaskSelect={selectTask}
       onTaskClose={closeTask}
+      onTaskExited={finishTaskClose}
       refresh={refresh}
       refreshing={resource.refreshing}
       {...(resource.refreshError === undefined ? {} : { refreshError: resource.refreshError })}
