@@ -1,9 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import openapiTS, { astToString } from "openapi-typescript";
+
+import { formatGeneratedTypes, generatedOutputMatches } from "./openapi-content.mjs";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(scriptDirectory, "..");
@@ -30,24 +32,10 @@ if (exported.status !== 0) {
 }
 
 const ast = await openapiTS(exported.stdout);
-const generated = [
-  "/**",
-  " * Generated from Nexolith's FastAPI OpenAPI contract.",
-  " * Run `npm run api:generate`; do not edit by hand.",
-  " */",
-  "",
-  astToString(ast).trimEnd(),
-  "",
-].join("\n");
+const generated = formatGeneratedTypes(astToString(ast));
 
 if (checkOnly) {
-  let current = "";
-  try {
-    current = await readFile(outputPath, "utf8");
-  } catch {
-    // A missing generated contract is drift too.
-  }
-  if (current !== generated) {
+  if (!(await generatedOutputMatches(outputPath, generated))) {
     console.error("Generated API types are out of date. Run `npm run api:generate`.");
     process.exit(1);
   }
