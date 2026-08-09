@@ -131,6 +131,8 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1/task-details", "get"): "get_dag_task_source",
         ("/api/v1/dags/{dag_name}", "get"): "get_dag",
         ("/api/v1/dags/{dag_name}/runs", "post"): "trigger_dag_run",
+        ("/api/v1/dag-schedules/pause", "post"): "pause_dag_schedule",
+        ("/api/v1/dag-schedules/resume", "post"): "resume_dag_schedule",
         ("/api/v1/runs", "get"): "list_runs",
         ("/api/v1/runs/{run_id}", "get"): "get_run",
         ("/api/v1/scheduler", "get"): "get_scheduler_status",
@@ -145,6 +147,8 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
         ("/api/v1/task-details", "get"): ("200", "DagTaskSourceResponse"),
         ("/api/v1/dags/{dag_name}", "get"): ("200", "DagDetailResponse"),
         ("/api/v1/dags/{dag_name}/runs", "post"): ("201", "DagRunActionResponse"),
+        ("/api/v1/dag-schedules/pause", "post"): ("200", "DagScheduleActionResponse"),
+        ("/api/v1/dag-schedules/resume", "post"): ("200", "DagScheduleActionResponse"),
         ("/api/v1/runs", "get"): ("200", "RunListResponse"),
         ("/api/v1/runs/{run_id}", "get"): ("200", "RunDetailResponse"),
         ("/api/v1/scheduler", "get"): ("200", "SchedulerStatusResponse"),
@@ -198,6 +202,8 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     assert mutation_operations == {
         ("/api/v1/dags/registrations", "post"),
         ("/api/v1/dags/{dag_name}/runs", "post"),
+        ("/api/v1/dag-schedules/pause", "post"),
+        ("/api/v1/dag-schedules/resume", "post"),
         ("/api/v1/scheduler/start", "post"),
         ("/api/v1/scheduler/stop", "post"),
     }
@@ -305,6 +311,7 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     assert no_history.status_code == 200
     assert no_history.json() == {
         "name": "orders",
+        "enabled": True,
         "trigger": {"on_success_of": ["ingest"]},
         "tasks": [
             {"name": "extract", "kind": "pipeline", "depends_on": [], "status": None},
@@ -330,6 +337,7 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     graph = client.get("/api/v1/dags/orders/graph")
     assert graph.status_code == 200
     payload = graph.json()
+    assert payload["enabled"] is True
     assert payload["tasks"] == [
         {"name": "extract", "kind": "pipeline", "depends_on": [], "status": "succeeded"},
         {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": "running"},

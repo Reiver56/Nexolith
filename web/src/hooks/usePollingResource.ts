@@ -31,7 +31,7 @@ function safeError(error: unknown, fallback: string): { message: string; code?: 
 export function usePollingResource<Data>(
   load: (signal: AbortSignal) => Promise<Data>,
   fallbackMessage: string,
-  intervalMs = 5_000,
+  intervalMs: number | ((data: Data) => number) = 5_000,
 ): { resource: PollingResource<Data>; refresh: () => void } {
   const [resource, setResource] = useState<PollingResource<Data>>({ status: "loading" });
   const refreshRef = useRef<(background: boolean) => void>(() => undefined);
@@ -54,9 +54,15 @@ export function usePollingResource<Data>(
     const schedule = (): void => {
       clearTimer();
       if (!disposed && !document.hidden) {
+        const delay =
+          typeof intervalMs === "function" && latestData !== undefined
+            ? intervalMs(latestData)
+            : typeof intervalMs === "number"
+              ? intervalMs
+              : 5_000;
         timer = setTimeout(() => {
           run(true);
-        }, intervalMs);
+        }, delay);
       }
     };
 

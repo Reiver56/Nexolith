@@ -121,11 +121,11 @@ class Scheduler:
         due: list[_DueDag] = []
         running_dag_names = {run.dag_name for run in self._store.list_incomplete_dag_runs()}
         for dag_record in self._store.list_dags():
-            if not dag_record.enabled or dag_record.name in running_dag_names:
+            if dag_record.name in running_dag_names:
                 continue
 
             interval_due = False
-            if dag_record.schedule is not None:
+            if dag_record.enabled and dag_record.schedule is not None:
                 try:
                     interval = parse_interval(dag_record.schedule)
                 except ConfigurationError:

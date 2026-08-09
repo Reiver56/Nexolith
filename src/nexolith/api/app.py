@@ -24,6 +24,8 @@ from nexolith.api.models import (
     DagRegistrationResponse,
     DagRegistrationStatus,
     DagRunActionResponse,
+    DagScheduleActionRequest,
+    DagScheduleActionResponse,
     DagTaskSourceResponse,
     ErrorResponse,
     RegisterDagRequest,
@@ -60,6 +62,8 @@ _ACTION_PATHS = {
     "/api/v1/dags/registrations",
     "/api/v1/scheduler/start",
     "/api/v1/scheduler/stop",
+    "/api/v1/dag-schedules/pause",
+    "/api/v1/dag-schedules/resume",
 }
 _DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1")
 _TAGS = [
@@ -378,6 +382,51 @@ def create_app(
     ) -> DagRunActionResponse:
         del payload
         return await execute_store(lambda store: ApiDagActionService(store).trigger(dag_name))
+
+    @app.post(
+        "/api/v1/dag-schedules/pause",
+        response_model=DagScheduleActionResponse,
+        responses={
+            **_ACTION_ERRORS,
+            404: {"model": ErrorResponse, "description": "DAG not found."},
+        },
+        tags=["dags"],
+        operation_id="pause_dag_schedule",
+        summary="Pause a DAG schedule",
+        description=(
+            "Prevents future interval-triggered runs without affecting active, manual, API, "
+            "or event-triggered execution."
+        ),
+    )
+    async def pause_dag_schedule(
+        payload: DagScheduleActionRequest,
+    ) -> DagScheduleActionResponse:
+        return await execute_store(
+            lambda store: ApiDagActionService(store).set_schedule_enabled(
+                payload.dag_name, enabled=False
+            )
+        )
+
+    @app.post(
+        "/api/v1/dag-schedules/resume",
+        response_model=DagScheduleActionResponse,
+        responses={
+            **_ACTION_ERRORS,
+            404: {"model": ErrorResponse, "description": "DAG not found."},
+        },
+        tags=["dags"],
+        operation_id="resume_dag_schedule",
+        summary="Resume a DAG schedule",
+        description="Allows future interval-triggered runs for a registered DAG.",
+    )
+    async def resume_dag_schedule(
+        payload: DagScheduleActionRequest,
+    ) -> DagScheduleActionResponse:
+        return await execute_store(
+            lambda store: ApiDagActionService(store).set_schedule_enabled(
+                payload.dag_name, enabled=True
+            )
+        )
 
     @app.get(
         "/api/v1/runs",

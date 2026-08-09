@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from httpx2 import ASGITransport, AsyncClient
 
 from nexolith.api.app import create_app
-from nexolith.process_identity import ProcessIdentity
+from nexolith.process_identity import ProcessIdentity, ProcessIdentityLookup
 from nexolith.scheduler import (
     SchedulerControlError,
     SchedulerControlFailure,
@@ -147,6 +147,70 @@ def test_invalid_registration_creates_no_row_and_redacts_error(tmp_path: Path) -
     store = StateStore(database, process_identity=lambda: _IDENTITY)
     assert store.list_dags() == []
     store.close()
+
+
+@pytest.mark.parametrize("dag_name", ["slash/name", "percent%name", "caffè-東京"])
+def test_pause_and_resume_schedule_are_persistent_and_name_safe(
+    tmp_path: Path, dag_name: str
+) -> None:
+    database = tmp_path / "state.db"
+    store = StateStore(database, process_identity=lambda: _IDENTITY)
+    store.register_dag(dag_name, Path("dag.yaml"), "5m")
+    store.close()
+    client = _client(database)
+
+    paused = client.post(
+        "/api/v1/dag-schedules/pause",
+        json={"confirm": True, "dag_name": dag_name},
+    )
+    assert paused.status_code == 200
+    assert paused.json() == {
+        "dag_name": dag_name,
+        "schedule_status": "paused",
+        "enabled": False,
+    }
+    reopened = StateStore(database, process_identity=lambda: _IDENTITY)
+    assert reopened.get_dag(dag_name).enabled is False  # type: ignore[union-attr]
+    reopened.close()
+
+    resumed = client.post(
+        "/api/v1/dag-schedules/resume",
+        json={"confirm": True, "dag_name": dag_name},
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["schedule_status"] == "scheduled"
+    reopened = StateStore(database, process_identity=lambda: _IDENTITY)
+    assert reopened.get_dag(dag_name).enabled is True  # type: ignore[union-attr]
+    reopened.close()
+
+
+def test_pausing_does_not_interrupt_active_run_or_block_api_trigger(tmp_path: Path) -> None:
+    database = tmp_path / "state.db"
+    dag_path = tmp_path / "orders.yaml"
+    _write_dag(dag_path)
+    client = _client(database)
+    client.post(
+        "/api/v1/dags/registrations",
+        json={"source_path": str(dag_path), "force": False},
+    )
+    store = StateStore(database, process_identity=lambda: _IDENTITY)
+    active_run_id = store.start_dag_run("orders", ["extract"], trigger_reason="schedule")
+    store.close()
+
+    assert (
+        client.post(
+            "/api/v1/dag-schedules/pause",
+            json={"confirm": True, "dag_name": "orders"},
+        ).status_code
+        == 200
+    )
+    store = StateStore(database, process_identity=lambda: _IDENTITY)
+    assert store.get_dag_run(active_run_id).status.value == "running"  # type: ignore[union-attr]
+    store.interrupt_abandoned_dag_runs(lambda _pid: ProcessIdentityLookup.not_found())
+    store.close()
+
+    triggered = client.post("/api/v1/dags/orders/runs", json={"confirm": True})
+    assert triggered.status_code == 201
 
 
 @pytest.mark.parametrize("failing", [False, True])

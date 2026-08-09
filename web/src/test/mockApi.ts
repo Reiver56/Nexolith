@@ -72,6 +72,12 @@ const defaultRoutes: Record<string, RouteValue> = {
     body: { run_id: 24, dag_name: "billing-close", status: "succeeded" },
     status: 201,
   },
+  "POST /api/v1/dag-schedules/pause": {
+    body: { dag_name: "billing-close", schedule_status: "paused", enabled: false },
+  },
+  "POST /api/v1/dag-schedules/resume": {
+    body: { dag_name: "billing-close", schedule_status: "scheduled", enabled: true },
+  },
   "POST /api/v1/scheduler/start": { body: { state: "started", pid: 4243 } },
   "POST /api/v1/scheduler/stop": {
     body: { state: "stopped", pid: 4242, forced: false },

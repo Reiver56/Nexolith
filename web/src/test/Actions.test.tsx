@@ -85,6 +85,41 @@ test("triggers a DAG only after confirmation and opens the authoritative run", a
   expect(table).not.toBeInTheDocument();
 });
 
+test("pauses and resumes scheduling after accessible confirmation", async () => {
+  const pausedGraph = { ...dagGraph, enabled: false };
+  let graphReads = 0;
+  const { requests } = installApiMock({
+    "/api/v1/dags/billing-close/graph": () => {
+      graphReads += 1;
+      return { body: graphReads === 1 ? dagGraph : pausedGraph };
+    },
+  });
+  const user = userEvent.setup();
+  renderAt("/dags/billing-close/graph");
+  const pause = await screen.findByRole("button", { name: "Pause schedule" });
+
+  await user.click(pause);
+  let dialog = screen.getByRole("alertdialog", { name: "Pause schedule for billing-close?" });
+  expect(within(dialog).getByText(/Active runs and manual, API, or event-triggered runs/)).toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(requestCount(requests, "POST", "/api/v1/dag-schedules/pause")).toBe(0);
+
+  await user.click(pause);
+  dialog = screen.getByRole("alertdialog", { name: "Pause schedule for billing-close?" });
+  await user.click(within(dialog).getByRole("button", { name: "Pause schedule" }));
+  expect(await screen.findByRole("button", { name: "Resume schedule" })).toBeInTheDocument();
+  const pauseRequest = requests.find(
+    (request) => request.method === "POST" && request.path === "/api/v1/dag-schedules/pause",
+  );
+  expect(pauseRequest?.body).toEqual({ confirm: true, dag_name: "billing-close" });
+  expect(pauseRequest?.headers.get("content-type")).toBe("application/json");
+
+  await user.click(screen.getByRole("button", { name: "Resume schedule" }));
+  dialog = screen.getByRole("alertdialog", { name: "Resume schedule for billing-close?" });
+  await user.click(within(dialog).getByRole("button", { name: "Resume schedule" }));
+  expect(requestCount(requests, "POST", "/api/v1/dag-schedules/resume")).toBe(1);
+});
+
 test("starts the scheduler only after confirmation and refreshes backend status", async () => {
   const { requests } = installApiMock({ "/api/v1/scheduler": { body: schedulerStopped } });
   const user = userEvent.setup();

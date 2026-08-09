@@ -386,12 +386,13 @@ class StateStore:
                 (name, str(source_path), schedule, int(enabled), now, now),
             )
 
-    def set_dag_enabled(self, name: str, enabled: bool) -> None:
+    def set_dag_enabled(self, name: str, enabled: bool) -> bool:
         with self._conn:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "UPDATE dags SET enabled = ?, updated_at = ? WHERE name = ?",
                 (int(enabled), _now(), name),
             )
+        return cursor.rowcount > 0
 
     def get_dag(self, name: str) -> DagRecord | None:
         row = self._conn.execute("SELECT * FROM dags WHERE name = ?", (name,)).fetchone()

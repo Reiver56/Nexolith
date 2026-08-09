@@ -23,5 +23,8 @@ export type DagRegistration = components["schemas"]["DagRegistrationResponse"];
 export type ConfirmedActionRequest =
   operations["trigger_dag_run"]["requestBody"]["content"]["application/json"];
 export type DagRunAction = components["schemas"]["DagRunActionResponse"];
+export type DagScheduleActionRequest =
+  operations["pause_dag_schedule"]["requestBody"]["content"]["application/json"];
+export type DagScheduleAction = components["schemas"]["DagScheduleActionResponse"];
 export type SchedulerStart = components["schemas"]["SchedulerStartResponse"];
 export type SchedulerStop = components["schemas"]["SchedulerStopResponse"];

@@ -16,6 +16,7 @@ from nexolith.api.models import (
     DagRegistrationResponse,
     DagRegistrationStatus,
     DagRunActionResponse,
+    DagScheduleActionResponse,
     DagSourceStatus,
     DagSummaryResponse,
     DagTaskResponse,
@@ -101,6 +102,7 @@ class ApiQueryService:
         )
         return DagGraphResponse(
             name=record.name,
+            enabled=record.enabled,
             trigger=trigger,
             tasks=[
                 DagGraphTaskResponse(
@@ -343,6 +345,17 @@ class ApiDagActionService:
             run_id=result.run_id,
             dag_name=result.dag_name,
             status=result.status,
+        )
+
+    def set_schedule_enabled(self, dag_name: str, *, enabled: bool) -> DagScheduleActionResponse:
+        try:
+            result = self._actions.set_schedule_enabled(dag_name, enabled=enabled)
+        except RegisteredDagNotFoundError as exc:
+            raise ApiQueryError(ApiErrorCode.DAG_NOT_FOUND, 404, "DAG not found.") from exc
+        return DagScheduleActionResponse(
+            dag_name=result.dag_name,
+            schedule_status="scheduled" if result.enabled else "paused",
+            enabled=result.enabled,
         )
 
 

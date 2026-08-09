@@ -27,6 +27,12 @@ class DagRunActionResult:
     status: DagRunStatus
 
 
+@dataclass(frozen=True, slots=True)
+class DagScheduleActionResult:
+    dag_name: str
+    enabled: bool
+
+
 class DagActionService:
     """Run explicit DAG mutations without depending on CLI or HTTP types."""
 
@@ -56,3 +62,8 @@ class DagActionService:
         if run is None:
             raise RuntimeError("DAG action completed without persisted run history")
         return DagRunActionResult(run_id=run.id, dag_name=run.dag_name, status=run.status)
+
+    def set_schedule_enabled(self, dag_name: str, *, enabled: bool) -> DagScheduleActionResult:
+        if not self._store.set_dag_enabled(dag_name, enabled):
+            raise RegisteredDagNotFoundError(dag_name)
+        return DagScheduleActionResult(dag_name=dag_name, enabled=enabled)

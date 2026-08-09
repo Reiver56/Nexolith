@@ -96,7 +96,29 @@ test("shows graph freshness without obscuring the last good data", async () => {
   installApiMock();
   renderAt();
   expect(await screen.findByTestId("dag-graph-canvas")).toBeInTheDocument();
-  expect(screen.getByText(/refreshes every 5 seconds/)).toBeInTheDocument();
+  expect(screen.getByText(/refreshes every 10 seconds/)).toBeInTheDocument();
+});
+
+test("shows persisted live run progress and schedule state", async () => {
+  installApiMock({
+    "/api/v1/dags/billing-close/graph": {
+      body: {
+        ...dagGraph,
+        enabled: false,
+        latest_run: { ...dagGraph.latest_run, status: "running", ended_at: null },
+      },
+    },
+  });
+  renderAt();
+
+  expect(await screen.findByText("Paused")).toBeInTheDocument();
+  expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+  expect(screen.getByRole("region", { name: "Live DAG status" })).toHaveTextContent(
+    "2 of 3 completed",
+  );
+  expect(screen.getAllByText("enrich").length).toBeGreaterThan(0);
+  expect(screen.getByText(/refreshes every second/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Resume schedule" })).toBeInTheDocument();
 });
 
 test("shows truthful task icons without labelling ambiguous pipelines as SQL", async () => {

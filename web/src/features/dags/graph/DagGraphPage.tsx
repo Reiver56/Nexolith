@@ -7,8 +7,8 @@ import { PageHeader } from "../../../components/PageHeader";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { usePollingResource } from "../../../hooks/usePollingResource";
 import { AppLink } from "../../../router";
-import { formatTimestamp } from "../../../utils/format";
-import { TriggerDagControl } from "../DagActions";
+import { formatDuration, formatTimestamp } from "../../../utils/format";
+import { ScheduleControl, TriggerDagControl } from "../DagActions";
 import { DagGraphCanvas } from "./DagGraphCanvas";
 import { TaskDetailsPanel } from "./TaskDetailsPanel";
 import { TaskKindIcon } from "./TaskKindIcon";
@@ -19,6 +19,10 @@ import type { DagFlowModel } from "./layout";
 type BuiltGraph =
   | { status: "ready"; model: DagFlowModel }
   | { status: "invalid"; message: string };
+
+function graphPollingInterval(graph: DagGraph): number {
+  return graph.latest_run?.status === "running" ? 1_000 : 10_000;
+}
 
 function buildSafely(graph: DagGraph): BuiltGraph {
   try {
@@ -49,11 +53,21 @@ function DagNotFound({ dagName }: { dagName: string }) {
 
 function RunContext({ graph }: { graph: DagGraph }) {
   const run = graph.latest_run;
+  const completedTasks = graph.tasks.filter(
+    (task) => task.status !== null && !["pending", "running"].includes(task.status),
+  ).length;
+  const runningTasks =
+    run?.status === "running"
+      ? graph.tasks.filter((task) => task.status === "running").map((task) => task.name)
+      : [];
   return (
-    <section className="graph-run-context" aria-label="Graph status context">
+    <section className="graph-run-context" aria-label="Live DAG status">
       <div>
-        <span className="graph-context__label">Structure</span>
-        <strong>Current DAG definition</strong>
+        <span className="graph-context__label">Schedule</span>
+        <StatusBadge
+          value={graph.enabled ? "running-enabled" : "disabled"}
+          label={graph.enabled ? "Scheduled" : "Paused"}
+        />
       </div>
       {run === null ? (
         <div>
@@ -75,6 +89,18 @@ function RunContext({ graph }: { graph: DagGraph }) {
           <div>
             <span className="graph-context__label">Started</span>
             <time dateTime={run.started_at}>{formatTimestamp(run.started_at)}</time>
+          </div>
+          <div>
+            <span className="graph-context__label">Duration</span>
+            <strong>{formatDuration(run.started_at, run.ended_at)}</strong>
+          </div>
+          <div>
+            <span className="graph-context__label">Task progress</span>
+            <strong>{completedTasks} of {graph.tasks.length} completed</strong>
+          </div>
+          <div>
+            <span className="graph-context__label">Running task</span>
+            <strong>{runningTasks.length === 0 ? "None" : runningTasks.join(", ")}</strong>
           </div>
         </>
       )}
@@ -196,12 +222,18 @@ function LoadedGraph({
         action={
           <div className="button-group">
             <RefreshButton onClick={refresh} />
+            <ScheduleControl dagName={graph.name} enabled={graph.enabled} onChanged={refresh} />
             <TriggerDagControl dagName={graph.name} />
           </div>
         }
       />
       <p className="graph-refresh-state" aria-live="polite">
-        {refreshing ? "Refreshing graph data…" : refreshError ?? "Graph data refreshes every 5 seconds while this tab is visible."}
+        {refreshing
+          ? "Refreshing live DAG data…"
+          : refreshError ??
+            (graph.latest_run?.status === "running"
+              ? "Live data refreshes every second while this run is active."
+              : "Live data refreshes every 10 seconds while this DAG is idle.")}
       </p>
       <RunContext graph={graph} />
       {graph.tasks.length === 0 ? (
@@ -269,7 +301,11 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
     },
     [dagName],
   );
-  const { resource, refresh } = usePollingResource(load, "Unable to reach this DAG graph.");
+  const { resource, refresh } = usePollingResource(
+    load,
+    "Unable to reach this DAG graph.",
+    graphPollingInterval,
+  );
 
   if (resource.status === "loading") {
     return <LoadingState label={`Loading graph for ${dagName}`} />;
