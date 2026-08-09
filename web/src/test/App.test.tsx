@@ -88,10 +88,13 @@ test("shows running, stopped, unknown, and unreachable system states", async () 
 });
 
 test("redirects the overview and provides a useful unknown-route view", async () => {
-  installApiMock();
+  const { requests } = installApiMock();
   const overview = renderAt("/");
   expect(await screen.findByRole("heading", { name: "DAGs" })).toBeInTheDocument();
   expect(window.location.pathname).toBe("/dags");
+  expect(
+    requests.filter((request) => request.method === "GET" && request.path === "/api/v1/dags"),
+  ).toHaveLength(1);
   overview.unmount();
 
   const unknown = renderAt("/does-not-exist");
