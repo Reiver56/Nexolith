@@ -66,20 +66,29 @@ inventing an optimistic state.
 
 ## Local development
 
-From the repository root, install and start the optional API:
+Install dependencies explicitly from the source checkout:
 
-```bash
+```powershell
 uv sync --extra api --extra dev
-uv run nexolith api start
+npm.cmd --prefix "<checkout>\web" ci
 ```
 
-In another terminal:
+Then start both servers with one supervised command. `nexolith dev` works from any directory;
+the `uv` fallback is run from the checkout:
 
 ```bash
-cd web
-npm ci
-npm run dev
+nexolith dev
+# When the project environment is not already active:
+uv run --extra api nexolith dev
 ```
+
+After the API extra is already synchronized, `uv run nexolith dev` also works.
+
+The command waits for stable API and web endpoints before printing their URLs. `Ctrl+C` stops both
+owned process trees, and an unexpected exit stops the remaining peer and returns a non-zero status.
+It never installs or updates dependencies. Use `--api-host`, `--api-port`, `--web-host`, and
+`--web-port` to change the bindings; specific non-loopback IPs explicitly expose the development
+services and produce a warning. `--open` opens the browser after readiness and is off by default.
 
 Open `http://127.0.0.1:5173`. Vite proxies relative `/api` requests to
 `http://127.0.0.1:8765` and rewrites the proxy Host/Origin pair to that loopback target so action

@@ -215,7 +215,9 @@ test.each(["percent%name", "slash/name", "space name", "caffè-東京", "query?#
 test("the loopback development proxy preserves the API same-origin action check", () => {
   const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
   const viteConfig = readFileSync(resolve(webRoot, "vite.config.ts"), "utf8");
-  expect(viteConfig).toContain('const API_PROXY_TARGET = "http://127.0.0.1:8765"');
+  expect(viteConfig).toContain(
+    'const API_PROXY_TARGET = process.env.NEXOLITH_API_URL ?? "http://127.0.0.1:8765"',
+  );
   expect(viteConfig).toContain("changeOrigin: true");
   expect(viteConfig).toContain("headers: { Origin: API_PROXY_TARGET }");
   expect(viteConfig).toContain('host: "127.0.0.1"');

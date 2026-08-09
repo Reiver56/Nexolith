@@ -156,6 +156,7 @@ nexolith --version
 nexolith diagnostics
 nexolith validate path/to/pipeline.yaml
 nexolith run path/to/pipeline.yaml
+nexolith dev
 nexolith api start
 ```
 
@@ -219,14 +220,33 @@ retry mutation requests, edit YAML or schedules, or invent optimistic operationa
 
 Install the API and frontend dependencies, then run both development processes:
 
-```bash
+```powershell
 uv sync --extra api --extra dev
-uv run nexolith api start
+npm.cmd --prefix "<checkout>\web" ci
+nexolith dev
+```
 
-# Separate terminal
-cd web
-npm ci
-npm run dev
+If the project environment is not already active, use the `uv` fallback from the checkout:
+
+```bash
+uv run --extra api nexolith dev
+```
+
+After the API extra is already synchronized, `uv run nexolith dev` remains equivalent.
+
+`nexolith dev` is a source-checkout command. It locates `web/` independently of the current
+directory, verifies the declared Node.js/npm versions and installed dependencies, then starts and
+supervises the API and Vite together. It prints the two URLs only after both readiness checks pass.
+`Ctrl+C` stops both owned process trees; if either server fails, its peer is stopped and the
+command exits non-zero. The launcher never installs or updates dependencies automatically.
+
+The loopback defaults are `127.0.0.1:8765` for the API and `127.0.0.1:5173` for Vite. Override
+them explicitly when needed. A specific non-loopback IP opts into exposing the unauthenticated
+development service and prints a warning; wildcard and multicast binds are rejected.
+
+```bash
+nexolith dev --api-port 9000 --web-port 5174
+nexolith dev --open
 ```
 
 Vite serves `http://127.0.0.1:5173` and proxies relative `/api` reads to the local Nexolith API at

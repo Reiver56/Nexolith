@@ -17,6 +17,11 @@ from nexolith.api.server import (
 )
 from nexolith.application import run_pipeline, validate_pipeline
 from nexolith.cli.dag_register_render import render_dag_registration
+from nexolith.cli.development import (
+    DevelopmentLauncherError,
+    DevelopmentOptions,
+    run_development_servers,
+)
 from nexolith.cli.diagnostics import (
     collect_environment_diagnostics,
     render_environment_diagnostics,
@@ -114,6 +119,37 @@ def diagnostics() -> None:
     """Print secret-safe environment details for troubleshooting."""
     report = collect_environment_diagnostics()
     typer.echo(render_environment_diagnostics(report))
+
+
+@app.command()
+def dev(
+    api_host: Annotated[
+        str, typer.Option(help="IP address for the development API server.")
+    ] = "127.0.0.1",
+    api_port: Annotated[
+        int, typer.Option(min=1, max=65535, help="TCP port for the development API server.")
+    ] = 8765,
+    web_host: Annotated[
+        str, typer.Option(help="IP address for the Vite development server.")
+    ] = "127.0.0.1",
+    web_port: Annotated[
+        int, typer.Option(min=1, max=65535, help="TCP port for the Vite development server.")
+    ] = 5173,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open/--no-open", help="Open the Monitor after both servers are ready."),
+    ] = False,
+) -> None:
+    """Run the API and React Monitor from a source checkout."""
+    try:
+        exit_code = run_development_servers(
+            DevelopmentOptions(api_host, api_port, web_host, web_port, open_browser)
+        )
+    except DevelopmentLauncherError as exc:
+        typer.echo(f"Development startup failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if exit_code:
+        raise typer.Exit(code=exit_code)
 
 
 @app.command()
