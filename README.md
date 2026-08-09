@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Reiver56/Nexolith/v0.2.0/assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
+  <img src="https://raw.githubusercontent.com/nexolith-labs/Nexolith/v0.2.0/assets/nexo-icon.png" alt="Nexo, the Nexolith mascot" width="160">
 </p>
 
 # Nexolith
@@ -9,7 +9,7 @@
 Nexolith is a lightweight, modular Python framework for defining, validating, running,
 and monitoring data pipelines between files and SQL databases.
 
-[![CI](https://github.com/Reiver56/Nexolith/actions/workflows/ci.yml/badge.svg)](https://github.com/Reiver56/Nexolith/actions/workflows/ci.yml)
+[![CI](https://github.com/nexolith-labs/Nexolith/actions/workflows/ci.yml/badge.svg)](https://github.com/nexolith-labs/Nexolith/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 

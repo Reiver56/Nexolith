@@ -25,7 +25,7 @@ environment manually.
 ## 1. Clone and install
 
 ```bash
-git clone https://github.com/Reiver56/Nexolith.git
+git clone https://github.com/nexolith-labs/Nexolith.git
 cd Nexolith
 uv sync --extra dev
 uv run nexolith --version

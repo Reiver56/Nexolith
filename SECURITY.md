@@ -7,7 +7,7 @@ Nexolith is early-stage software. Security fixes are applied to the latest relea
 ## Reporting a vulnerability
 
 Do not open a public issue. Use
-[GitHub Private Vulnerability Reporting](https://github.com/Reiver56/Nexolith/security/advisories/new)
+[GitHub Private Vulnerability Reporting](https://github.com/nexolith-labs/Nexolith/security/advisories/new)
 through the repository's **Security > Advisories > Report a vulnerability** flow.
 
 Include affected versions, impact, reproduction steps, and any suggested mitigation. Remove

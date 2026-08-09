@@ -19,7 +19,7 @@ these exact values:
 
 | Setting | Value |
 |---|---|
-| Owner | `Reiver56` |
+| Owner | `nexolith-labs` |
 | Repository | `Nexolith` |
 | Workflow | `release.yml` |
 | Environment | `pypi` |
