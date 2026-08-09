@@ -60,6 +60,10 @@ class ConfirmedActionRequest(ApiModel):
     confirm: Literal[True]
 
 
+class DagScheduleActionRequest(ConfirmedActionRequest):
+    dag_name: str = Field(min_length=1)
+
+
 class RegisterDagRequest(ApiModel):
     source_path: str = Field(min_length=1)
     force: bool = False
@@ -82,6 +86,12 @@ class DagRunActionResponse(ApiModel):
     run_id: int = Field(ge=1)
     dag_name: str
     status: DagRunStatus
+
+
+class DagScheduleActionResponse(ApiModel):
+    dag_name: str
+    schedule_status: Literal["scheduled", "paused"]
+    enabled: bool
 
 
 class SchedulerStartResponse(ApiModel):
@@ -174,6 +184,8 @@ class DagGraphRunResponse(ApiModel):
 
 class DagGraphResponse(ApiModel):
     name: str
+    enabled: bool
+    schedule: str | None
     trigger: DagTriggerResponse | None
     tasks: list[DagGraphTaskResponse]
     latest_run: DagGraphRunResponse | None

@@ -7,6 +7,8 @@ import type {
   DagList,
   DagRegistration,
   DagRunAction,
+  DagScheduleAction,
+  DagScheduleActionRequest,
   DagTaskSource,
   RegisterDagRequest,
   RunDetail,
@@ -31,6 +33,8 @@ export const API_ENDPOINTS = [
   "/api/v1/scheduler",
   "/api/v1/dags/registrations",
   "/api/v1/dags/{dag_name}/runs",
+  "/api/v1/dag-schedules/pause",
+  "/api/v1/dag-schedules/resume",
   "/api/v1/scheduler/start",
   "/api/v1/scheduler/stop",
 ] as const;
@@ -162,7 +166,12 @@ function isDagGraph(value: unknown): value is DagGraph {
     return false;
   }
   const graph = value as Record<string, unknown>;
-  if (typeof graph.name !== "string" || !Array.isArray(graph.tasks)) {
+  if (
+    typeof graph.name !== "string" ||
+    typeof graph.enabled !== "boolean" ||
+    (graph.schedule !== null && typeof graph.schedule !== "string") ||
+    !Array.isArray(graph.tasks)
+  ) {
     return false;
   }
   if (
@@ -278,6 +287,22 @@ export function triggerDagRun(
     CONFIRMED_ACTION,
     signal,
   );
+}
+
+export function pauseDagSchedule(
+  dagName: string,
+  signal?: AbortSignal,
+): Promise<DagScheduleAction> {
+  const request: DagScheduleActionRequest = { confirm: true, dag_name: dagName };
+  return postJson<DagScheduleAction>(`${API_BASE}/dag-schedules/pause`, request, signal);
+}
+
+export function resumeDagSchedule(
+  dagName: string,
+  signal?: AbortSignal,
+): Promise<DagScheduleAction> {
+  const request: DagScheduleActionRequest = { confirm: true, dag_name: dagName };
+  return postJson<DagScheduleAction>(`${API_BASE}/dag-schedules/resume`, request, signal);
 }
 
 export function startScheduler(signal?: AbortSignal): Promise<SchedulerStart> {

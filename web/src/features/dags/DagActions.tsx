@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import { ApiClientError, registerDag, triggerDagRun } from "../../api/client";
+import {
+  ApiClientError,
+  pauseDagSchedule,
+  registerDag,
+  resumeDagSchedule,
+  triggerDagRun,
+} from "../../api/client";
 import { announceBackendStateChanged } from "../../api/events";
 import type { DagRegistration } from "../../api/types";
 import { ActionFeedback } from "../../components/ActionFeedback";
@@ -174,6 +180,81 @@ export function TriggerDagControl({ dagName }: { dagName: string }) {
         title={`Trigger ${dagName}?`}
         description="Nexolith will execute this DAG now. Its tasks can perform external writes, and retrying after an uncertain response can create another run."
         confirmLabel="Trigger run"
+        busy={busy}
+        {...(error === undefined ? {} : { error })}
+        onCancel={() => {
+          if (!busy) {
+            setOpen(false);
+            setError(undefined);
+          }
+        }}
+        onConfirm={() => void confirm()}
+      />
+    </>
+  );
+}
+
+export function ScheduleControl({
+  dagName,
+  enabled,
+  onChanged,
+}: {
+  dagName: string;
+  enabled: boolean;
+  onChanged: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const controller = useRef<AbortController | null>(null);
+  const actionLabel = enabled ? "Pause schedule" : "Resume schedule";
+
+  useEffect(() => () => controller.current?.abort(), []);
+
+  async function confirm(): Promise<void> {
+    setBusy(true);
+    setError(undefined);
+    controller.current = new AbortController();
+    try {
+      if (enabled) {
+        await pauseDagSchedule(dagName, controller.current.signal);
+      } else {
+        await resumeDagSchedule(dagName, controller.current.signal);
+      }
+      setOpen(false);
+      announceBackendStateChanged();
+      onChanged();
+    } catch (caught: unknown) {
+      if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+        setError(actionError(caught, `Nexolith could not ${actionLabel.toLowerCase()}.`));
+      }
+    } finally {
+      setBusy(false);
+      controller.current = null;
+    }
+  }
+
+  return (
+    <>
+      <button
+        className="button button--secondary button--compact"
+        type="button"
+        onClick={() => {
+          setError(undefined);
+          setOpen(true);
+        }}
+      >
+        {actionLabel}
+      </button>
+      <ConfirmationDialog
+        open={open}
+        title={`${actionLabel} for ${dagName}?`}
+        description={
+          enabled
+            ? "Future interval-triggered runs will pause. Active runs and manual, API, or event-triggered runs are not affected."
+            : "Future interval-triggered runs will be eligible again. Existing history and configuration stay unchanged."
+        }
+        confirmLabel={actionLabel}
         busy={busy}
         {...(error === undefined ? {} : { error })}
         onCancel={() => {

@@ -4,9 +4,15 @@ import { afterEach, vi } from "vitest";
 
 import { usePollingResource } from "../hooks/usePollingResource";
 
-function Probe({ loader }: { loader: (signal: AbortSignal) => Promise<string> }) {
+function Probe({
+  loader,
+  intervalMs = 5_000,
+}: {
+  loader: (signal: AbortSignal) => Promise<string>;
+  intervalMs?: number | ((data: string) => number);
+}) {
   const load = useCallback((signal: AbortSignal) => loader(signal), [loader]);
-  const { resource } = usePollingResource(load, "Safe fallback.");
+  const { resource } = usePollingResource(load, "Safe fallback.", intervalMs);
   if (resource.status === "loading") {
     return <span>loading</span>;
   }
@@ -96,4 +102,23 @@ test("preserves last good data when a background refresh fails", async () => {
   await act(() => vi.advanceTimersByTimeAsync(5_000));
   expect(screen.getByText("trusted graph")).toBeInTheDocument();
   expect(screen.getByText("Safe fallback.")).toBeInTheDocument();
+});
+
+test("uses fast active polling and slower idle polling without overlapping requests", async () => {
+  vi.useFakeTimers();
+  const loader = vi
+    .fn<(signal: AbortSignal) => Promise<string>>()
+    .mockResolvedValueOnce("running")
+    .mockResolvedValueOnce("idle")
+    .mockResolvedValue("idle");
+  render(<Probe loader={loader} intervalMs={(data) => (data === "running" ? 1_000 : 10_000)} />);
+  await act(async () => Promise.resolve());
+
+  await act(() => vi.advanceTimersByTimeAsync(1_000));
+  expect(loader).toHaveBeenCalledTimes(2);
+  await act(async () => Promise.resolve());
+  await act(() => vi.advanceTimersByTimeAsync(9_999));
+  expect(loader).toHaveBeenCalledTimes(2);
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(loader).toHaveBeenCalledTimes(3);
 });

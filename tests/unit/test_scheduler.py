@@ -434,6 +434,29 @@ def test_unscheduled_dag_is_never_triggered(tmp_path: Path) -> None:
         store.close()
 
 
+def test_paused_dag_still_reacts_to_cross_dag_trigger(tmp_path: Path) -> None:
+    downstream_path = tmp_path / "downstream.yaml"
+    downstream_path.write_text(
+        "name: downstream\ntrigger:\n  on_success_of: [upstream]\ntasks:\n"
+        "  - name: publish\n    pipeline: unused.yaml\n",
+        encoding="utf-8",
+    )
+    store = make_store(tmp_path)
+    try:
+        store.register_dag("upstream", Path("upstream.yaml"), None)
+        store.register_dag("downstream", downstream_path, "1h", enabled=False)
+        upstream_run = store.start_dag_run("upstream", [], trigger_reason="manual")
+        store.complete_dag_run(upstream_run, success=True)
+        calls: list[str] = []
+
+        triggered = Scheduler(store, execute=make_fake_execute(store, calls)).tick()
+
+        assert len(triggered) == 1
+        assert calls == [str(downstream_path)]
+    finally:
+        store.close()
+
+
 def test_a_malformed_schedule_is_skipped_without_crashing_the_scheduler(tmp_path: Path) -> None:
     store = make_store(tmp_path)
     try:
