@@ -6,6 +6,7 @@ html {
   min-width: 20rem;
   min-height: 100%;
   background: var(--canvas);
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -21,6 +22,10 @@ body {
   line-height: var(--line-normal);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+body.dialog-open {
+  overflow: hidden;
 }
 
 button,
@@ -76,7 +81,10 @@ h4 {
   z-index: 100;
   top: var(--space-3);
   left: var(--space-3);
+  display: flex;
+  min-height: 2.75rem;
   padding: var(--space-2) var(--space-4);
+  align-items: center;
   border-radius: var(--radius-sm);
   background: var(--surface-solid);
   box-shadow: var(--shadow-lg);
@@ -101,6 +109,7 @@ h4 {
   border-bottom: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--canvas) 78%, transparent);
   backdrop-filter: blur(20px) saturate(140%);
+  transition: border-color var(--transition-fast), background var(--transition-base);
 }
 
 .app-header__inner {
@@ -115,10 +124,19 @@ h4 {
 
 .product {
   display: inline-flex;
+  min-height: 2.75rem;
   align-items: center;
   gap: var(--space-3);
   color: var(--text-primary);
   text-decoration: none;
+}
+
+.product-mark {
+  transition: transform var(--transition-base), filter var(--transition-base);
+}
+
+.product:hover .product-mark {
+  transform: translateY(-1px);
 }
 
 .product-mark {
@@ -158,18 +176,24 @@ h4 {
 }
 
 .primary-nav a {
+  min-height: 2.75rem;
   padding: 0.45rem 0.75rem;
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
   text-decoration: none;
-  transition: color var(--transition-fast), background var(--transition-fast);
+  transition: transform var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast);
 }
 
 .primary-nav a:hover {
   color: var(--text-primary);
   background: var(--surface-muted);
+}
+
+.primary-nav a:active {
+  transform: scale(0.98);
 }
 
 .primary-nav a[aria-current="page"] {
@@ -193,20 +217,31 @@ h4 {
 
 .icon-button {
   display: inline-grid;
-  width: 2rem;
-  height: 2rem;
+  width: 2.75rem;
+  height: 2.75rem;
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
   border-radius: 50%;
   background: transparent;
   cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+  transition: transform var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast), border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .icon-button:hover {
   border-color: var(--border-subtle);
   background: var(--surface-solid);
+}
+
+.icon-button:active {
+  transform: scale(0.94);
+}
+
+.icon-button:disabled {
+  cursor: progress;
+  opacity: 0.58;
 }
 
 .icon-button svg,
@@ -228,6 +263,23 @@ h4 {
   margin-inline: auto;
   padding-block: clamp(2.5rem, 6vw, 5.5rem) var(--space-16);
   flex: 1;
+}
+
+.route-view {
+  min-width: 0;
+  animation: route-enter var(--transition-base);
+}
+
+@keyframes route-enter {
+  from {
+    opacity: 0;
+    transform: translateY(0.35rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .app-footer {
@@ -281,7 +333,7 @@ h4 {
 
 .button {
   display: inline-flex;
-  min-height: 2.5rem;
+  min-height: 2.75rem;
   padding: 0.55rem 0.9rem;
   align-items: center;
   justify-content: center;
@@ -292,8 +344,9 @@ h4 {
   font-weight: var(--weight-medium);
   text-decoration: none;
   cursor: pointer;
-  transition: transform var(--transition-fast), background var(--transition-fast),
-    border-color var(--transition-fast);
+  transition: transform var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast), border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .button:active {
@@ -317,21 +370,35 @@ h4 {
   color: white;
 }
 
+.button--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-500) 86%, black);
+  box-shadow: var(--shadow-sm);
+}
+
 .button--danger {
   background: var(--negative-600);
   color: white;
 }
 
+.button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--negative-600) 86%, black);
+  box-shadow: var(--shadow-sm);
+}
+
 .button--compact {
-  min-height: 2.25rem;
+  min-height: 2.75rem;
   padding-block: 0.4rem;
 }
 
 .button:disabled,
 .field input:disabled,
 .checkbox-field input:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.58;
+}
+
+.button[aria-busy="true"] {
+  cursor: progress;
 }
 
 .button-group,
@@ -357,6 +424,19 @@ h4 {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
+  animation: feedback-enter var(--transition-base) both;
+}
+
+@keyframes feedback-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-0.2rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .action-feedback--success {
@@ -386,6 +466,18 @@ h4 {
   place-items: center;
   background: rgba(10, 13, 18, 0.62);
   backdrop-filter: blur(5px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--transition-deliberate),
+    visibility 0s linear var(--motion-duration-deliberate);
+}
+
+.dialog-backdrop[data-state="open"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
 }
 
 .confirmation-dialog {
@@ -397,6 +489,14 @@ h4 {
   border-radius: var(--radius-lg);
   background: var(--surface-solid);
   box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(0.5rem) scale(0.985);
+  transition: opacity var(--transition-deliberate), transform var(--transition-deliberate);
+}
+
+.dialog-backdrop[data-state="open"] .confirmation-dialog {
+  opacity: 1;
+  transform: translateY(0) scale(1);
 }
 
 .confirmation-dialog h2 {
@@ -451,9 +551,35 @@ h4 {
 }
 
 .scheduler-refresh-state {
+  display: flex;
+  min-height: 1.4rem;
   margin-top: calc(var(--space-6) * -1);
+  align-items: center;
+  gap: var(--space-2);
   color: var(--text-secondary);
   font-size: var(--text-xs);
+  transition: color var(--transition-base);
+}
+
+.scheduler-refresh-state::before {
+  width: 0.45rem;
+  height: 0.45rem;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  content: "";
+}
+
+.scheduler-refresh-state[data-state="refreshing"] {
+  color: var(--accent-600);
+}
+
+.scheduler-refresh-state[data-state="refreshing"]::before {
+  background: currentColor;
+}
+
+.scheduler-refresh-state[data-state="stale"] {
+  color: var(--warning-700);
 }
 
 .scheduler-overview {
@@ -507,6 +633,8 @@ h4 {
   background: var(--surface);
   box-shadow: var(--shadow-sm);
   backdrop-filter: blur(18px);
+  transition: border-color var(--transition-base), background var(--transition-base),
+    box-shadow var(--transition-base);
 }
 
 .surface__summary {
@@ -599,6 +727,7 @@ h4 {
 
 .run-link {
   display: inline-flex;
+  min-height: 2.75rem;
   align-items: center;
   gap: var(--space-2);
   color: var(--accent-600);
@@ -628,6 +757,8 @@ h4 {
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   white-space: nowrap;
+  transition: color var(--transition-base), background var(--transition-base),
+    border-color var(--transition-base);
 }
 
 .status-badge__dot {
@@ -671,6 +802,17 @@ h4 {
   border-radius: var(--radius-lg);
   background: var(--surface);
   box-shadow: var(--shadow-sm);
+  animation: state-panel-enter var(--transition-base) both;
+}
+
+@keyframes state-panel-enter {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .state-panel h2 {
@@ -1148,8 +1290,7 @@ h4 {
   *::before,
   *::after {
     scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
+    animation: none !important;
     transition-duration: 0.01ms !important;
   }
 }

@@ -4,6 +4,7 @@ import { getDagTaskSource } from "../../../api/client";
 import type { ApiErrorCode } from "../../../api/types";
 import { StatusBadge } from "../../../components/StatusBadge";
 import { useApiResource } from "../../../hooks/useApiResource";
+import { deliberateMotionDuration } from "../../../utils/motion";
 import { TaskKindIcon } from "./TaskKindIcon";
 import { taskKindLabel } from "./taskKinds";
 
@@ -30,12 +31,16 @@ export function TaskDetailsPanel({
   dagName,
   taskName,
   refreshToken,
+  open,
   onClose,
+  onExited,
 }: {
   dagName: string;
   taskName: string;
   refreshToken: number;
+  open: boolean;
   onClose: () => void;
+  onExited: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const load = useCallback(
@@ -49,12 +54,24 @@ export function TaskDetailsPanel({
   );
 
   useEffect(() => {
-    closeRef.current?.focus();
-  }, [taskName]);
+    if (open) {
+      closeRef.current?.focus();
+    }
+  }, [open, taskName]);
+
+  useEffect(() => {
+    if (open) {
+      return;
+    }
+    const timer = window.setTimeout(onExited, deliberateMotionDuration());
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [onExited, open]);
 
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
+      if (open && event.key === "Escape") {
         event.preventDefault();
         onClose();
       }
@@ -63,10 +80,15 @@ export function TaskDetailsPanel({
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [onClose]);
+  }, [onClose, open]);
 
   return (
-    <aside className="task-details-panel" aria-labelledby="task-details-title">
+    <aside
+      className="task-details-panel"
+      data-state={open ? "open" : "closing"}
+      aria-hidden={open ? undefined : true}
+      aria-labelledby="task-details-title"
+    >
       <header className="task-details-panel__header">
         <div>
           <p className="eyebrow">Task details</p>

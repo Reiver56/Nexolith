@@ -143,9 +143,13 @@ function LoadedScheduler({
         eyebrow="Runtime control"
         title="Scheduler"
         description="Observe and explicitly control the scheduler responsible for due and cross-DAG runs."
-        action={<RefreshButton onClick={refresh} />}
+        action={<RefreshButton onClick={refresh} busy={refreshing} />}
       />
-      <p className="scheduler-refresh-state" aria-live="polite">
+      <p
+        className="scheduler-refresh-state"
+        data-state={refreshing ? "refreshing" : refreshError === undefined ? "idle" : "stale"}
+        aria-live="polite"
+      >
         {refreshing
           ? "Refreshing scheduler status…"
           : refreshError ?? "Scheduler status refreshes every 5 seconds while this tab is visible."}

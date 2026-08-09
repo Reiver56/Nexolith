@@ -32,14 +32,14 @@ export function App() {
 
   return (
     <AppShell pathname={pathname}>
-      {route.page === "dags" ? <DagListPage /> : null}
-      {route.page === "dag-graph" ? (
-        <DagGraphPage key={route.dagName} dagName={route.dagName} />
-      ) : null}
-      {route.page === "runs" ? <RunListPage /> : null}
-      {route.page === "run" ? <RunDetailRoute key={route.runId} rawRunId={route.runId} /> : null}
-      {route.page === "scheduler" ? <SchedulerPage /> : null}
-      {route.page === "not-found" ? <UnknownRoute /> : null}
+      <div className="route-view" data-route={route.page} key={pathname}>
+        {route.page === "dags" ? <DagListPage /> : null}
+        {route.page === "dag-graph" ? <DagGraphPage dagName={route.dagName} /> : null}
+        {route.page === "runs" ? <RunListPage /> : null}
+        {route.page === "run" ? <RunDetailRoute rawRunId={route.runId} /> : null}
+        {route.page === "scheduler" ? <SchedulerPage /> : null}
+        {route.page === "not-found" ? <UnknownRoute /> : null}
+      </div>
     </AppShell>
   );
 }

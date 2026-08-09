@@ -39,7 +39,35 @@ test("provides keyboard-operated view controls without edit actions", async () =
   await user.keyboard("{Enter}");
   expect(reset).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /save|delete|connect|run dag/i })).not.toBeInTheDocument();
-  expect(screen.getByText(/React Flow/i)).toBeInTheDocument();
+  const attribution = screen.getByRole("link", { name: /React Flow/i });
+  expect(attribution).toHaveAttribute("href", "https://reactflow.dev");
+});
+
+test("keeps graph nodes and route motion stable when equivalent polling data arrives", async () => {
+  const { requests } = installApiMock();
+  const user = userEvent.setup();
+  renderAt();
+
+  const canvas = await screen.findByTestId("dag-graph-canvas");
+  const routeView = document.querySelector(".route-view");
+  const taskNode = canvas.querySelector('[data-testid="rf__node-task:extract"] .task-node');
+  expect(routeView).not.toBeNull();
+  expect(taskNode).not.toBeNull();
+  const readsBefore = requests.filter(
+    (request) => request.method === "GET" && request.path.endsWith("/graph"),
+  ).length;
+
+  await user.click(screen.getByRole("button", { name: /^Refresh$/ }));
+  await waitFor(() => {
+    expect(
+      requests.filter(
+        (request) => request.method === "GET" && request.path.endsWith("/graph"),
+      ).length,
+    ).toBeGreaterThan(readsBefore);
+  });
+
+  expect(document.querySelector(".route-view")).toBe(routeView);
+  expect(canvas.querySelector('[data-testid="rf__node-task:extract"] .task-node')).toBe(taskNode);
 });
 
 test("shows no-history and empty-DAG states without fabricating statuses", async () => {

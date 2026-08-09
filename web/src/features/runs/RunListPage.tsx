@@ -20,7 +20,7 @@ export function RunListPage() {
         eyebrow="Execution history"
         title="Runs"
         description={`The ${String(RUN_LIMIT)} most recent persisted DAG executions, newest first.`}
-        action={<RefreshButton onClick={reload} />}
+        action={<RefreshButton onClick={reload} busy={resource.status === "loading"} />}
       />
       {resource.status === "loading" ? <LoadingState label="Loading runs" /> : null}
       {resource.status === "error" ? (
