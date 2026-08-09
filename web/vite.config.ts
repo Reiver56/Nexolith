@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-const API_PROXY_TARGET = "http://127.0.0.1:8765";
+const API_PROXY_TARGET = process.env.NEXOLITH_API_URL ?? "http://127.0.0.1:8765";
 
 export default defineConfig({
   plugins: [react()],

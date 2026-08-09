@@ -49,11 +49,21 @@ Rich rendering remain out of scope. `/logs` also remains out of scope until pers
 history exists.
 
 The Typer application also exposes `nexolith validate`, `nexolith run`, `nexolith diagnostics`,
-and `nexolith --version`. `validate` and `run` accept either a single-pipeline YAML document or the
-established DAG format. DAG runs use the existing DAG executor, persist their run and task records,
-and print the same detail view available through `nexolith runs show`.
+`nexolith dev`, and `nexolith --version`. `validate` and `run` accept either a single-pipeline YAML
+document or the established DAG format. DAG runs use the existing DAG executor, persist their run
+and task records, and print the same detail view available through `nexolith runs show`.
 Presentation belongs here. The classic `validate` and `run` commands are thin adapters over the
 shared application layer; pipeline composition, execution, and I/O belong outside the CLI.
+
+`nexolith dev` is intentionally source-checkout-only. It discovers the checkout from this module,
+never from the caller's current directory, validates the optional API extra, the Node.js/npm engine
+ranges in `web/package.json`, and the existing frontend installation without changing any of them.
+It starts the API and Vite with argument arrays and explicit working directories, waits for
+`/api/v1` and `/`, and supervises both owned process trees. `Ctrl+C`, partial startup, readiness
+timeout, browser-open failure, or either child's unexpected exit clean up both trees. Expected
+setup and runtime failures render a concise diagnostic without a traceback. A scheduler started
+through an explicit API action remains deliberately detached and preserves its existing
+survive-API-shutdown behavior.
 
 `nexolith api start` is a foreground adapter over `nexolith.api.server`. It defaults to
 `127.0.0.1:8765`, supports explicit `--host`, `--port`, and repeatable `--trusted-host` options,
