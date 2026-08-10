@@ -37,12 +37,39 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   endpoints. Consequential actions use accessible confirmation dialogs, prevent duplicate
   submission, never retry automatically, refresh authoritative state after success, preserve
   encoded DAG names, and keep protected backend details out of rendered feedback.
+- Added task source viewing to the DAG dependency graph: selecting a task fetches its declared
+  script or pipeline definition through a dedicated, loopback-only endpoint (disabled on any
+  non-loopback API bind, even with trusted hosts configured) and displays it verbatim. Source text
+  is never logged, persisted, or included in the graph's own polling response — it's fetched only
+  after a task is selected, and only file existence/size/encoding are validated server-side, not
+  redacted for secrets, since registered local code can itself contain sensitive values.
+- Added `nexolith dev`, a unified local-development command that locates the `web/` checkout,
+  verifies the declared Node.js/npm versions and installed frontend dependencies, then starts and
+  supervises both the API and the Vite dev server together, printing both URLs once both are
+  actually ready. `Ctrl+C`, a readiness timeout, or either process exiting unexpectedly stops both
+  owned process trees. Loopback defaults (`127.0.0.1:8765` API, `127.0.0.1:5173` Vite) are
+  overridable; a non-loopback bind opts in explicitly and prints a warning, and wildcard/multicast
+  binds are rejected. Replaces the previous two-terminal `nexolith api start` + `cd web && npm run
+  dev` workflow for local development.
+- Added per-DAG schedule pause/resume: a new API action pair
+  (`POST /api/v1/dag-schedules/{pause,resume}`) and matching React controls suspend or restore only
+  a DAG's own *interval*-triggered runs — a paused DAG still responds normally to a manual trigger,
+  an API-triggered run, or a cross-DAG `on_success_of` trigger from an upstream DAG. Previously the
+  only way to stop scheduled execution was disabling the DAG outright, which also silently blocked
+  cross-DAG triggers with no way to tell the two apart from the outside.
+- Polished Monitor's interaction and motion design: per-route transition animation on navigation, a
+  refined motion token scale (distinct fast/standard/deliberate durations and easing curves) used
+  consistently across the UI, minimum 44px touch targets on interactive controls, explicit
+  busy/pending indicators (disabled state, `aria-busy`) on in-flight actions and refresh, and
+  confirmation-dialog focus handling that restores focus to the triggering element on close.
 
 #### Fixed
 
 - Allowed the API and frontend development servers to share a numeric port when they bind to
   genuinely distinct specific addresses, while still rejecting equivalent and `localhost`-aliased
   bind targets.
+- Fixed the DAG dependency graph page reloading its route unnecessarily on navigation, alongside
+  the transition-animation work above.
 
 ### v0.3.1 — CLI Aesthetics
 
