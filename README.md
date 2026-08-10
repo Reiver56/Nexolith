@@ -213,10 +213,14 @@ The source-only frontend in [`web/`](web/README.md) provides monitoring routes f
 interactive task dependency graphs, recent runs, run detail, and scheduler state. Graphs combine
 the current DAG definition with task statuses from its latest persisted run, and display cross-DAG
 triggers at a separate DAG boundary. They support pan, zoom, reset, keyboard focus, and a textual
-dependency summary. Accessible confirmation dialogs protect explicit DAG registration, run
-triggering, and scheduler start/stop actions. Successful actions refresh backend state, and newly
-triggered runs open their persisted detail route. The UI does not expose PID/process identity,
-retry mutation requests, edit YAML or schedules, or invent optimistic operational states.
+dependency summary; selecting a task fetches and displays its declared script or pipeline source
+(loopback-API-only, never persisted or included in the graph's own polling response). Accessible
+confirmation dialogs protect explicit DAG registration, run triggering, scheduler start/stop, and
+per-DAG schedule pause/resume (which only suspends that DAG's own interval-triggered runs — manual,
+API, and cross-DAG-triggered runs are unaffected). Successful actions refresh backend state, and
+newly triggered runs open their persisted detail route. The UI does not expose PID/process
+identity, retry mutation requests, edit YAML or the schedule expression itself, or invent
+optimistic operational states.
 
 Install the API and frontend dependencies, then run both development processes:
 
