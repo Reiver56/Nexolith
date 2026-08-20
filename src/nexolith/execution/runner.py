@@ -1,7 +1,7 @@
 import logging
 from typing import Protocol
 
-from nexolith.config.models import PipelineConfig
+from nexolith.config.models import NexoFunctionDestinationConfig, PipelineConfig
 from nexolith.connectors.registry import ConnectorRegistry, default_connector_registry
 from nexolith.events import (
     EventSink,
@@ -26,6 +26,7 @@ from nexolith.exceptions import (
     TransformationError,
 )
 from nexolith.models.execution import ExecutionResult
+from nexolith.nexofunctions.destination import execute_destination_function
 from nexolith.transformations.registry import (
     TransformationRegistry,
     default_transformation_registry,
@@ -109,7 +110,10 @@ class DefaultPipelineRunner:
                     row_count=len(rows),
                 ),
             )
-            written = self.connectors.create_destination(config.destination).write(rows)
+            if isinstance(config.destination, NexoFunctionDestinationConfig):
+                written = execute_destination_function(config.destination, rows)
+            else:
+                written = self.connectors.create_destination(config.destination).write(rows)
             emit_event(
                 event_sink,
                 WriteCompleted(

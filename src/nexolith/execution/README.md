@@ -14,3 +14,8 @@ Unexpected exceptions propagate unchanged so programming errors remain debuggabl
 
 Keep orchestration independent from CLI formatting and connector-specific behavior. Logs may name
 the exception type but must not include configuration values or credentials.
+
+Named destination functions are resolved during configuration loading. During writing, the runner
+invokes their typed contract through `nexolith.nexofunctions` and records the returned
+`rows_written`. Their destination capability delegates to `SqlDestination`; it does not create a
+parallel write engine or expose SQLAlchemy objects to local functions.

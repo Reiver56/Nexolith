@@ -127,6 +127,41 @@ def test_postgresql_fail_keeps_existing_data(
     assert fetch_rows(postgres_engine, table_name) == original
 
 
+def test_postgresql_upsert_inserts_and_updates_by_primary_key(
+    postgres_url: str, postgres_engine: Engine, table_name: str
+) -> None:
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(f'CREATE TABLE "{table_name}" (id INTEGER PRIMARY KEY, name TEXT NOT NULL)')
+        )
+        connection.execute(text(f"INSERT INTO \"{table_name}\" VALUES (1, 'old')"))
+
+    rows: Rows = [{"id": 1, "name": "updated"}, {"id": 2, "name": "inserted"}]
+    assert SqlDestination(postgres_url, table_name, "append").upsert(rows, ("id",)) == 2
+    assert fetch_rows(postgres_engine, table_name) == rows
+
+
+def test_postgresql_upsert_supports_composite_unique_keys(
+    postgres_url: str, postgres_engine: Engine, table_name: str
+) -> None:
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(
+                f'CREATE TABLE "{table_name}" ('
+                "tenant TEXT NOT NULL, id INTEGER NOT NULL, name TEXT NOT NULL, "
+                "UNIQUE (tenant, id))"
+            )
+        )
+        connection.execute(text(f"INSERT INTO \"{table_name}\" VALUES ('a', 1, 'old')"))
+
+    rows: Rows = [
+        {"tenant": "a", "id": 1, "name": "updated"},
+        {"tenant": "b", "id": 1, "name": "inserted"},
+    ]
+    assert SqlDestination(postgres_url, table_name, "append").upsert(rows, ("tenant", "id")) == 2
+    assert fetch_rows(postgres_engine, table_name, order_by="tenant") == rows
+
+
 # -- NXL-97: Decimal/datetime/date column type inference --------------------
 #
 # Before the fix, _prepare_table's type inference only recognized

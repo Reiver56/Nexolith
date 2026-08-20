@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from nexolith.config.models import (
     CsvDestinationConfig,
     CsvSourceConfig,
+    NexoFunctionDestinationConfig,
     PipelineConfig,
     PythonJobConfig,
     SqlSourceConfig,
@@ -79,6 +80,7 @@ def load_pipeline(
     _resolve_query_file(config, path.parent)
     _resolve_parameters(config, parameter_overrides)
     _resolve_python_jobs(config, path.parent)
+    _resolve_nexo_function(config, path.parent)
     _resolve_csv_paths(config, path.parent)
     return config
 
@@ -138,6 +140,23 @@ def _resolve_python_jobs(config: PipelineConfig, base_dir: Path) -> None:
         module = load_job_module(job_path)
         resolve_entrypoint(module, step.entrypoint, job_path)
         step.file = str(job_path)
+
+
+def _resolve_nexo_function(config: PipelineConfig, project_root: Path) -> None:
+    destination = config.destination
+    if not isinstance(destination, NexoFunctionDestinationConfig):
+        return
+    from nexolith.nexofunctions.loader import load_nexo_function_registry
+
+    registry = load_nexo_function_registry(project_root)
+    definition = registry.lookup(destination.type)
+    try:
+        definition.bind_parameters(destination.parameters)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"Invalid parameters for Nexo Function '{destination.type}': {exc}"
+        ) from exc
+    destination.bind_function(definition)
 
 
 def _resolve_parameters(config: PipelineConfig, overrides: Mapping[str, Scalar] | None) -> None:

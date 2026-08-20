@@ -3,6 +3,8 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import MetaData, Table, create_engine, inspect, text
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -184,6 +186,92 @@ class SqlDestination:
             ) from exc
         finally:
             self.engine.dispose()
+
+    def upsert(self, rows: Rows, conflict_keys: tuple[str, ...]) -> int:
+        """Atomically insert or update rows using a declared unique key."""
+        if not rows:
+            raise ConnectorError("Cannot upsert an empty dataset to SQL")
+        expected_columns = set(rows[0])
+        if any(set(row) != expected_columns for row in rows[1:]):
+            raise ConnectorError("SQL upsert requires every row to contain the same columns.")
+        if not conflict_keys:
+            raise ConnectorError("SQL upsert requires at least one conflict key")
+        if len(conflict_keys) != len(set(conflict_keys)) or any(not key for key in conflict_keys):
+            raise ConnectorError("SQL upsert conflict keys must be non-empty and unique")
+        missing = sorted(key for key in conflict_keys if any(key not in row for row in rows))
+        if missing:
+            raise ConnectorError(
+                "SQL upsert conflict key(s) are absent from incoming rows: " + ", ".join(missing)
+            )
+        try:
+            dialect = self.engine.dialect.name
+            if dialect not in {"sqlite", "postgresql"}:
+                raise ConnectorError(
+                    "This SQL backend does not provide supported safe upsert semantics."
+                )
+            inspector = inspect(self.engine)
+            if not inspector.has_table(self.table):
+                raise ConnectorError(
+                    "SQL upsert requires an existing table with a matching unique constraint."
+                )
+            table = Table(self.table, MetaData(), autoload_with=self.engine)
+            unknown_keys = sorted(set(conflict_keys) - set(table.columns.keys()))
+            if unknown_keys:
+                raise ConnectorError(
+                    "SQL upsert conflict key(s) do not exist in the destination table: "
+                    + ", ".join(unknown_keys)
+                )
+            incoming_columns = set().union(*(row.keys() for row in rows))
+            unknown_columns = sorted(incoming_columns - set(table.columns.keys()))
+            if unknown_columns:
+                raise ConnectorError(
+                    "SQL upsert incoming column(s) do not exist in the destination table: "
+                    + ", ".join(unknown_columns)
+                )
+            if not _has_unique_key(inspector, self.table, conflict_keys):
+                raise ConnectorError(
+                    "SQL upsert conflict keys must match a primary key or unique constraint."
+                )
+
+            insert_factory = postgresql_insert if dialect == "postgresql" else sqlite_insert
+            statement = insert_factory(table)
+            update_columns = [name for name in rows[0] if name not in conflict_keys]
+            if update_columns:
+                statement = statement.on_conflict_do_update(
+                    index_elements=list(conflict_keys),
+                    set_={name: statement.excluded[name] for name in update_columns},
+                )
+            else:
+                statement = statement.on_conflict_do_nothing(index_elements=list(conflict_keys))
+            with self.engine.begin() as connection:
+                connection.execute(statement, rows)
+            return len(rows)
+        except ConnectorError:
+            raise
+        except SQLAlchemyError as exc:
+            raise ConnectorError(
+                "Could not upsert to SQL destination. Check the table, conflict keys, and data."
+            ) from exc
+        finally:
+            self.engine.dispose()
+
+
+def _has_unique_key(inspector: Any, table: str, conflict_keys: tuple[str, ...]) -> bool:
+    expected = set(conflict_keys)
+    primary = inspector.get_pk_constraint(table).get("constrained_columns") or []
+    candidates = [primary]
+    candidates.extend(
+        constraint.get("column_names") or []
+        for constraint in inspector.get_unique_constraints(table)
+    )
+    candidates.extend(
+        index.get("column_names") or []
+        for index in inspector.get_indexes(table)
+        if index.get("unique")
+    )
+    return any(
+        len(columns) == len(conflict_keys) and set(columns) == expected for columns in candidates
+    )
 
 
 def _create_sql_engine(connection_url: str) -> Engine:

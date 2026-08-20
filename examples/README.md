@@ -16,4 +16,8 @@ For DAG orchestration across multiple pipelines and job step types, see:
   [fonolink/sql-enrichment-chain/](fonolink/sql-enrichment-chain/README.md), a focused demo of
   `query_file`-based pipelines chained through a 5-task DAG.
 
+For named reusable destination behavior and trusted project-local discovery, see
+**[nexo-functions/](nexo-functions/README.md)**. It is service-free and demonstrates the local
+function contract without introducing package plugins or Nexo Actions.
+
 Keep examples small and deterministic.

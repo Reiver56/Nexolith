@@ -11,6 +11,17 @@ Everything below has landed since `0.3.0` but is not yet released, grouped by th
 change was built for. A version bump (`0.3.1`–`0.3.4`, or a combined release) is a separate,
 not-yet-authorized step; this file records what shipped, not when it is cut.
 
+### v0.4.0 — Nexo Functions
+
+#### Added
+
+- Added a typed `nexofunction.<name>` registry for reusable destination operations, with deterministic
+  built-ins and trusted project-local discovery from a configuration-relative `nexofunctions/`
+  directory. Local definitions intentionally override built-ins; duplicate or malformed local
+  registrations fail before writing. Initial built-ins provide atomic SQLite/PostgreSQL `upsert`
+  against declared unique conflict keys and `truncate_write` through the existing schema-preserving
+  SQL truncate semantics. This does not add Nexo Actions, package plugins, or sandboxing.
+
 ### v0.3.4 — Web UI Foundations
 
 #### Added
