@@ -1,8 +1,24 @@
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from nexolith.release_validation import ReleaseValidationError, validate_release
+
+REPOSITORY_ROOT = Path(__file__).parents[2]
+
+
+def test_release_tooling_uses_supported_twine_validator() -> None:
+    project = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev_dependencies = project["project"]["optional-dependencies"]["dev"]
+    assert [item for item in dev_dependencies if item.startswith("twine")] == ["twine>=7,<8"]
+
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    assert workflow.count("uv sync --frozen --extra dev --python 3.12") == 1
+    assert workflow.count("uv build --python 3.12") == 1
+    assert workflow.count("uv run twine check dist/*") == 1
 
 
 def write_release_files(root: Path, *, version: str = "1.2.3", status: str = "2026-07-31") -> None:
