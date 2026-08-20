@@ -27,3 +27,5 @@ web/dist/
 web/coverage/
 web/.vite/
 web/.openapi*.json
+examples/nexo-actions/processed.csv
+examples/nexo-actions/action-records.jsonl

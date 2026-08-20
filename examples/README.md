@@ -18,6 +18,10 @@ For DAG orchestration across multiple pipelines and job step types, see:
 
 For named reusable destination behavior and trusted project-local discovery, see
 **[nexo-functions/](nexo-functions/README.md)**. It is service-free and demonstrates the local
-function contract without introducing package plugins or Nexo Actions.
+function contract without introducing package plugins.
+
+For a conditional side effect after a normal destination write, see
+**[nexo-actions/](nexo-actions/README.md)**. It uses deterministic sensor CSV data and a trusted
+local action, with no network, credentials, Docker, or hardware.
 
 Keep examples small and deterministic.

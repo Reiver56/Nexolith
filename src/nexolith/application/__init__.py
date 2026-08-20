@@ -5,6 +5,10 @@ from pathlib import Path
 from nexolith.application.service import PipelineApplication, PipelineLoader
 from nexolith.config import PipelineConfig
 from nexolith.events import (
+    ActionCompleted,
+    ActionFailed,
+    ActionInvocationStarted,
+    ActionNotMatched,
     ApplicationEvent,
     EventSink,
     ExtractionCompleted,
@@ -38,6 +42,10 @@ def run_pipeline(path: Path, *, event_sink: EventSink | None = None) -> Executio
 
 
 __all__ = [
+    "ActionCompleted",
+    "ActionFailed",
+    "ActionInvocationStarted",
+    "ActionNotMatched",
     "ApplicationEvent",
     "EventSink",
     "ExecutionResult",
