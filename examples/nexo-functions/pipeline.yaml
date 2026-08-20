@@ -1,0 +1,11 @@
+name: local_nexo_function
+source:
+  type: csv
+  path: input.csv
+transformations: []
+destination:
+  type: nexofunction.append_write
+  target:
+    type: sqlite
+    connection_url: sqlite:///examples/nexo-functions/nexo-functions.db
+    table: people

@@ -1,7 +1,12 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from nexolith.nexofunctions.contracts import (
+    ConfiguredParameterValue,
+    NexoFunctionDefinition,
+    function_name_from_identifier,
+)
 from nexolith.types import Scalar
 
 
@@ -63,6 +68,36 @@ class SqlDestinationConfig(ComponentConfig):
     mode: Literal["append", "replace", "fail", "truncate"] = "fail"
 
 
+class SqlFunctionTargetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["sqlite", "postgresql"]
+    connection_url: str
+    table: str = Field(min_length=1)
+
+
+class NexoFunctionDestinationConfig(ComponentConfig):
+    type: str
+    target: SqlFunctionTargetConfig
+    parameters: dict[str, ConfiguredParameterValue] = Field(default_factory=dict)
+    _resolved_function: NexoFunctionDefinition | None = PrivateAttr(default=None)
+
+    @field_validator("type")
+    @classmethod
+    def require_function_identifier(cls, value: str) -> str:
+        try:
+            function_name_from_identifier(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
+
+    @property
+    def resolved_function(self) -> NexoFunctionDefinition | None:
+        return self._resolved_function
+
+    def bind_function(self, definition: NexoFunctionDefinition) -> None:
+        self._resolved_function = definition
+
+
 class SelectConfig(ComponentConfig):
     type: Literal["select"]
     columns: list[str] = Field(min_length=1)
@@ -121,7 +156,7 @@ class PythonJobConfig(ComponentConfig):
 
 
 SourceConfig = CsvSourceConfig | SqlSourceConfig
-DestinationConfig = CsvDestinationConfig | SqlDestinationConfig
+DestinationConfig = CsvDestinationConfig | SqlDestinationConfig | NexoFunctionDestinationConfig
 TransformationConfig = (
     SelectConfig | RenameConfig | DropNullsConfig | FilterConfig | PythonJobConfig
 )
@@ -132,7 +167,25 @@ class PipelineConfig(BaseModel):
     name: str = Field(min_length=1)
     source: SourceConfig = Field(discriminator="type")
     transformations: list[TransformationConfig] = Field(default_factory=list)
-    destination: DestinationConfig = Field(discriminator="type")
+    destination: DestinationConfig
+
+    @field_validator("destination", mode="before")
+    @classmethod
+    def select_destination_model(cls, value: Any) -> DestinationConfig:
+        if isinstance(
+            value, CsvDestinationConfig | SqlDestinationConfig | NexoFunctionDestinationConfig
+        ):
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("destination must be a mapping")
+        destination_type = value.get("type")
+        if destination_type == "csv":
+            return CsvDestinationConfig.model_validate(value)
+        if destination_type in {"sqlite", "postgresql"}:
+            return SqlDestinationConfig.model_validate(value)
+        if isinstance(destination_type, str) and destination_type.startswith("nexofunction."):
+            return NexoFunctionDestinationConfig.model_validate(value)
+        raise ValueError(f"unknown destination type: {destination_type!r}")
 
     @classmethod
     def validate_document(cls, document: Any) -> "PipelineConfig":

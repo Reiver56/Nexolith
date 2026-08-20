@@ -53,6 +53,8 @@ process](RELEASING.md).
 - Environment variable substitution using `${VARIABLE_NAME}`
 - Execution status, timing, row counts, and safe error reporting
 - Small registries for adding connectors and transformations
+- Named destination Nexo Functions with built-in upsert/truncate behavior and trusted local
+  discovery
 - A Typer CLI with non-zero exit codes on failure
 - An optional, versioned API for DAG/run monitoring and explicit DAG/scheduler actions
 - A polished, responsive React monitoring UI for DAGs, interactive dependency graphs, recent
@@ -341,6 +343,85 @@ SQL sources accept either `table` or a read-only `query`. SQL destinations suppo
   statement -- see `SqlDestination`'s docstring for why), then insert. Schema and constraints are
   left untouched. The safe alternative to `replace` for a properly-migrated, constrained
   destination schema.
+
+## Nexo Functions
+
+A Nexo Function is a named destination operation: it describes **what write to perform** after
+source extraction and transformations finish. It is not a transformation (it returns a stable
+`NexoFunctionResult` containing `rows_written`, not rows), a `python_job`/script job, or an event
+condition. Nexo Actions are not implemented by this change.
+
+Built-ins use the public `nexofunction.<name>` form. `upsert` requires an existing SQLite or
+PostgreSQL table with a primary key or unique constraint matching every declared conflict key:
+
+```yaml
+destination:
+  type: nexofunction.upsert
+  target:
+    type: sqlite
+    connection_url: sqlite:///orders.db
+    table: orders
+  parameters:
+    conflict_keys: [tenant_id, order_id]
+```
+
+`upsert` validates a non-empty, unique key list before writing, confirms every incoming row carries
+each key, then performs one bound SQLAlchemy Core upsert transaction. It does not interpolate SQL.
+Backends other than SQLite/PostgreSQL, absent tables, or keys without a matching unique constraint
+fail with a capability/configuration diagnostic. Empty input remains an error, matching existing SQL
+destination behavior.
+
+`truncate_write` has the same `target` block and no parameters:
+
+```yaml
+destination:
+  type: nexofunction.truncate_write
+  target:
+    type: postgresql
+    connection_url: ${DATABASE_URL}
+    table: daily_orders
+```
+
+It delegates to the existing `SqlDestination(..., mode="truncate")` path: `DELETE FROM` and insert
+share one transaction, while schema, constraints, types, and sequence behavior remain unchanged.
+
+### Project-local functions
+
+Nexolith scans only `nexofunctions/*.py` beside the pipeline YAML, in filename order. Each module
+exports exactly one `NEXO_FUNCTION`. Two local modules declaring the same name fail clearly. A local
+definition with a built-in name intentionally takes precedence, allowing a trusted project to patch
+behavior locally.
+
+```python
+from nexolith.nexofunctions import (
+    DestinationWriteMode,
+    NexoFunctionContext,
+    NexoFunctionDefinition,
+    NexoFunctionResult,
+)
+from nexolith.types import Rows
+
+
+def run(rows: Rows, context: NexoFunctionContext) -> NexoFunctionResult:
+    written = context.destination.write(rows, DestinationWriteMode.APPEND)
+    return NexoFunctionResult(rows_written=written)
+
+
+NEXO_FUNCTION = NexoFunctionDefinition(name="append_write", execute=run)
+```
+
+The immutable context exposes only declared parameters plus a narrow destination capability.
+Parameter declarations use `NexoFunctionParameter` and `NexoFunctionParameterKind`; unknown,
+missing, or wrongly typed YAML parameters fail during pipeline loading.
+
+> [!WARNING]
+> Local Nexo Functions are trusted local Python code. Loading a pipeline imports these modules and
+> executes their top-level code. There is no sandbox. Do not place untrusted code in
+> `nexofunctions/`. Expected import/execution errors retain chained causes for programmatic callers,
+> while CLI diagnostics omit source, absolute project paths, exception messages, credentials, and
+> raw driver output.
+
+See the [service-free local example](examples/nexo-functions/README.md).
 
 ## Transformations
 
