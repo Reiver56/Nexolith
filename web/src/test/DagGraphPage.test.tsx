@@ -101,8 +101,22 @@ test("contains layout failures and API failures behind safe messages", async () 
   const cyclic: DagGraph = {
     ...dagGraph,
     tasks: [
-      { name: "first", kind: "script", depends_on: ["second"], status: null },
-      { name: "second", kind: "pipeline", depends_on: ["first"], status: null },
+      {
+        name: "first",
+        kind: "script",
+        depends_on: ["second"],
+        status: null,
+        operations: [{ kind: "python", phase: "task", label: "Python script", preview: null, preview_language: null }],
+        actions: [],
+      },
+      {
+        name: "second",
+        kind: "pipeline",
+        depends_on: ["first"],
+        status: null,
+        operations: [{ kind: "pipeline", phase: "source", label: "Pipeline" }],
+        actions: [],
+      },
     ],
   };
   installApiMock({ "/api/v1/dags/cyclic/graph": { body: cyclic } });
@@ -173,186 +187,117 @@ test("rejects graph data with missing schedule state", async () => {
   expect(await screen.findByText("Nexolith returned malformed graph data.")).toBeInTheDocument();
 });
 
-test("shows truthful task icons without labelling ambiguous pipelines as SQL", async () => {
+test("represents typed operations and owner-attached actions on graph nodes", async () => {
   installApiMock();
   renderAt();
 
-  expect((await screen.findAllByRole("img", { name: "Pipeline task" })).length).toBeGreaterThan(0);
-  expect(screen.getByRole("img", { name: "Python script task" })).toBeInTheDocument();
-  expect(screen.getAllByText("Pipeline").length).toBeGreaterThan(0);
-  expect(screen.queryByText(/SQL task/i)).not.toBeInTheDocument();
+  expect((await screen.findAllByText("SQL source")).length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Python script").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Nexo Function").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Nexo Action ×1").length).toBeGreaterThan(0);
+  expect(document.querySelectorAll('img.operation-icon[src*="nexo-monitor-icon"]').length).toBeGreaterThan(0);
+  expect(screen.queryByRole("button", { name: /Open details for Nexo Action/i })).not.toBeInTheDocument();
 });
 
-test("opens, switches, and closes task details with keyboard focus restoration", async () => {
-  installApiMock();
+test("opens, switches, and closes safe task metadata with keyboard focus restoration", async () => {
+  const { requests } = installApiMock();
   const user = userEvent.setup();
   renderAt();
 
   const extract = await screen.findByRole("button", { name: /Open details for extract/i });
   await user.click(extract);
-  const closeExtract = await screen.findByRole("button", { name: "Close details for extract" });
+  const closeExtract = screen.getByRole("button", { name: "Close details for extract" });
   expect(closeExtract).toHaveFocus();
-  expect(screen.getByRole("heading", { name: "Pipeline definition" })).toBeInTheDocument();
-  expect(screen.getByText("name: extract-orders", { exact: false })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
+  expect(screen.getByText("postgresql")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Nexo Actions" })).not.toBeInTheDocument();
 
   await user.click(closeExtract);
-  expect(screen.queryByRole("heading", { name: "Pipeline definition" })).not.toBeInTheDocument();
-  expect(extract).toHaveFocus();
-  await user.click(extract);
-  await screen.findByRole("button", { name: "Close details for extract" });
+  expect(closeExtract.closest("aside")).toHaveAttribute("aria-hidden", "true");
+  expect(
+    screen.getByRole("button", { name: /Open details for extract, SQL source.*Succeeded/ }),
+  ).toHaveFocus();
+  await waitFor(() => {
+    expect(screen.queryByRole("heading", { name: "Operations" })).not.toBeInTheDocument();
+  });
 
   const enrich = screen.getByRole("button", { name: /Open details for enrich/i });
   await user.click(enrich);
-  expect(await screen.findByRole("button", { name: "Close details for enrich" })).toHaveFocus();
-  expect(screen.getByRole("heading", { name: "Python source" })).toBeInTheDocument();
-  expect(screen.getByText("def run(context):", { exact: false })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Close details for enrich" })).toHaveFocus();
+  expect(screen.getByLabelText("Python script signature")).toHaveTextContent(
+    "def run(context): ...",
+  );
+  expect(requests.some((request) => request.path.startsWith("/api/v1/task-details"))).toBe(false);
 
   await user.keyboard("{Escape}");
-  expect(screen.queryByRole("heading", { name: "Python source" })).not.toBeInTheDocument();
-  expect(enrich).toHaveFocus();
+  expect(
+    screen.getByRole("button", { name: /Open details for enrich, Python script, Running/ }),
+  ).toHaveFocus();
+  await waitFor(() => {
+    expect(screen.queryByLabelText("Python script signature")).not.toBeInTheDocument();
+  });
 });
 
-test("renders source-like HTML as text and contains long lines in the code area", async () => {
-  const unsafeSource = '<img src=x onerror="window.pwned=true">' + "x".repeat(600);
-  installApiMock({
-    "/api/v1/task-details?dag_name=billing-close&task_name=extract": {
-      body: {
-        dag_name: "billing-close",
-        task_name: "extract",
-        kind: "pipeline",
-        depends_on: [],
-        latest_status: null,
-        retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
-        source_language: "yaml",
-        source: unsafeSource,
-        source_size_bytes: unsafeSource.length,
-      },
-    },
-  });
+test("explains Nexo Function and Action lifecycle without raw configuration", async () => {
+  installApiMock();
   const user = userEvent.setup();
   renderAt();
-  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
 
-  const code = await screen.findByText(unsafeSource);
-  expect(code.tagName).toBe("CODE");
-  expect(screen.queryAllByRole("img").length).toBeGreaterThan(0);
-  expect(document.querySelector(".task-source img")).toBeNull();
-  expect(code.closest("pre")).toHaveAttribute("data-language", "yaml");
+  await user.click(await screen.findByRole("button", { name: /Open details for publish/i }));
+
+  expect(screen.getByText("nexofunction.upsert_rows")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Nexo Actions" })).toBeInTheDocument();
+  expect(screen.getByText("nexoaction.notify_owner")).toBeInTheDocument();
+  expect(screen.getByText(/Match all: customer_id greater than/)).toBeInTheDocument();
+  expect(screen.getByText("Idempotency fields: order_id")).toBeInTheDocument();
+  expect(screen.getByText(/before the destination write/)).toBeInTheDocument();
+  expect(screen.getByText(/after WriteCompleted/)).toBeInTheDocument();
+  expect(screen.getByText(/at-least-once delivery/)).toBeInTheDocument();
+  expect(screen.getByText(/retry may repeat both the destination write and Action invocation/)).toBeInTheDocument();
+  expect(screen.getByText(/stable idempotency key/)).toBeInTheDocument();
+  expect(screen.getByText(/handler's responsibility/)).toBeInTheDocument();
+  expect(document.querySelector(".task-details-panel")?.textContent).not.toMatch(
+    /connection_url|password|query:|parameters:|C:\\|\/home\//i,
+  );
 });
 
-test("shows typed loading and error states and ignores stale task responses", async () => {
-  let resolveExtract: ((value: { body: unknown }) => void) | undefined;
-  installApiMock({
-    "/api/v1/task-details?dag_name=billing-close&task_name=extract": () =>
-      new Promise((resolve) => {
-        resolveExtract = resolve;
-      }),
-    "/api/v1/task-details?dag_name=billing-close&task_name=enrich": {
-      status: 415,
-      body: {
-        detail: {
-          code: "task_source_invalid_encoding",
-          message: "The task source is not valid UTF-8.",
-        },
-      },
-    },
-  });
-  const user = userEvent.setup();
-  renderAt();
-  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
-  expect(screen.getByRole("status")).toHaveTextContent("Loading task details");
-
-  await user.click(screen.getByRole("button", { name: /Open details for enrich/i }));
-  expect(await screen.findByText("This source cannot be displayed as UTF-8 text.")).toBeInTheDocument();
-
-  resolveExtract?.({
-    body: {
-      dag_name: "billing-close",
-      task_name: "extract",
-      kind: "pipeline",
-      depends_on: [],
-      latest_status: null,
-      retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
-      source_language: "yaml",
-      source: "stale-source-must-not-render",
-      source_size_bytes: 28,
-    },
-  });
-  await Promise.resolve();
-  expect(screen.queryByText("stale-source-must-not-render")).not.toBeInTheDocument();
-});
-
-test("shows an explicit empty source state", async () => {
-  installApiMock({
-    "/api/v1/task-details?dag_name=billing-close&task_name=extract": {
-      body: {
-        dag_name: "billing-close",
-        task_name: "extract",
-        kind: "pipeline",
-        depends_on: [],
-        latest_status: null,
-        retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
-        source_language: "yaml",
-        source: "",
-        source_size_bytes: 0,
-      },
-    },
-  });
-  const user = userEvent.setup();
-  renderAt();
-  await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
-
-  expect(await screen.findByText("The source file is empty.")).toBeInTheDocument();
-  expect(document.querySelector(".task-source pre")).toBeNull();
-});
-
-test("refreshes open task details when graph polling returns new data", async () => {
+test("refreshes the open drawer from graph polling without a duplicate detail request", async () => {
   let graphRequests = 0;
-  let detailRequests = 0;
   const updatedGraph: DagGraph = {
     ...dagGraph,
     tasks: dagGraph.tasks.map((task) =>
       task.name === "extract" ? { ...task, status: "running" } : task,
     ),
   };
-  installApiMock({
+  const { requests } = installApiMock({
     "/api/v1/dags/billing-close/graph": () => {
       graphRequests += 1;
       return { body: graphRequests === 1 ? dagGraph : updatedGraph };
-    },
-    "/api/v1/task-details?dag_name=billing-close&task_name=extract": () => {
-      detailRequests += 1;
-      return {
-        body: {
-          dag_name: "billing-close",
-          task_name: "extract",
-          kind: "pipeline",
-          depends_on: [],
-          latest_status: detailRequests === 1 ? "succeeded" : "running",
-          retry: { retries: 0, retry_delay_seconds: 0, retry_backoff_multiplier: 1 },
-          source_language: "yaml",
-          source: detailRequests === 1 ? "first revision" : "second revision",
-          source_size_bytes: 15,
-        },
-      };
     },
   });
   const user = userEvent.setup();
   renderAt();
   await user.click(await screen.findByRole("button", { name: /Open details for extract/i }));
-  expect(await screen.findByText("first revision")).toBeInTheDocument();
+  expect(screen.getAllByText("Succeeded").length).toBeGreaterThan(0);
 
   await user.click(screen.getByRole("button", { name: /^Refresh$/ }));
 
-  expect(await screen.findByText("second revision")).toBeInTheDocument();
-  expect(detailRequests).toBe(2);
+  await waitFor(() => {
+    expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+  });
+  expect(requests.some((request) => request.path.startsWith("/api/v1/task-details"))).toBe(false);
 });
 
 test("closes open task details when refreshed graph data removes the task", async () => {
   let graphRequests = 0;
   const withoutExtract: DagGraph = {
     ...dagGraph,
-    tasks: dagGraph.tasks.filter((task) => task.name !== "extract"),
+    tasks: dagGraph.tasks
+      .filter((task) => task.name !== "extract")
+      .map((task) => ({
+        ...task,
+        depends_on: task.depends_on.filter((dependency) => dependency !== "extract"),
+      })),
   };
   installApiMock({
     "/api/v1/dags/billing-close/graph": () => {
@@ -370,4 +315,5 @@ test("closes open task details when refreshed graph data removes the task", asyn
   await waitFor(() => {
     expect(screen.queryByRole("button", { name: "Close details for extract" })).not.toBeInTheDocument();
   });
+  expect(document.querySelector(".graph-workspace")).not.toHaveAttribute("data-panel-open");
 });

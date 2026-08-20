@@ -55,9 +55,70 @@ export const dagGraph: DagGraph = {
   schedule: "5m",
   trigger: { on_success_of: ["warehouse-refresh", "inventory sync"] },
   tasks: [
-    { name: "extract", kind: "pipeline", depends_on: [], status: "succeeded" },
-    { name: "enrich", kind: "script", depends_on: ["extract"], status: "running" },
-    { name: "publish", kind: "pipeline", depends_on: ["extract", "enrich"], status: "blocked" },
+    {
+      name: "extract",
+      kind: "pipeline",
+      depends_on: [],
+      status: "succeeded",
+      operations: [
+        { kind: "sql", phase: "source", label: "SQL source", backend: "postgresql" },
+        { kind: "pipeline", phase: "destination", label: "Pipeline destination" },
+      ],
+      actions: [],
+    },
+    {
+      name: "enrich",
+      kind: "script",
+      depends_on: ["extract"],
+      status: "running",
+      operations: [
+        {
+          kind: "python",
+          phase: "task",
+          label: "Python script",
+          preview: "def run(context): ...",
+          preview_language: "python",
+        },
+      ],
+      actions: [],
+    },
+    {
+      name: "publish",
+      kind: "pipeline",
+      depends_on: ["extract", "enrich"],
+      status: "blocked",
+      operations: [
+        { kind: "pipeline", phase: "source", label: "Pipeline source" },
+        {
+          kind: "python",
+          phase: "transformation",
+          label: "Python transformation",
+          preview: "def normalize(rows, context): ...",
+          preview_language: "python",
+        },
+        {
+          kind: "nexo_function",
+          phase: "destination",
+          label: "Nexo Function",
+          identifier: "nexofunction.upsert_rows",
+          backend: "sqlite",
+        },
+      ],
+      actions: [
+        {
+          kind: "nexo_action",
+          label: "Nexo Action",
+          identifier: "nexoaction.notify_owner",
+          match: "all",
+          condition_field: "customer_id",
+          condition_operator: "greater_than",
+          idempotency_fields: ["order_id"],
+          preflight: "before_destination_write",
+          invocation: "after_write_completed",
+          delivery: "at_least_once",
+        },
+      ],
+    },
   ],
   latest_run: {
     id: 12,

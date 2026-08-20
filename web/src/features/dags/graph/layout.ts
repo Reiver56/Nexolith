@@ -1,17 +1,18 @@
 import { MarkerType, Position } from "@xyflow/react";
 import type { Edge, Node } from "@xyflow/react";
 
-import type { DagGraph, TaskRunStatus } from "../../../api/types";
+import type { DagGraph, DagGraphNexoAction, DagGraphOperation, TaskRunStatus } from "../../../api/types";
 
 export type GraphNodeStatus = TaskRunStatus | "no-history" | "unknown";
 
 export type TaskNodeData = {
   kind: "task";
-  taskKind: DagGraph["tasks"][number]["kind"];
   name: string;
   status: GraphNodeStatus;
   statusLabel: string;
   dependencyCount: number;
+  operations: DagGraphOperation[];
+  actions: DagGraphNexoAction[];
 } & Record<string, unknown>;
 
 export type DagNodeData = {
@@ -30,9 +31,10 @@ export interface DagFlowModel {
   edges: DagFlowEdge[];
   dependencySummary: {
     name: string;
-    kind: DagGraph["tasks"][number]["kind"];
     dependsOn: string[];
     statusLabel: string;
+    operations: DagGraphOperation[];
+    actions: DagGraphNexoAction[];
   }[];
   upstreamDags: string[];
 }
@@ -135,11 +137,12 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
         },
         data: {
           kind: "task",
-          taskKind: task.kind,
           name,
           status,
           statusLabel: statusLabel(status),
           dependencyCount: new Set(task.depends_on).size,
+          operations: task.operations,
+          actions: task.actions,
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
@@ -147,7 +150,7 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
         connectable: false,
         selectable: true,
         focusable: false,
-        ariaLabel: `${name}, ${task.kind === "script" ? "Python script" : "pipeline"}, ${statusLabel(status)}, ${String(new Set(task.depends_on).size)} dependencies`,
+        ariaLabel: `${name}, ${task.operations.map((operation) => operation.label).join(", ")}, ${String(task.actions.length)} actions, ${statusLabel(status)}, ${String(new Set(task.depends_on).size)} dependencies`,
         className: `graph-task graph-task--${status}`,
       });
     });
@@ -238,9 +241,10 @@ export function buildDagFlow(graph: DagGraph): DagFlowModel {
       .sort((left, right) => compareText(left.name, right.name))
       .map((task) => ({
         name: task.name,
-        kind: task.kind,
         dependsOn: [...new Set(task.depends_on)].sort(compareText),
         statusLabel: statusLabel(statusFor(graph, task.status)),
+        operations: task.operations,
+        actions: task.actions,
       })),
     upstreamDags,
   };

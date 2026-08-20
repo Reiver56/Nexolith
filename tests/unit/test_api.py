@@ -40,6 +40,11 @@ _SECRET = "NXL_SENTINEL_PASSWORD_7e3a"
 _BASE_URL = "http://127.0.0.1"
 
 
+def _assert_protected_values_absent(text: str, values: tuple[str, ...]) -> None:
+    if any(value in text for value in values):
+        pytest.fail("Graph response contained protected configuration data.", pytrace=False)
+
+
 def _dag_document(*, schedule: str = "5m") -> str:
     return f"""
 name: orders
@@ -242,6 +247,34 @@ def test_docs_metadata_and_semantic_openapi_contract(api_state: tuple[Path, Path
     ]
     assert "source_path" not in json.dumps(source_parameters)
 
+    graph_task = schema["components"]["schemas"]["DagGraphTaskResponse"]
+    operation_items = graph_task["properties"]["operations"]["items"]
+    assert operation_items["discriminator"] == {
+        "propertyName": "kind",
+        "mapping": {
+            "nexo_function": "#/components/schemas/DagGraphNexoFunctionOperationResponse",
+            "pipeline": "#/components/schemas/DagGraphPipelineOperationResponse",
+            "python": "#/components/schemas/DagGraphPythonOperationResponse",
+            "sql": "#/components/schemas/DagGraphSqlOperationResponse",
+        },
+    }
+    assert {
+        item["$ref"].removeprefix("#/components/schemas/") for item in operation_items["oneOf"]
+    } == {
+        "DagGraphPipelineOperationResponse",
+        "DagGraphPythonOperationResponse",
+        "DagGraphSqlOperationResponse",
+        "DagGraphNexoFunctionOperationResponse",
+    }
+    assert graph_task["properties"]["actions"]["items"] == {
+        "$ref": "#/components/schemas/DagGraphNexoActionResponse"
+    }
+    python_operation = schema["components"]["schemas"]["DagGraphPythonOperationResponse"]
+    preview_shapes = python_operation["properties"]["preview"]["anyOf"]
+    assert {
+        shape.get("maxLength") for shape in preview_shapes if shape.get("type") == "string"
+    } == {160}
+
 
 def test_openapi_is_deterministic_for_equivalent_configuration(tmp_path: Path) -> None:
     first = create_app(store_factory=_store_factory(tmp_path / "first.db")).openapi()
@@ -315,8 +348,30 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
         "schedule": "1h",
         "trigger": {"on_success_of": ["ingest"]},
         "tasks": [
-            {"name": "extract", "kind": "pipeline", "depends_on": [], "status": None},
-            {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": None},
+            {
+                "name": "extract",
+                "kind": "pipeline",
+                "depends_on": [],
+                "status": None,
+                "operations": [{"kind": "pipeline", "phase": "source", "label": "Pipeline"}],
+                "actions": [],
+            },
+            {
+                "name": "publish",
+                "kind": "script",
+                "depends_on": ["extract"],
+                "status": None,
+                "operations": [
+                    {
+                        "kind": "python",
+                        "phase": "task",
+                        "label": "Python script",
+                        "preview": "def run(context): ...",
+                        "preview_language": "python",
+                    }
+                ],
+                "actions": [],
+            },
         ],
         "latest_run": None,
         "unmapped_task_history": [],
@@ -341,14 +396,167 @@ def test_dag_graph_combines_current_structure_with_latest_run_safely(
     assert payload["enabled"] is True
     assert payload["schedule"] == "1h"
     assert payload["tasks"] == [
-        {"name": "extract", "kind": "pipeline", "depends_on": [], "status": "succeeded"},
-        {"name": "publish", "kind": "script", "depends_on": ["extract"], "status": "running"},
+        {
+            "name": "extract",
+            "kind": "pipeline",
+            "depends_on": [],
+            "status": "succeeded",
+            "operations": [{"kind": "pipeline", "phase": "source", "label": "Pipeline"}],
+            "actions": [],
+        },
+        {
+            "name": "publish",
+            "kind": "script",
+            "depends_on": ["extract"],
+            "status": "running",
+            "operations": [
+                {
+                    "kind": "python",
+                    "phase": "task",
+                    "label": "Python script",
+                    "preview": "def run(context): ...",
+                    "preview_language": "python",
+                }
+            ],
+            "actions": [],
+        },
     ]
     assert payload["latest_run"]["id"] == run_id
     assert payload["latest_run"]["status"] == "interrupted"
     assert payload["unmapped_task_history"] == [{"name": "retired_task", "status": "blocked"}]
     assert _SECRET not in graph.text
     assert str(dag_path) not in graph.text
+
+
+def test_dag_graph_exposes_typed_function_and_action_metadata_without_secrets(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "state.db"
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    dag_path.write_text(
+        "name: function-actions\ntasks:\n  - name: deliver\n    pipeline: pipeline.yaml\n",
+        encoding="utf-8",
+    )
+    pipeline_path.write_text(
+        """
+name: secure-delivery
+source:
+  type: postgresql
+  connection_url: postgresql://operator:NXL_GRAPH_SECRET@internal/orders
+  query: SELECT * FROM private_orders WHERE region = :region
+  parameters:
+    region: hidden-region
+transformations:
+  - type: python_job
+    file: C:\\private\\transform.py
+    entrypoint: normalize_orders
+    parameters:
+      api_token: hidden-token
+destination:
+  type: nexofunction.upsert_rows
+  target:
+    type: sqlite
+    connection_url: sqlite:///C:/private/output.db
+    table: private_orders
+  parameters:
+    conflict_keys: [order_id]
+actions:
+  - type: nexoaction.notify_owner
+    match: all
+    condition:
+      field: customer_id
+      operator: greater_than
+      value: NXL_GRAPH_SECRET
+    idempotency:
+      fields: [order_id, api_token]
+    parameters:
+      endpoint: https://internal.example.test/hook
+""".lstrip(),
+        encoding="utf-8",
+    )
+    store = StateStore(database_path, process_identity=lambda: _IDENTITY)
+    store.register_dag("function-actions", dag_path, None)
+    store.close()
+
+    response = _client(database_path).get("/api/v1/dags/function-actions/graph")
+
+    assert response.status_code == 200
+    task = response.json()["tasks"][0]
+    assert task["operations"] == [
+        {"kind": "sql", "phase": "source", "label": "SQL source", "backend": "postgresql"},
+        {
+            "kind": "python",
+            "phase": "transformation",
+            "label": "Python transformation",
+            "preview": "def normalize_orders(rows, context): ...",
+            "preview_language": "python",
+        },
+        {
+            "kind": "nexo_function",
+            "phase": "destination",
+            "label": "Nexo Function",
+            "identifier": "nexofunction.upsert_rows",
+            "backend": "sqlite",
+        },
+    ]
+    assert task["actions"] == [
+        {
+            "kind": "nexo_action",
+            "label": "Nexo Action",
+            "identifier": "nexoaction.notify_owner",
+            "match": "all",
+            "condition_field": "customer_id",
+            "condition_operator": "greater_than",
+            "idempotency_fields": ["order_id"],
+            "preflight": "before_destination_write",
+            "invocation": "after_write_completed",
+            "delivery": "at_least_once",
+        }
+    ]
+    forbidden = (
+        "NXL_GRAPH_SECRET",
+        "postgresql://",
+        "sqlite:///",
+        "SELECT *",
+        "hidden-region",
+        "hidden-token",
+        "api_token",
+        "private_orders",
+        "transform.py",
+        "internal.example.test",
+    )
+    _assert_protected_values_absent(response.text, forbidden)
+
+
+def test_dag_graph_keeps_ordinary_csv_pipeline_metadata_minimal(tmp_path: Path) -> None:
+    database_path = tmp_path / "state.db"
+    dag_path = tmp_path / "dag.yaml"
+    pipeline_path = tmp_path / "pipeline.yaml"
+    dag_path.write_text(
+        "name: ordinary\ntasks:\n  - name: copy\n    pipeline: pipeline.yaml\n",
+        encoding="utf-8",
+    )
+    pipeline_path.write_text(
+        "name: copy\nsource:\n  type: csv\n  path: private-input.csv\n"
+        "destination:\n  type: csv\n  path: private-output.csv\n",
+        encoding="utf-8",
+    )
+    store = StateStore(database_path, process_identity=lambda: _IDENTITY)
+    store.register_dag("ordinary", dag_path, None)
+    store.close()
+
+    response = _client(database_path).get("/api/v1/dags/ordinary/graph")
+
+    assert response.status_code == 200
+    assert response.json()["tasks"][0]["operations"] == [
+        {"kind": "pipeline", "phase": "source", "label": "Pipeline source"},
+        {"kind": "pipeline", "phase": "destination", "label": "Pipeline destination"},
+    ]
+    assert response.json()["tasks"][0]["actions"] == []
+    assert "private-input.csv" not in response.text
+    assert "private-output.csv" not in response.text
+    assert _client(database_path).get("/api/v1/dags/ordinary/graph").json() == response.json()
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
@@ -145,11 +145,71 @@ class DagDetailResponse(DagSummaryResponse):
     tasks: list[DagTaskResponse]
 
 
+class DagGraphPipelineOperationResponse(ApiModel):
+    kind: Literal["pipeline"]
+    phase: Literal["source", "destination"]
+    label: str = Field(min_length=1, max_length=64)
+
+
+class DagGraphPythonOperationResponse(ApiModel):
+    kind: Literal["python"]
+    phase: Literal["task", "transformation"]
+    label: str = Field(min_length=1, max_length=64)
+    preview: str | None = Field(default=None, max_length=160)
+    preview_language: Literal["python"] | None = None
+
+
+class DagGraphSqlOperationResponse(ApiModel):
+    kind: Literal["sql"]
+    phase: Literal["source", "destination"]
+    label: str = Field(min_length=1, max_length=64)
+    backend: Literal["sqlite", "postgresql"]
+
+
+class DagGraphNexoFunctionOperationResponse(ApiModel):
+    kind: Literal["nexo_function"]
+    phase: Literal["destination"]
+    label: str = Field(min_length=1, max_length=64)
+    identifier: str = Field(min_length=1, max_length=128)
+    backend: Literal["sqlite", "postgresql"]
+
+
+DagGraphOperationResponse = Annotated[
+    DagGraphPipelineOperationResponse
+    | DagGraphPythonOperationResponse
+    | DagGraphSqlOperationResponse
+    | DagGraphNexoFunctionOperationResponse,
+    Field(discriminator="kind"),
+]
+
+
+class DagGraphNexoActionResponse(ApiModel):
+    kind: Literal["nexo_action"]
+    label: str = Field(min_length=1, max_length=64)
+    identifier: str = Field(min_length=1, max_length=128)
+    match: Literal["any", "all"]
+    condition_field: str | None = Field(default=None, max_length=128)
+    condition_operator: Literal[
+        "equals",
+        "not_equals",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+    ]
+    idempotency_fields: list[str] = Field(max_length=32)
+    preflight: Literal["before_destination_write"]
+    invocation: Literal["after_write_completed"]
+    delivery: Literal["at_least_once"]
+
+
 class DagGraphTaskResponse(ApiModel):
     name: str
     kind: Literal["pipeline", "script"]
     depends_on: list[str]
     status: TaskRunStatus | None
+    operations: list[DagGraphOperationResponse]
+    actions: list[DagGraphNexoActionResponse]
 
 
 class TaskRetryResponse(ApiModel):

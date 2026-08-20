@@ -156,9 +156,69 @@ const TASK_STATUSES = new Set([
   "blocked",
 ]);
 const RUN_STATUSES = new Set(["running", "succeeded", "failed", "interrupted"]);
+const ACTION_OPERATORS = new Set([
+  "equals",
+  "not_equals",
+  "greater_than",
+  "greater_than_or_equal",
+  "less_than",
+  "less_than_or_equal",
+]);
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isGraphOperation(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const operation = value as Record<string, unknown>;
+  if (typeof operation.label !== "string") {
+    return false;
+  }
+  if (operation.kind === "pipeline") {
+    return operation.phase === "source" || operation.phase === "destination";
+  }
+  if (operation.kind === "python") {
+    return (
+      (operation.phase === "task" || operation.phase === "transformation") &&
+      (operation.preview === null || typeof operation.preview === "string") &&
+      (operation.preview_language === null || operation.preview_language === "python")
+    );
+  }
+  if (operation.kind === "sql") {
+    return (
+      (operation.phase === "source" || operation.phase === "destination") &&
+      (operation.backend === "sqlite" || operation.backend === "postgresql")
+    );
+  }
+  return (
+    operation.kind === "nexo_function" &&
+    operation.phase === "destination" &&
+    typeof operation.identifier === "string" &&
+    (operation.backend === "sqlite" || operation.backend === "postgresql")
+  );
+}
+
+function isGraphAction(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const action = value as Record<string, unknown>;
+  return (
+    action.kind === "nexo_action" &&
+    typeof action.label === "string" &&
+    typeof action.identifier === "string" &&
+    (action.match === "any" || action.match === "all") &&
+    (action.condition_field === null || typeof action.condition_field === "string") &&
+    typeof action.condition_operator === "string" &&
+    ACTION_OPERATORS.has(action.condition_operator) &&
+    isStringArray(action.idempotency_fields) &&
+    action.preflight === "before_destination_write" &&
+    action.invocation === "after_write_completed" &&
+    action.delivery === "at_least_once"
+  );
 }
 
 function isDagGraph(value: unknown): value is DagGraph {
@@ -190,6 +250,10 @@ function isDagGraph(value: unknown): value is DagGraph {
       typeof candidate.name === "string" &&
       (candidate.kind === "pipeline" || candidate.kind === "script") &&
       isStringArray(candidate.depends_on) &&
+      Array.isArray(candidate.operations) &&
+      candidate.operations.every(isGraphOperation) &&
+      Array.isArray(candidate.actions) &&
+      candidate.actions.every(isGraphAction) &&
       (candidate.status === null ||
         (typeof candidate.status === "string" && TASK_STATUSES.has(candidate.status)))
     );
