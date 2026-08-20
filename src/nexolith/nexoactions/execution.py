@@ -1,10 +1,11 @@
-"""Declarative condition evaluation and post-write Action invocation."""
+"""Side-effect-free Action preparation and post-write invocation."""
 
 import hashlib
 import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from nexolith.config.models import NexoActionConfig
 from nexolith.events import (
@@ -31,10 +32,78 @@ from nexolith.types import Rows, Scalar
 
 @dataclass(frozen=True, slots=True)
 class _PreparedAction:
-    config: NexoActionConfig
-    matched_rows: Rows
+    identifier: str
+    matched_rows: tuple[Mapping[str, Scalar], ...]
     definition: NexoActionDefinition | None = None
     context: NexoActionContext | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedActions:
+    items: tuple[_PreparedAction, ...]
+
+
+def prepare_actions(
+    actions: list[NexoActionConfig],
+    rows: Rows,
+    *,
+    pipeline_name: str,
+) -> _PreparedActions:
+    """Validate and freeze every Action without invoking handlers or emitting events."""
+    return _PreparedActions(
+        tuple(_prepare_action(action, rows, pipeline_name) for action in actions)
+    )
+
+
+def execute_prepared_actions(
+    prepared: _PreparedActions,
+    *,
+    event_sink: EventSink | None,
+    outcomes: list[NexoActionExecutionResult],
+) -> None:
+    """Invoke an already validated batch in declaration order."""
+    for item in prepared.items:
+        identifier = item.identifier
+        matched = [dict(row) for row in item.matched_rows]
+        if item.context is None or item.definition is None:
+            outcomes.append(
+                NexoActionExecutionResult(
+                    identifier,
+                    NexoActionExecutionStatus.NOT_MATCHED,
+                    len(matched),
+                )
+            )
+            emit_event(event_sink, ActionNotMatched(identifier, len(matched)))
+            continue
+
+        key = item.context.idempotency_key
+        emit_event(event_sink, ActionInvocationStarted(identifier, len(matched), key))
+        try:
+            handler_result = item.definition.execute(matched, item.context)
+            if not isinstance(handler_result, NexoActionResult):
+                raise TypeError("handler must return NexoActionResult")
+        except Exception as exc:
+            outcomes.append(
+                NexoActionExecutionResult(
+                    identifier,
+                    NexoActionExecutionStatus.FAILED,
+                    len(matched),
+                    key,
+                )
+            )
+            emit_event(event_sink, ActionFailed(identifier, len(matched), key))
+            raise ExecutionError(
+                f"Nexo Action '{identifier}' failed with {type(exc).__name__}."
+            ) from exc
+        outcomes.append(
+            NexoActionExecutionResult(
+                identifier,
+                NexoActionExecutionStatus.COMPLETED,
+                len(matched),
+                key,
+            )
+        )
+        emit_event(event_sink, ActionCompleted(identifier, len(matched), key))
 
 
 def execute_actions(
@@ -45,51 +114,12 @@ def execute_actions(
     event_sink: EventSink | None,
     outcomes: list[NexoActionExecutionResult],
 ) -> None:
-    # Preflight every action before the first handler. A late schema,
-    # parameter, or idempotency error cannot follow an earlier side effect.
-    prepared = [_prepare_action(action, rows, pipeline_name) for action in actions]
-    for item in prepared:
-        action = item.config
-        matched = item.matched_rows
-        if item.context is None or item.definition is None:
-            outcomes.append(
-                NexoActionExecutionResult(
-                    action.type,
-                    NexoActionExecutionStatus.NOT_MATCHED,
-                    len(matched),
-                )
-            )
-            emit_event(event_sink, ActionNotMatched(action.type, len(matched)))
-            continue
-
-        key = item.context.idempotency_key
-        emit_event(event_sink, ActionInvocationStarted(action.type, len(matched), key))
-        try:
-            handler_result = item.definition.execute(matched, item.context)
-            if not isinstance(handler_result, NexoActionResult):
-                raise TypeError("handler must return NexoActionResult")
-        except Exception as exc:
-            outcomes.append(
-                NexoActionExecutionResult(
-                    action.type,
-                    NexoActionExecutionStatus.FAILED,
-                    len(matched),
-                    key,
-                )
-            )
-            emit_event(event_sink, ActionFailed(action.type, len(matched), key))
-            raise ExecutionError(
-                f"Nexo Action '{action.type}' failed with {type(exc).__name__}."
-            ) from exc
-        outcomes.append(
-            NexoActionExecutionResult(
-                action.type,
-                NexoActionExecutionStatus.COMPLETED,
-                len(matched),
-                key,
-            )
-        )
-        emit_event(event_sink, ActionCompleted(action.type, len(matched), key))
+    """Prepare and immediately invoke Actions outside pipeline orchestration."""
+    execute_prepared_actions(
+        prepare_actions(actions, rows, pipeline_name=pipeline_name),
+        event_sink=event_sink,
+        outcomes=outcomes,
+    )
 
 
 def _prepare_action(action: NexoActionConfig, rows: Rows, pipeline_name: str) -> _PreparedAction:
@@ -103,12 +133,6 @@ def _prepare_action(action: NexoActionConfig, rows: Rows, pipeline_name: str) ->
         action.match is NexoActionMatchMode.ANY
         or (action.match is NexoActionMatchMode.ALL and len(matched) == len(rows))
     )
-    if not should_invoke:
-        return _PreparedAction(action, matched)
-
-    key = derive_idempotency_key(
-        pipeline_name, action.type, matched, tuple(action.idempotency.fields)
-    )
     definition = action.resolved_action
     if definition is None:
         raise ExecutionError(f"Nexo Action '{action.type}' was not resolved.")
@@ -116,8 +140,18 @@ def _prepare_action(action: NexoActionConfig, rows: Rows, pipeline_name: str) ->
         parameters = definition.bind_parameters(action.parameters)
     except ValueError as exc:
         raise ExecutionError(f"Nexo Action '{action.type}' has invalid parameters.") from exc
+    if not should_invoke:
+        return _PreparedAction(action.type, _freeze_rows(matched))
+
+    key = derive_idempotency_key(
+        pipeline_name, action.type, matched, tuple(action.idempotency.fields)
+    )
     context = NexoActionContext(pipeline_name, action.type, key, parameters)
-    return _PreparedAction(action, matched, definition, context)
+    return _PreparedAction(action.type, _freeze_rows(matched), definition, context)
+
+
+def _freeze_rows(rows: Rows) -> tuple[Mapping[str, Scalar], ...]:
+    return tuple(MappingProxyType(dict(row)) for row in rows)
 
 
 def _matched_rows(rows: Rows, condition: NexoActionCondition) -> Rows:

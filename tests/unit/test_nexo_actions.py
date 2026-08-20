@@ -13,6 +13,8 @@ from nexolith.application import (
     ActionNotMatched,
     ApplicationEvent,
     PipelineExecutionCompleted,
+    PipelineFailed,
+    PipelinePhase,
     WriteCompleted,
 )
 from nexolith.cli.app import app
@@ -31,6 +33,7 @@ from nexolith.exceptions import ConfigurationError, ExecutionError
 from nexolith.execution import DefaultPipelineRunner
 from nexolith.models import ExecutionStatus
 from nexolith.nexoactions import (
+    NexoActionContext,
     NexoActionDefinition,
     NexoActionExecutionResult,
     NexoActionExecutionStatus,
@@ -534,6 +537,114 @@ def test_pipeline_invokes_action_after_write_without_counting_it_as_rows() -> No
     assert event_types[-2:] == [ActionCompleted, PipelineExecutionCompleted]
 
 
+def test_pipeline_preflights_every_action_before_destination_write() -> None:
+    order: list[str] = []
+    secret = "raw-sensitive-row-value"
+
+    def handler(_rows: Rows, _context: object) -> NexoActionResult:
+        order.append("action")
+        return NexoActionResult()
+
+    class SensitiveSource:
+        def read(self) -> Rows:
+            return [{"id": secret, "status": "alert"}]
+
+    invalid = NexoActionConfig(
+        type="nexoaction.second_alert",
+        condition=NexoActionConditionConfig(field="missing", operator="equals", value="alert"),
+        idempotency=NexoActionIdempotencyConfig(fields=["id"]),
+    )
+    invalid.bind_action(NexoActionDefinition("second_alert", handler))
+    config = PipelineConfig(
+        name="orders",
+        source=CsvSourceConfig(type="csv", path="unused"),
+        destination=CsvDestinationConfig(type="csv", path="unused"),
+        actions=[_action_config(handler), invalid],
+    )
+    connectors = ConnectorRegistry()
+    connectors.register_source("csv", lambda _config: SensitiveSource())
+    connectors.register_destination("csv", lambda _config: Destination(order))
+    sink = RecordingSink()
+
+    result = DefaultPipelineRunner(connectors=connectors).run(config, event_sink=sink)
+
+    action_events = [
+        event
+        for event in sink.events
+        if isinstance(event, ActionInvocationStarted | ActionCompleted | ActionFailed)
+    ]
+    failures = [event for event in sink.events if isinstance(event, PipelineFailed)]
+    assert (order, result.rows_written, result.status, action_events) == (
+        [],
+        0,
+        ExecutionStatus.FAILED,
+        [],
+    )
+    assert len(failures) == 1
+    assert failures[0].phase is PipelinePhase.ACTIONS
+    _assert_sensitive_absent(str(result.error) + repr(sink.events), [secret])
+
+
+def test_non_matching_action_is_reported_only_after_destination_write() -> None:
+    order: list[str] = []
+    config = PipelineConfig(
+        name="orders",
+        source=CsvSourceConfig(type="csv", path="unused"),
+        destination=CsvDestinationConfig(type="csv", path="unused"),
+        actions=[_action_config(lambda _rows, _context: NexoActionResult(), value="other")],
+    )
+    connectors = ConnectorRegistry()
+    connectors.register_source("csv", lambda _config: Source())
+    connectors.register_destination("csv", lambda _config: Destination(order))
+    sink = RecordingSink()
+
+    result = DefaultPipelineRunner(connectors=connectors).run(config, event_sink=sink)
+
+    assert order == ["write"]
+    assert result.actions == [
+        NexoActionExecutionResult(
+            "nexoaction.record_alert", NexoActionExecutionStatus.NOT_MATCHED, 0
+        )
+    ]
+    event_types = [type(event) for event in sink.events]
+    assert event_types.index(WriteCompleted) < event_types.index(ActionNotMatched)
+
+
+def test_prepared_rows_and_idempotency_key_survive_destination_mutation() -> None:
+    source_rows: Rows = [{"id": 1, "status": "alert"}]
+    received: list[tuple[Rows, str]] = []
+
+    def handler(rows: Rows, context: NexoActionContext) -> NexoActionResult:
+        received.append((rows, context.idempotency_key))
+        return NexoActionResult()
+
+    class MutableSource:
+        def read(self) -> Rows:
+            return source_rows
+
+    class MutatingDestination:
+        def write(self, rows: Rows) -> int:
+            rows[0].clear()
+            return 1
+
+    action = _action_config(handler)
+    config = PipelineConfig(
+        name="orders",
+        source=CsvSourceConfig(type="csv", path="unused"),
+        destination=CsvDestinationConfig(type="csv", path="unused"),
+        actions=[action],
+    )
+    connectors = ConnectorRegistry()
+    connectors.register_source("csv", lambda _config: MutableSource())
+    connectors.register_destination("csv", lambda _config: MutatingDestination())
+    expected_key = derive_idempotency_key("orders", "nexoaction.record_alert", source_rows, ("id",))
+
+    result = DefaultPipelineRunner(connectors=connectors).run(config)
+
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert received == [([{"id": 1, "status": "alert"}], expected_key)]
+
+
 def test_action_failure_happens_after_write_and_fails_pipeline() -> None:
     order: list[str] = []
 
@@ -550,13 +661,17 @@ def test_action_failure_happens_after_write_and_fails_pipeline() -> None:
     connectors = ConnectorRegistry()
     connectors.register_source("csv", lambda _config: Source())
     connectors.register_destination("csv", lambda _config: Destination(order))
+    sink = RecordingSink()
 
-    result = DefaultPipelineRunner(connectors=connectors).run(config)
+    result = DefaultPipelineRunner(connectors=connectors).run(config, event_sink=sink)
 
     assert order == ["write", "action"]
     assert result.status is ExecutionStatus.FAILED
     assert result.rows_written == 1
     assert result.actions[0].status is NexoActionExecutionStatus.FAILED
+    event_types = [type(event) for event in sink.events]
+    assert event_types.index(WriteCompleted) < event_types.index(ActionInvocationStarted)
+    assert event_types.index(ActionInvocationStarted) < event_types.index(ActionFailed)
 
 
 def test_dag_retry_reuses_same_key_and_persists_honest_attempts(tmp_path: Path) -> None:

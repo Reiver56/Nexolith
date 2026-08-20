@@ -428,10 +428,11 @@ See the [service-free local example](examples/nexo-functions/README.md).
 
 ## Nexo Actions
 
-The first Nexo Actions slice is one explicit **post-write pipeline hook**. Extraction and
-transformations run, the configured destination completes, then each declared action is evaluated
-and invoked sequentially. Transformed rows genuinely remain available at this boundary. This is
-not a terminal destination and does not add a global event bus.
+The first Nexo Actions slice uses a side-effect-free preflight followed by an explicit **post-write
+pipeline hook**. After extraction and transformation, Nexolith evaluates every declared condition,
+validates matched rows, binds handler parameters, and prepares stable keys for matching Actions
+before the destination runs. Only after the destination completes are the prepared handlers invoked
+sequentially. This is not a terminal destination and does not add a global event bus.
 
 ```yaml
 actions:
@@ -451,8 +452,8 @@ Actions support `equals`, `not_equals`, `less_than`, `less_than_or_equal`, `grea
 `greater_than_or_equal`. Equality accepts strings, booleans, finite numbers, and null; null equals
 only null. Ordered comparisons require both values to be finite numbers or both strings. Numeric
 integers and floats are compatible; booleans are not numbers. Missing condition fields,
-incompatible types, non-finite numbers, and missing idempotency fields fail before the handler is
-called. The complete condition batch is validated first.
+incompatible types, non-finite numbers, and missing idempotency fields fail before the destination
+is called. The complete Action batch is prepared before any destination or handler side effect.
 
 `match: any` invokes when at least one row matches. `match: all` invokes only when every row
 matches; an empty batch never invokes. The handler receives matched rows only, in pipeline order.
