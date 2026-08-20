@@ -1,6 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+
+from nexolith.nexoactions.contracts import NexoActionExecutionResult
 
 
 class ExecutionStatus(StrEnum):
@@ -21,6 +23,7 @@ class ExecutionResult:
     rows_read: int = 0
     rows_written: int = 0
     error: str | None = None
+    actions: list[NexoActionExecutionResult] = field(default_factory=list)
 
     @property
     def duration_seconds(self) -> float | None:

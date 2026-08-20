@@ -1,0 +1,19 @@
+name: sensor_alerts
+source:
+  type: csv
+  path: input.csv
+transformations: []
+destination:
+  type: csv
+  path: processed.csv
+actions:
+  - type: nexoaction.record_sensor_alert
+    condition:
+      field: status
+      operator: equals
+      value: alert
+    match: any
+    idempotency:
+      fields: [sensor_id, observed_at]
+    parameters:
+      output_path: action-records.jsonl

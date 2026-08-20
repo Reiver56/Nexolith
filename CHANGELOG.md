@@ -11,7 +11,7 @@ Everything below has landed since `0.3.0` but is not yet released, grouped by th
 change was built for. A version bump (`0.3.1`–`0.3.4`, or a combined release) is a separate,
 not-yet-authorized step; this file records what shipped, not when it is cut.
 
-### v0.4.0 — Nexo Functions
+### v0.4.0 — Nexo Functions and Actions
 
 #### Added
 
@@ -20,7 +20,12 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   directory. Local definitions intentionally override built-ins; duplicate or malformed local
   registrations fail before writing. Initial built-ins provide atomic SQLite/PostgreSQL `upsert`
   against declared unique conflict keys and `truncate_write` through the existing schema-preserving
-  SQL truncate semantics. This does not add Nexo Actions, package plugins, or sandboxing.
+  SQL truncate semantics. This does not add package plugins or sandboxing.
+- Added declarative post-write `nexoaction.<name>` hooks with typed conditions, deterministic
+  trusted-local discovery, and opaque stable idempotency keys. Handlers receive only matched rows;
+  failures fail the pipeline and existing DAG retries can invoke both the destination write and
+  action again. Nexolith does not persist action receipts, so the guarantee is at-least-once with
+  handler-owned deduplication, not exactly-once delivery.
 
 ### v0.3.4 — Web UI Foundations
 

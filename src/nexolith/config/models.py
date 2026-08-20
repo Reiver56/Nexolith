@@ -2,6 +2,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from nexolith.nexoactions.contracts import (
+    ConfiguredActionParameterValue,
+    NexoActionDefinition,
+    NexoActionMatchMode,
+    NexoActionOperator,
+    action_name_from_identifier,
+)
 from nexolith.nexofunctions.contracts import (
     ConfiguredParameterValue,
     NexoFunctionDefinition,
@@ -155,6 +162,53 @@ class PythonJobConfig(ComponentConfig):
     parameters: dict[str, Scalar] = Field(default_factory=dict)
 
 
+class NexoActionConditionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field: str = Field(min_length=1)
+    operator: NexoActionOperator
+    value: Scalar
+
+
+class NexoActionIdempotencyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fields: list[str] = Field(min_length=1)
+
+    @field_validator("fields")
+    @classmethod
+    def require_unique_non_empty_fields(cls, fields: list[str]) -> list[str]:
+        if any(not field for field in fields):
+            raise ValueError("idempotency fields cannot be empty")
+        if len(fields) != len(set(fields)):
+            raise ValueError("idempotency fields cannot contain duplicates")
+        return fields
+
+
+class NexoActionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str
+    condition: NexoActionConditionConfig
+    match: NexoActionMatchMode = NexoActionMatchMode.ANY
+    idempotency: NexoActionIdempotencyConfig
+    parameters: dict[str, ConfiguredActionParameterValue] = Field(default_factory=dict)
+    _resolved_action: NexoActionDefinition | None = PrivateAttr(default=None)
+
+    @field_validator("type")
+    @classmethod
+    def require_action_identifier(cls, value: str) -> str:
+        try:
+            action_name_from_identifier(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return value
+
+    @property
+    def resolved_action(self) -> NexoActionDefinition | None:
+        return self._resolved_action
+
+    def bind_action(self, definition: NexoActionDefinition) -> None:
+        self._resolved_action = definition
+
+
 SourceConfig = CsvSourceConfig | SqlSourceConfig
 DestinationConfig = CsvDestinationConfig | SqlDestinationConfig | NexoFunctionDestinationConfig
 TransformationConfig = (
@@ -168,6 +222,7 @@ class PipelineConfig(BaseModel):
     source: SourceConfig = Field(discriminator="type")
     transformations: list[TransformationConfig] = Field(default_factory=list)
     destination: DestinationConfig
+    actions: list[NexoActionConfig] = Field(default_factory=list)
 
     @field_validator("destination", mode="before")
     @classmethod
@@ -186,6 +241,13 @@ class PipelineConfig(BaseModel):
         if isinstance(destination_type, str) and destination_type.startswith("nexofunction."):
             return NexoFunctionDestinationConfig.model_validate(value)
         raise ValueError(f"unknown destination type: {destination_type!r}")
+
+    @model_validator(mode="after")
+    def require_unique_actions(self) -> "PipelineConfig":
+        identifiers = [action.type for action in self.actions]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("Nexo Action identifiers must be unique within a pipeline")
+        return self
 
     @classmethod
     def validate_document(cls, document: Any) -> "PipelineConfig":

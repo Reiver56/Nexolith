@@ -48,6 +48,8 @@ process](RELEASING.md).
 - DAG orchestration across multiple pipelines: dependencies, retries, failure-propagation
   policy, cross-DAG triggers, priority, and severity, with a scheduler daemon and persisted
   run history (see [CLI](#cli))
+- Declarative post-write Nexo Actions with typed row conditions, stable idempotency keys, and
+  trusted local handlers
 - An interactive CLI session — full-screen with tab-completion on a capable terminal, a
   plain-text line loop otherwise — alongside scriptable one-shot commands
 - Environment variable substitution using `${VARIABLE_NAME}`
@@ -349,7 +351,8 @@ SQL sources accept either `table` or a read-only `query`. SQL destinations suppo
 A Nexo Function is a named destination operation: it describes **what write to perform** after
 source extraction and transformations finish. It is not a transformation (it returns a stable
 `NexoFunctionResult` containing `rows_written`, not rows), a `python_job`/script job, or an event
-condition. Nexo Actions are not implemented by this change.
+condition. A Nexo Action instead describes **when and why** a separate explicit side effect runs;
+see [Nexo Actions](#nexo-actions).
 
 Built-ins use the public `nexofunction.<name>` form. `upsert` requires an existing SQLite or
 PostgreSQL table with a primary key or unique constraint matching every declared conflict key:
@@ -422,6 +425,94 @@ missing, or wrongly typed YAML parameters fail during pipeline loading.
 > raw driver output.
 
 See the [service-free local example](examples/nexo-functions/README.md).
+
+## Nexo Actions
+
+The first Nexo Actions slice is one explicit **post-write pipeline hook**. Extraction and
+transformations run, the configured destination completes, then each declared action is evaluated
+and invoked sequentially. Transformed rows genuinely remain available at this boundary. This is
+not a terminal destination and does not add a global event bus.
+
+```yaml
+actions:
+  - type: nexoaction.record_sensor_alert
+    condition:
+      field: score
+      operator: greater_than_or_equal
+      value: 80
+    match: any
+    idempotency:
+      fields: [sensor_id, observed_at]
+    parameters:
+      output_path: action-records.jsonl
+```
+
+Actions support `equals`, `not_equals`, `less_than`, `less_than_or_equal`, `greater_than`, and
+`greater_than_or_equal`. Equality accepts strings, booleans, finite numbers, and null; null equals
+only null. Ordered comparisons require both values to be finite numbers or both strings. Numeric
+integers and floats are compatible; booleans are not numbers. Missing condition fields,
+incompatible types, non-finite numbers, and missing idempotency fields fail before the handler is
+called. The complete condition batch is validated first.
+
+`match: any` invokes when at least one row matches. `match: all` invokes only when every row
+matches; an empty batch never invokes. The handler receives matched rows only, in pipeline order.
+A non-match emits a typed `not_matched` outcome and the pipeline continues successfully.
+
+### Stable keys and retry semantics
+
+Before invocation, Nexolith selects only the declared idempotency fields from every matched row,
+sorts field names and row identities deterministically, canonicalizes them as JSON, namespaces the
+material by pipeline and action identifier, and exposes its SHA-256 digest as
+`context.idempotency_key`. Row order and idempotency-field declaration order do not change the key;
+raw values and credentials never appear in it.
+
+Nexolith does **not** persist action receipts in this slice. The actual guarantee is at-least-once
+invocation with a stable idempotency key; the trusted handler must use that key to deduplicate its
+own external side effect. A DAG task retry reruns the whole pipeline: the destination write and
+action can both repeat, while identical transformed input gives the action the same key. There is
+no new standalone action retry.
+
+An action failure occurs after the destination has already reported success, fails the pipeline
+and therefore the DAG task, and records the existing failed task/attempt/run state. The original
+handler exception remains chained for programmatic inspection, while CLI diagnostics omit its raw
+message. `KeyboardInterrupt`, `SystemExit`, and other process-level interruptions are not caught.
+Standalone pipeline runs do not create DAG history; action outcomes remain in the returned
+`ExecutionResult` and typed application events only.
+
+### Project-local actions
+
+Nexolith scans only `nexoactions/*.py` beside the pipeline YAML, in filename order. Each module
+exports exactly one `NEXO_ACTION`; duplicate names, malformed exports, symlinked directories, and
+path escapes fail during loading. No built-in action is supplied merely to populate the registry.
+Each `nexoaction.<name>` identifier may appear at most once in a pipeline, keeping its stable-key
+namespace unambiguous.
+
+```python
+from nexolith.nexoactions import (
+    NexoActionContext,
+    NexoActionDefinition,
+    NexoActionResult,
+)
+from nexolith.types import Rows
+
+
+def run(rows: Rows, context: NexoActionContext) -> NexoActionResult:
+    deliver_once(rows, idempotency_key=context.idempotency_key)
+    return NexoActionResult()
+
+
+NEXO_ACTION = NexoActionDefinition(name="deliver_alert", execute=run)
+```
+
+> [!WARNING]
+> Local Nexo Actions are trusted, unsandboxed Python. Loading the pipeline imports their modules
+> and executes top-level code. Handlers can perform real side effects, so keep them idempotent and
+> never load code from untrusted projects.
+
+See the [service-free example](examples/nexo-actions/README.md). Polling such a pipeline through an
+interval-scheduled DAG can approximate operational real-time for slow-changing inputs. True push
+delivery, streaming, distributed workers, remote plugins, action receipts, UI controls, and
+exactly-once execution remain deliberately unsupported.
 
 ## Transformations
 

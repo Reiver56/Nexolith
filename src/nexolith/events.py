@@ -19,6 +19,7 @@ class PipelinePhase(StrEnum):
     EXTRACTION = "extraction"
     TRANSFORMATION = "transformation"
     WRITING = "writing"
+    ACTIONS = "actions"
 
 
 class FailureCategory(StrEnum):
@@ -85,6 +86,33 @@ class WriteCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionNotMatched:
+    action_identifier: str
+    matched_rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class ActionInvocationStarted:
+    action_identifier: str
+    matched_rows: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActionCompleted:
+    action_identifier: str
+    matched_rows: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActionFailed:
+    action_identifier: str
+    matched_rows: int
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
 class PipelineExecutionCompleted:
     pipeline_name: str
     rows_read: int
@@ -110,6 +138,10 @@ type ApplicationEvent = (
     | WriteStarted
     | WriteCompleted
     | PipelineExecutionCompleted
+    | ActionNotMatched
+    | ActionInvocationStarted
+    | ActionCompleted
+    | ActionFailed
     | PipelineFailed
 )
 

@@ -26,6 +26,7 @@ from nexolith.exceptions import (
     TransformationError,
 )
 from nexolith.models.execution import ExecutionResult
+from nexolith.nexoactions.execution import execute_actions
 from nexolith.nexofunctions.destination import execute_destination_function
 from nexolith.transformations.registry import (
     TransformationRegistry,
@@ -120,6 +121,15 @@ class DefaultPipelineRunner:
                     pipeline_name=config.name,
                     rows_written=written,
                 ),
+            )
+            result.rows_written = written
+            phase = PipelinePhase.ACTIONS
+            execute_actions(
+                config.actions,
+                rows,
+                pipeline_name=config.name,
+                event_sink=event_sink,
+                outcomes=result.actions,
             )
             result.succeed(written)
             logger.info("Pipeline '%s' succeeded", config.name)
