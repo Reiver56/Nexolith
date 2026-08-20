@@ -14,7 +14,7 @@ import {
   useReactFlow,
 } from "@xyflow/react";
 import type { EdgeChange, NodeChange, NodeProps, NodeTypes } from "@xyflow/react";
-import { createContext, useContext, useEffect } from "react";
+import { createContext, useContext, useEffect, useRef } from "react";
 
 import type {
   DagFlowEdge,
@@ -24,14 +24,26 @@ import type {
   TaskFlowNode,
 } from "./layout";
 import { prefersReducedMotion } from "../../../utils/motion";
-import { TaskKindIcon } from "./TaskKindIcon";
-import { taskKindLabel } from "./taskKinds";
+import { OperationIcon } from "./OperationIcon";
 
 type SelectTask = (taskName: string, trigger: HTMLButtonElement) => void;
-const TaskSelectionContext = createContext<SelectTask>(() => undefined);
+const TaskSelectionContext = createContext<{
+  selectTask: SelectTask;
+  restoreTaskName: string | null;
+}>({ selectTask: () => undefined, restoreTaskName: null });
 
 function TaskNode({ data, selected }: NodeProps<TaskFlowNode>) {
-  const selectTask = useContext(TaskSelectionContext);
+  const { selectTask, restoreTaskName } = useContext(TaskSelectionContext);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const operations = data.operations.filter(
+    (operation, index, all) =>
+      all.findIndex((candidate) => candidate.kind === operation.kind) === index,
+  );
+  useEffect(() => {
+    if (restoreTaskName === data.name) {
+      buttonRef.current?.focus();
+    }
+  }, [data.name, restoreTaskName]);
   return (
     <div className="task-node" data-selected={selected || undefined} data-status={data.status}>
       <Handle
@@ -41,6 +53,7 @@ function TaskNode({ data, selected }: NodeProps<TaskFlowNode>) {
         isConnectable={false}
       />
       <button
+        ref={buttonRef}
         className="task-node__select nodrag nopan"
         type="button"
         data-task-name={data.name}
@@ -48,13 +61,23 @@ function TaskNode({ data, selected }: NodeProps<TaskFlowNode>) {
           selectTask(data.name, event.currentTarget);
         }}
         aria-pressed={selected}
-        aria-label={`Open details for ${data.name}, ${taskKindLabel(data.taskKind)}, ${data.statusLabel}`}
+        aria-label={`Open details for ${data.name}, ${operations.map((operation) => operation.label).join(", ")}, ${String(data.actions.length)} actions, ${data.statusLabel}`}
       >
-        <span className="task-node__heading">
-          <TaskKindIcon kind={data.taskKind} />
-          <span className="task-node__kind">{taskKindLabel(data.taskKind)}</span>
-        </span>
         <strong>{data.name}</strong>
+        <span className="task-node__capabilities">
+          {operations.map((operation) => (
+            <span className="task-node__capability" key={operation.kind}>
+              <OperationIcon kind={operation.kind} />
+              {operation.label}
+            </span>
+          ))}
+          {data.actions.length === 0 ? null : (
+            <span className="task-node__capability task-node__capability--action">
+              <OperationIcon kind="nexo_action" />
+              Nexo Action ×{data.actions.length}
+            </span>
+          )}
+        </span>
         <span className="task-node__meta">
           <span className="task-node__status-mark" aria-hidden="true" />
           {data.statusLabel}
@@ -102,10 +125,12 @@ const nodeTypes = { task: TaskNode, dag: DagNode } satisfies NodeTypes;
 function ControlledGraph({
   model,
   selectedTaskName,
+  restoreTaskName,
   onTaskSelect,
 }: {
   model: DagFlowModel;
   selectedTaskName: string | null;
+  restoreTaskName: string | null;
   onTaskSelect: SelectTask;
 }) {
   const [nodes, setNodes] = useNodesState<DagFlowNode>(model.nodes);
@@ -155,7 +180,7 @@ function ControlledGraph({
   };
 
   return (
-    <TaskSelectionContext.Provider value={onTaskSelect}>
+    <TaskSelectionContext.Provider value={{ selectTask: onTaskSelect, restoreTaskName }}>
       <ReactFlow<DagFlowNode, DagFlowEdge>
         aria-label="Interactive DAG dependency graph"
         nodes={nodes}
@@ -195,10 +220,12 @@ function ControlledGraph({
 export function DagGraphCanvas({
   model,
   selectedTaskName,
+  restoreTaskName,
   onTaskSelect,
 }: {
   model: DagFlowModel;
   selectedTaskName: string | null;
+  restoreTaskName: string | null;
   onTaskSelect: SelectTask;
 }) {
   return (
@@ -207,6 +234,7 @@ export function DagGraphCanvas({
         <ControlledGraph
           model={model}
           selectedTaskName={selectedTaskName}
+          restoreTaskName={restoreTaskName}
           onTaskSelect={onTaskSelect}
         />
       </ReactFlowProvider>

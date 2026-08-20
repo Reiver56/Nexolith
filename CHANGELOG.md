@@ -26,6 +26,10 @@ not-yet-authorized step; this file records what shipped, not when it is cut.
   failures fail the pipeline and existing DAG retries can invoke both the destination write and
   action again. Nexolith does not persist action receipts, so the guarantee is at-least-once with
   handler-owned deduplication, not exactly-once delivery.
+- Added safe typed Nexo Function and Nexo Action metadata to Monitor's DAG graph and task drawer.
+  Functions, Actions, Python, and SQL operations now have distinct local icons and labels; Actions
+  remain attached to their owning task and explain their preflight, post-write, at-least-once
+  lifecycle without exposing raw configuration, connection details, or idempotency-key values.
 
 ### v0.3.4 — Web UI Foundations
 

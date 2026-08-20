@@ -1,63 +1,49 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 
-import { getDagTaskSource } from "../../../api/client";
-import type { ApiErrorCode } from "../../../api/types";
+import type { DagGraphNexoAction, DagGraphOperation, DagGraphTask } from "../../../api/types";
 import { StatusBadge } from "../../../components/StatusBadge";
-import { useApiResource } from "../../../hooks/useApiResource";
 import { deliberateMotionDuration } from "../../../utils/motion";
-import { TaskKindIcon } from "./TaskKindIcon";
-import { taskKindLabel } from "./taskKinds";
+import { OperationIcon } from "./OperationIcon";
 
-function errorMessage(code: ApiErrorCode | undefined, fallback: string): string {
-  if (code === "source_access_not_allowed") {
-    return "Source details are available only from a loopback-only Nexolith API.";
+function phaseLabel(operation: DagGraphOperation): string {
+  if (operation.phase === "task") {
+    return "Task";
   }
-  if (code === "task_source_too_large") {
-    return "This source is larger than the 256 KiB display limit.";
+  if (operation.phase === "transformation") {
+    return "Transformation";
   }
-  if (code === "task_source_binary" || code === "task_source_invalid_encoding") {
-    return "This source cannot be displayed as UTF-8 text.";
-  }
-  if (code === "task_source_unavailable") {
-    return "This task source is unavailable or unreadable.";
-  }
-  if (code === "task_not_found" || code === "dag_not_found") {
-    return "This task is no longer present in the registered DAG.";
-  }
-  return fallback;
+  return operation.phase === "source" ? "Source" : "Destination";
+}
+
+function operatorLabel(operator: DagGraphNexoAction["condition_operator"]): string {
+  return operator.replaceAll("_", " ");
 }
 
 export function TaskDetailsPanel({
-  dagName,
-  taskName,
-  refreshToken,
+  task,
   open,
   onClose,
   onExited,
 }: {
-  dagName: string;
-  taskName: string;
-  refreshToken: number;
+  task: DagGraphTask;
   open: boolean;
   onClose: () => void;
   onExited: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
-  const load = useCallback(
-    (signal: AbortSignal) => getDagTaskSource(dagName, taskName, signal),
-    [dagName, taskName],
-  );
-  const { resource, reload } = useApiResource(
-    load,
-    "Unable to load task details.",
-    refreshToken,
-  );
 
   useEffect(() => {
-    if (open) {
-      closeRef.current?.focus();
+    if (!open) {
+      return;
     }
-  }, [open, taskName]);
+    closeRef.current?.focus();
+    const frame = window.requestAnimationFrame(() => {
+      closeRef.current?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [open, task.name]);
 
   useEffect(() => {
     if (open) {
@@ -92,14 +78,14 @@ export function TaskDetailsPanel({
       <header className="task-details-panel__header">
         <div>
           <p className="eyebrow">Task details</p>
-          <h2 id="task-details-title">{taskName}</h2>
+          <h2 id="task-details-title">{task.name}</h2>
         </div>
         <button
           ref={closeRef}
           className="icon-button task-details-panel__close"
           type="button"
           onClick={onClose}
-          aria-label={`Close details for ${taskName}`}
+          aria-label={`Close details for ${task.name}`}
           title="Close task details"
         >
           <svg aria-hidden="true" viewBox="0 0 20 20">
@@ -107,65 +93,81 @@ export function TaskDetailsPanel({
           </svg>
         </button>
       </header>
-      {resource.status === "loading" ? (
-        <p className="task-details-panel__state" role="status">Loading task details…</p>
-      ) : resource.status === "error" ? (
-        <div className="task-details-panel__state" role="alert">
-          <p>{errorMessage(resource.code, resource.message)}</p>
-          <button className="button button--secondary button--compact" type="button" onClick={reload}>
-            Try again
-          </button>
-        </div>
-      ) : (
-        <div className="task-details-panel__content">
-          <dl className="task-details-list">
-            <div>
-              <dt>Kind</dt>
-              <dd className="task-details-kind">
-                <TaskKindIcon kind={resource.data.kind} />
-                {taskKindLabel(resource.data.kind)}
-              </dd>
+      <div className="task-details-panel__content">
+        <dl className="task-details-list">
+          <div>
+            <dt>Latest status</dt>
+            <dd>
+              {task.status === null ? (
+                <span className="muted">No persisted status</span>
+              ) : (
+                <StatusBadge value={task.status} />
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>Dependencies</dt>
+            <dd>{task.depends_on.length === 0 ? "None" : task.depends_on.join(", ")}</dd>
+          </div>
+        </dl>
+
+        <section className="task-capabilities" aria-labelledby="task-operations-title">
+          <h3 id="task-operations-title">Operations</h3>
+          <ol className="task-capabilities__list">
+            {task.operations.map((operation, index) => (
+              <li key={`${operation.kind}-${operation.phase}-${String(index)}`}>
+                <OperationIcon kind={operation.kind} />
+                <div>
+                  <strong>{operation.label}</strong>
+                  <span>{phaseLabel(operation)}</span>
+                  {operation.kind === "sql" ? <span>{operation.backend}</span> : null}
+                  {operation.kind === "nexo_function" ? (
+                    <code>{operation.identifier}</code>
+                  ) : null}
+                </div>
+                {operation.kind === "python" && operation.preview !== null ? (
+                  <pre data-language="python" aria-label={`${operation.label} signature`}>
+                    <code>{operation.preview}</code>
+                  </pre>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {task.actions.length === 0 ? null : (
+          <section className="task-actions" aria-labelledby="task-actions-title">
+            <div className="task-actions__heading">
+              <h3 id="task-actions-title">Nexo Actions</h3>
+              <span>{task.actions.length}</span>
             </div>
-            <div>
-              <dt>Latest status</dt>
-              <dd>
-                {resource.data.latest_status === null ? (
-                  <span className="muted">No persisted status</span>
-                ) : (
-                  <StatusBadge value={resource.data.latest_status} />
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>Dependencies</dt>
-              <dd>
-                {resource.data.depends_on.length === 0
-                  ? "None"
-                  : resource.data.depends_on.join(", ")}
-              </dd>
-            </div>
-            <div>
-              <dt>Retries</dt>
-              <dd>
-                {resource.data.retry.retries} · {resource.data.retry.retry_delay_seconds}s delay · {resource.data.retry.retry_backoff_multiplier}× backoff
-              </dd>
-            </div>
-          </dl>
-          <section className="task-source" aria-labelledby="task-source-title">
-            <div className="task-source__heading">
-              <h3 id="task-source-title">
-                {resource.data.kind === "script" ? "Python source" : "Pipeline definition"}
-              </h3>
-              <span>{resource.data.source_size_bytes.toLocaleString()} bytes</span>
-            </div>
-            {resource.data.source.length === 0 ? (
-              <p className="task-source__empty">The source file is empty.</p>
-            ) : (
-              <pre data-language={resource.data.source_language}><code>{resource.data.source}</code></pre>
-            )}
+            <p className="task-actions__lifecycle">
+              Preflight runs before the destination write. Handlers run after WriteCompleted with
+              at-least-once delivery. A retry may repeat both the destination write and Action
+              invocation. Handlers receive a stable idempotency key; deduplication remains the
+              handler&apos;s responsibility.
+            </p>
+            <ul className="task-actions__list">
+              {task.actions.map((action) => (
+                <li key={action.identifier}>
+                  <OperationIcon kind={action.kind} />
+                  <div>
+                    <strong>{action.label}</strong>
+                    <code>{action.identifier}</code>
+                    <span>
+                      Match {action.match}: {action.condition_field ?? "protected field"}{" "}
+                      {operatorLabel(action.condition_operator)}
+                    </span>
+                    {action.idempotency_fields.length === 0 ? null : (
+                      <span>Idempotency fields: {action.idempotency_fields.join(", ")}</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </section>
-        </div>
-      )}
+        )}
+      </div>
     </aside>
   );
 }

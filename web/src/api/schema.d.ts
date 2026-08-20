@@ -356,6 +356,103 @@ export interface components {
             name: string;
             status: components["schemas"]["TaskRunStatus"];
         };
+        /** DagGraphNexoActionResponse */
+        DagGraphNexoActionResponse: {
+            /** Condition Field */
+            condition_field?: string | null;
+            /**
+             * Condition Operator
+             * @enum {string}
+             */
+            condition_operator: "equals" | "not_equals" | "greater_than" | "greater_than_or_equal" | "less_than" | "less_than_or_equal";
+            /**
+             * Delivery
+             * @constant
+             */
+            delivery: "at_least_once";
+            /** Idempotency Fields */
+            idempotency_fields: string[];
+            /** Identifier */
+            identifier: string;
+            /**
+             * Invocation
+             * @constant
+             */
+            invocation: "after_write_completed";
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "nexo_action";
+            /** Label */
+            label: string;
+            /**
+             * Match
+             * @enum {string}
+             */
+            match: "any" | "all";
+            /**
+             * Preflight
+             * @constant
+             */
+            preflight: "before_destination_write";
+        };
+        /** DagGraphNexoFunctionOperationResponse */
+        DagGraphNexoFunctionOperationResponse: {
+            /**
+             * Backend
+             * @enum {string}
+             */
+            backend: "sqlite" | "postgresql";
+            /** Identifier */
+            identifier: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "nexo_function";
+            /** Label */
+            label: string;
+            /**
+             * Phase
+             * @constant
+             */
+            phase: "destination";
+        };
+        /** DagGraphPipelineOperationResponse */
+        DagGraphPipelineOperationResponse: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "pipeline";
+            /** Label */
+            label: string;
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "source" | "destination";
+        };
+        /** DagGraphPythonOperationResponse */
+        DagGraphPythonOperationResponse: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "python";
+            /** Label */
+            label: string;
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "task" | "transformation";
+            /** Preview */
+            preview?: string | null;
+            /** Preview Language */
+            preview_language?: "python" | null;
+        };
         /** DagGraphResponse */
         DagGraphResponse: {
             /** Enabled */
@@ -384,8 +481,30 @@ export interface components {
             started_at: string;
             status: components["schemas"]["DagRunStatus"];
         };
+        /** DagGraphSqlOperationResponse */
+        DagGraphSqlOperationResponse: {
+            /**
+             * Backend
+             * @enum {string}
+             */
+            backend: "sqlite" | "postgresql";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "sql";
+            /** Label */
+            label: string;
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "source" | "destination";
+        };
         /** DagGraphTaskResponse */
         DagGraphTaskResponse: {
+            /** Actions */
+            actions: components["schemas"]["DagGraphNexoActionResponse"][];
             /** Depends On */
             depends_on: string[];
             /**
@@ -395,6 +514,8 @@ export interface components {
             kind: "pipeline" | "script";
             /** Name */
             name: string;
+            /** Operations */
+            operations: (components["schemas"]["DagGraphPipelineOperationResponse"] | components["schemas"]["DagGraphPythonOperationResponse"] | components["schemas"]["DagGraphSqlOperationResponse"] | components["schemas"]["DagGraphNexoFunctionOperationResponse"])[];
             status: components["schemas"]["TaskRunStatus"] | null;
         };
         /** DagListResponse */

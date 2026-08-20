@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getDagGraph } from "../../../api/client";
 import type { DagGraph } from "../../../api/types";
@@ -10,9 +10,8 @@ import { AppLink } from "../../../router";
 import { formatDuration, formatTimestamp } from "../../../utils/format";
 import { ScheduleControl, TriggerDagControl } from "../DagActions";
 import { DagGraphCanvas } from "./DagGraphCanvas";
+import { OperationIcon } from "./OperationIcon";
 import { TaskDetailsPanel } from "./TaskDetailsPanel";
-import { TaskKindIcon } from "./TaskKindIcon";
-import { taskKindLabel } from "./taskKinds";
 import { buildDagFlow } from "./layout";
 import type { DagFlowModel } from "./layout";
 
@@ -128,15 +127,75 @@ function GraphLegend() {
   );
 }
 
+function AccessibleTaskButton({
+  task,
+  selected,
+  restoreFocus,
+  onTaskSelect,
+}: {
+  task: DagFlowModel["dependencySummary"][number];
+  selected: boolean;
+  restoreFocus: boolean;
+  onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const operations = task.operations.filter(
+    (operation, index, all) =>
+      all.findIndex((candidate) => candidate.kind === operation.kind) === index,
+  );
+  const capabilityLabel = [
+    ...operations.map((operation) => operation.label),
+    ...(task.actions.length === 0
+      ? []
+      : [`${String(task.actions.length)} Nexo ${task.actions.length === 1 ? "Action" : "Actions"}`]),
+  ].join(", ");
+  useEffect(() => {
+    if (restoreFocus) {
+      buttonRef.current?.focus();
+    }
+  }, [restoreFocus]);
+  return (
+    <button
+      ref={buttonRef}
+      className="graph-summary__task-button"
+      type="button"
+      data-task-name={task.name}
+      onClick={(event) => {
+        onTaskSelect(task.name, event.currentTarget);
+      }}
+      aria-pressed={selected}
+      aria-label={`Open details for ${task.name}, ${capabilityLabel}, ${task.statusLabel}`}
+    >
+      <strong>{task.name}</strong>
+      <span className="graph-summary__task-capabilities">
+        {operations.map((operation) => (
+          <span key={operation.kind}>
+            <OperationIcon kind={operation.kind} />
+            {operation.label}
+          </span>
+        ))}
+        {task.actions.length === 0 ? null : (
+          <span>
+            <OperationIcon kind="nexo_action" />
+            Nexo Action ×{task.actions.length}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
 function AccessibleSummary({
   graph,
   model,
   selectedTaskName,
+  restoreTaskName,
   onTaskSelect,
 }: {
   graph: DagGraph;
   model: DagFlowModel;
   selectedTaskName: string | null;
+  restoreTaskName: string | null;
   onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
 }) {
   return (
@@ -159,20 +218,12 @@ function AccessibleSummary({
         {model.dependencySummary.map((task) => (
           <li key={task.name}>
             <div>
-              <button
-                className="graph-summary__task-button"
-                type="button"
-                data-task-name={task.name}
-                onClick={(event) => {
-                  onTaskSelect(task.name, event.currentTarget);
-                }}
-                aria-pressed={selectedTaskName === task.name}
-                aria-label={`Open details for ${task.name}, ${taskKindLabel(task.kind)}, ${task.statusLabel}`}
-              >
-                <TaskKindIcon kind={task.kind} />
-                <strong>{task.name}</strong>
-                <span>{taskKindLabel(task.kind)}</span>
-              </button>
+              <AccessibleTaskButton
+                task={task}
+                selected={selectedTaskName === task.name}
+                restoreFocus={restoreTaskName === task.name}
+                onTaskSelect={onTaskSelect}
+              />
               <span>{task.statusLabel}</span>
             </div>
             <p>{task.dependsOn.length === 0 ? "No dependencies" : `Depends on ${task.dependsOn.join(", ")}`}</p>
@@ -194,8 +245,8 @@ function AccessibleSummary({
 
 function LoadedGraph({
   graph,
-  graphRevision,
   selectedTaskName,
+  restoreTarget,
   panelTaskName,
   onTaskSelect,
   onTaskClose,
@@ -205,17 +256,18 @@ function LoadedGraph({
   refreshError,
 }: {
   graph: DagGraph;
-  graphRevision: number;
   selectedTaskName: string | null;
+  restoreTarget: { name: string; surface: "graph" | "summary" } | null;
   panelTaskName: string | null;
   onTaskSelect: (taskName: string, trigger: HTMLButtonElement) => void;
-  onTaskClose: () => void;
-  onTaskExited: () => void;
+  onTaskClose: (taskName: string) => void;
+  onTaskExited: (taskName: string) => void;
   refresh: () => void;
   refreshing: boolean;
   refreshError?: string;
 }) {
   const built = useMemo(() => buildSafely(graph), [graph]);
+  const panelTask = graph.tasks.find((task) => task.name === panelTaskName) ?? null;
   return (
     <>
       <nav className="breadcrumbs" aria-label="Breadcrumb">
@@ -257,20 +309,25 @@ function LoadedGraph({
       ) : (
         <>
           <GraphLegend />
-          <div className="graph-workspace" data-panel-open={panelTaskName !== null || undefined}>
+          <div className="graph-workspace" data-panel-open={panelTask !== null || undefined}>
             <DagGraphCanvas
               model={built.model}
               selectedTaskName={selectedTaskName}
+              restoreTaskName={
+                restoreTarget?.surface === "graph" ? restoreTarget.name : null
+              }
               onTaskSelect={onTaskSelect}
             />
-            {panelTaskName === null ? null : (
+            {panelTask === null ? null : (
               <TaskDetailsPanel
-                dagName={graph.name}
-                taskName={panelTaskName}
-                refreshToken={graphRevision}
+                task={panelTask}
                 open={selectedTaskName !== null}
-                onClose={onTaskClose}
-                onExited={onTaskExited}
+                onClose={() => {
+                  onTaskClose(panelTask.name);
+                }}
+                onExited={() => {
+                  onTaskExited(panelTask.name);
+                }}
               />
             )}
           </div>
@@ -278,6 +335,9 @@ function LoadedGraph({
             graph={graph}
             model={built.model}
             selectedTaskName={selectedTaskName}
+            restoreTaskName={
+              restoreTarget?.surface === "summary" ? restoreTarget.name : null
+            }
             onTaskSelect={onTaskSelect}
           />
         </>
@@ -289,25 +349,34 @@ function LoadedGraph({
 export function DagGraphPage({ dagName }: { dagName: string }) {
   const [selectedTaskName, setSelectedTaskName] = useState<string | null>(null);
   const [panelTaskName, setPanelTaskName] = useState<string | null>(null);
-  const restoreFocusRef = useRef<HTMLButtonElement | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<{
+    name: string;
+    surface: "graph" | "summary";
+  } | null>(null);
+  const selectedSurfaceRef = useRef<"graph" | "summary">("graph");
+  const selectedTriggerRef = useRef<HTMLButtonElement | null>(null);
   const selectTask = useCallback((taskName: string, trigger: HTMLButtonElement) => {
-    restoreFocusRef.current = trigger;
+    selectedTriggerRef.current = trigger;
+    selectedSurfaceRef.current = trigger.classList.contains("graph-summary__task-button")
+      ? "summary"
+      : "graph";
+    setRestoreTarget(null);
     setPanelTaskName(taskName);
     setSelectedTaskName(taskName);
   }, []);
-  const closeTask = useCallback(() => {
-    const selectedName = selectedTaskName;
+  const closeTask = useCallback((taskName: string) => {
+    const surface = selectedSurfaceRef.current;
+    const connectedTrigger = selectedTriggerRef.current?.isConnected
+      ? selectedTriggerRef.current
+      : [...document.querySelectorAll<HTMLButtonElement>("[data-task-name]")].find(
+          (candidate) =>
+            candidate.dataset.taskName === taskName &&
+            candidate.classList.contains("graph-summary__task-button") === (surface === "summary"),
+        );
+    connectedTrigger?.focus();
+    setRestoreTarget({ name: taskName, surface });
     setSelectedTaskName(null);
-    const trigger = restoreFocusRef.current;
-    if (trigger?.isConnected) {
-      trigger.focus();
-      return;
-    }
-    const fallback = [...document.querySelectorAll<HTMLButtonElement>("[data-task-name]")].find(
-      (candidate) => candidate.dataset.taskName === selectedName,
-    );
-    fallback?.focus();
-  }, [selectedTaskName]);
+  }, []);
   const finishTaskClose = useCallback(() => {
     setPanelTaskName(null);
   }, []);
@@ -315,6 +384,9 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
     async (signal: AbortSignal) => {
       const graph = await getDagGraph(dagName, signal);
       setSelectedTaskName((current) =>
+        current === null || graph.tasks.some((task) => task.name === current) ? current : null,
+      );
+      setPanelTaskName((current) =>
         current === null || graph.tasks.some((task) => task.name === current) ? current : null,
       );
       return graph;
@@ -339,8 +411,8 @@ export function DagGraphPage({ dagName }: { dagName: string }) {
   return (
     <LoadedGraph
       graph={resource.data}
-      graphRevision={resource.revision}
       selectedTaskName={selectedTaskName}
+      restoreTarget={restoreTarget}
       panelTaskName={panelTaskName}
       onTaskSelect={selectTask}
       onTaskClose={closeTask}

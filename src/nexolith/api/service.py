@@ -1,17 +1,27 @@
 """UI-independent read queries backing the monitoring API."""
 
+import re
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import yaml
+from pydantic import ValidationError
+
 from nexolith.api.models import (
     ApiErrorCode,
     DagDetailResponse,
     DagGraphHistoricalTaskResponse,
+    DagGraphNexoActionResponse,
+    DagGraphNexoFunctionOperationResponse,
+    DagGraphOperationResponse,
+    DagGraphPipelineOperationResponse,
+    DagGraphPythonOperationResponse,
     DagGraphResponse,
     DagGraphRunResponse,
+    DagGraphSqlOperationResponse,
     DagGraphTaskResponse,
     DagRegistrationResponse,
     DagRegistrationStatus,
@@ -37,14 +47,27 @@ from nexolith.application.actions import (
     RegisteredDagNotFoundError,
     RegisteredDagSourceMissingError,
 )
-from nexolith.dag.models import DagConfig
+from nexolith.config.models import (
+    CsvDestinationConfig,
+    CsvSourceConfig,
+    NexoFunctionDestinationConfig,
+    PipelineConfig,
+    PythonJobConfig,
+    SqlDestinationConfig,
+    SqlSourceConfig,
+)
+from nexolith.dag.models import DagConfig, DagTaskConfig
 from nexolith.dag.validator import read_dag_config
 from nexolith.exceptions import ConfigurationError
 from nexolith.scheduler import SchedulerQueryState, SchedulerStatusSnapshot
-from nexolith.state import DagRecord, DagRunRecord, StateStore
+from nexolith.state import DagRecord, DagRunRecord, StateStore, TaskRunStatus
 
 SchedulerStatusQuery = Callable[[], SchedulerStatusSnapshot]
 TASK_SOURCE_SIZE_LIMIT_BYTES = 256 * 1024
+PIPELINE_METADATA_SIZE_LIMIT_BYTES = 256 * 1024
+SAFE_METADATA_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}\Z")
+SAFE_PYTHON_ENTRYPOINT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+SENSITIVE_NAME_PARTS = ("password", "secret", "token", "credential", "api_key", "apikey")
 
 
 class ApiQueryError(RuntimeError):
@@ -106,13 +129,7 @@ class ApiQueryService:
             schedule=record.schedule,
             trigger=trigger,
             tasks=[
-                DagGraphTaskResponse(
-                    name=task.name,
-                    kind="script" if task.script is not None else "pipeline",
-                    depends_on=list(task.depends_on),
-                    status=statuses.get(task.name),
-                )
-                for task in config.tasks
+                self._graph_task(record, task, statuses.get(task.name)) for task in config.tasks
             ],
             latest_run=(
                 DagGraphRunResponse(
@@ -130,6 +147,119 @@ class ApiQueryService:
                 if task.task_name not in current_names
             ],
         )
+
+    @staticmethod
+    def _graph_task(
+        record: DagRecord, task: DagTaskConfig, status: TaskRunStatus | None
+    ) -> DagGraphTaskResponse:
+        pipeline = (
+            _read_pipeline_metadata(record, task.pipeline) if task.pipeline is not None else None
+        )
+        return DagGraphTaskResponse(
+            name=task.name,
+            kind="script" if task.script is not None else "pipeline",
+            depends_on=list(task.depends_on),
+            status=status,
+            operations=ApiQueryService._task_operations(task, pipeline),
+            actions=ApiQueryService._task_actions(pipeline),
+        )
+
+    @staticmethod
+    def _task_operations(
+        task: DagTaskConfig, pipeline: PipelineConfig | None
+    ) -> list[DagGraphOperationResponse]:
+        if task.script is not None:
+            return [
+                DagGraphPythonOperationResponse(
+                    kind="python",
+                    phase="task",
+                    label="Python script",
+                    preview=_python_preview(task.entrypoint, "context"),
+                    preview_language="python" if _safe_python_name(task.entrypoint) else None,
+                )
+            ]
+        if pipeline is None:
+            return [
+                DagGraphPipelineOperationResponse(kind="pipeline", phase="source", label="Pipeline")
+            ]
+        operations: list[DagGraphOperationResponse] = []
+        source = pipeline.source
+        if isinstance(source, SqlSourceConfig):
+            operations.append(
+                DagGraphSqlOperationResponse(
+                    kind="sql", phase="source", label="SQL source", backend=source.type
+                )
+            )
+        elif isinstance(source, CsvSourceConfig):
+            operations.append(
+                DagGraphPipelineOperationResponse(
+                    kind="pipeline", phase="source", label="Pipeline source"
+                )
+            )
+        for transformation in pipeline.transformations:
+            if isinstance(transformation, PythonJobConfig):
+                operations.append(
+                    DagGraphPythonOperationResponse(
+                        kind="python",
+                        phase="transformation",
+                        label="Python transformation",
+                        preview=_python_preview(transformation.entrypoint, "rows, context"),
+                        preview_language=(
+                            "python" if _safe_python_name(transformation.entrypoint) else None
+                        ),
+                    )
+                )
+        destination = pipeline.destination
+        if isinstance(destination, NexoFunctionDestinationConfig):
+            operations.append(
+                DagGraphNexoFunctionOperationResponse(
+                    kind="nexo_function",
+                    phase="destination",
+                    label="Nexo Function",
+                    identifier=destination.type,
+                    backend=destination.target.type,
+                )
+            )
+        elif isinstance(destination, SqlDestinationConfig):
+            operations.append(
+                DagGraphSqlOperationResponse(
+                    kind="sql",
+                    phase="destination",
+                    label="SQL destination",
+                    backend=destination.type,
+                )
+            )
+        elif isinstance(destination, CsvDestinationConfig):
+            operations.append(
+                DagGraphPipelineOperationResponse(
+                    kind="pipeline", phase="destination", label="Pipeline destination"
+                )
+            )
+        return operations
+
+    @staticmethod
+    def _task_actions(pipeline: PipelineConfig | None) -> list[DagGraphNexoActionResponse]:
+        if pipeline is None:
+            return []
+        return [
+            DagGraphNexoActionResponse(
+                kind="nexo_action",
+                label="Nexo Action",
+                identifier=action.type,
+                match=action.match.value,
+                condition_field=_safe_metadata_name(action.condition.field),
+                condition_operator=action.condition.operator.value,
+                idempotency_fields=[
+                    field
+                    for field in action.idempotency.fields
+                    if _safe_metadata_name(field) is not None
+                ][:32],
+                preflight="before_destination_write",
+                invocation="after_write_completed",
+                delivery="at_least_once",
+            )
+            for action in pipeline.actions
+        ]
 
     def get_task_source(self, dag_name: str, task_name: str) -> DagTaskSourceResponse:
         record = self._store.get_dag(dag_name)
@@ -370,6 +500,42 @@ def _optional_timestamp(value: str | None) -> datetime | None:
 
 def _safe_error(value: str | None, summary: str) -> str | None:
     return summary if value else None
+
+
+def _read_pipeline_metadata(record: DagRecord, reference: str | None) -> PipelineConfig | None:
+    if reference is None:
+        return None
+    path = Path(reference)
+    if not path.is_absolute():
+        path = Path(record.source_path).parent / path
+    try:
+        with path.open("rb") as pipeline_file:
+            content = pipeline_file.read(PIPELINE_METADATA_SIZE_LIMIT_BYTES + 1)
+        if len(content) > PIPELINE_METADATA_SIZE_LIMIT_BYTES:
+            return None
+        document = yaml.safe_load(content.decode("utf-8"))
+        if not isinstance(document, dict):
+            return None
+        return PipelineConfig.validate_document(document)
+    except (OSError, UnicodeError, yaml.YAMLError, ValidationError):
+        return None
+
+
+def _safe_python_name(value: str) -> bool:
+    return SAFE_PYTHON_ENTRYPOINT.fullmatch(value) is not None
+
+
+def _python_preview(entrypoint: str, arguments: str) -> str | None:
+    if not _safe_python_name(entrypoint):
+        return None
+    return f"def {entrypoint}({arguments}): ..."
+
+
+def _safe_metadata_name(value: str) -> str | None:
+    normalized = value.casefold()
+    if any(part in normalized for part in SENSITIVE_NAME_PARTS):
+        return None
+    return value if SAFE_METADATA_NAME.fullmatch(value) is not None else None
 
 
 def _read_task_source(path: Path) -> tuple[str, int]:
