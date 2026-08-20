@@ -414,6 +414,71 @@ def test_upsert_rejects_columns_absent_from_destination_schema(tmp_path: Path) -
         )
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            {"id": 1, "a": "new-a"},
+            {"id": 2, "a": "two-a", "b": "recognizable_row_secret"},
+        ],
+        [
+            {"id": 1, "a": "new-a", "b": "recognizable_row_secret"},
+            {"id": 2, "a": "two-a"},
+        ],
+    ],
+)
+def test_upsert_rejects_inconsistent_row_columns_without_writing(
+    tmp_path: Path, rows: Rows
+) -> None:
+    database = tmp_path / "items.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
+    connection.execute("INSERT INTO items VALUES (1, 'original-a', 'original-b')")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        ConnectorError,
+        match=r"^SQL upsert requires every row to contain the same columns\.$",
+    ) as captured:
+        SqlDestination(_sqlite_url(database), "items", "append").upsert(rows, ("id",))
+
+    assert "recognizable_row_secret" not in str(captured.value)
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id, a, b FROM items ORDER BY id").fetchall() == [
+            (1, "original-a", "original-b")
+        ]
+    finally:
+        connection.close()
+
+
+def test_upsert_accepts_uniform_columns_in_different_dictionary_order(tmp_path: Path) -> None:
+    database = tmp_path / "items.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
+    connection.execute("INSERT INTO items VALUES (1, 'old-a', 'old-b')")
+    connection.commit()
+    connection.close()
+    rows: Rows = [
+        {"id": 1, "a": "new-a", "b": "new-b"},
+        {"b": "two-b", "a": "two-a", "id": 2},
+    ]
+
+    assert SqlDestination(_sqlite_url(database), "items", "append").upsert(rows, ("id",)) == len(
+        rows
+    )
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id, a, b FROM items ORDER BY id").fetchall() == [
+            (1, "new-a", "new-b"),
+            (2, "two-a", "two-b"),
+        ]
+    finally:
+        connection.close()
+
+
 def test_upsert_batch_failure_rolls_back_updates_and_inserts(tmp_path: Path) -> None:
     database = tmp_path / "items.db"
     connection = sqlite3.connect(database)

@@ -191,6 +191,9 @@ class SqlDestination:
         """Atomically insert or update rows using a declared unique key."""
         if not rows:
             raise ConnectorError("Cannot upsert an empty dataset to SQL")
+        expected_columns = set(rows[0])
+        if any(set(row) != expected_columns for row in rows[1:]):
+            raise ConnectorError("SQL upsert requires every row to contain the same columns.")
         if not conflict_keys:
             raise ConnectorError("SQL upsert requires at least one conflict key")
         if len(conflict_keys) != len(set(conflict_keys)) or any(not key for key in conflict_keys):
